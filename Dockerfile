@@ -4,7 +4,7 @@
 # The runtime is distroless (no shell, no npm, no apt). Both are pinned by digest in the
 # FROM lines so Dependabot can bump them.
 
-FROM node:22-trixie-slim@sha256:154ba2f4d6fec323d28e4f4bb86bba4677f1223391a1979cf521304e03a98dfa AS builder
+FROM node:25-trixie-slim@sha256:aabbe39553d15ede8a97cc60c9e1a97034ff772afcf696ea42b94e7f5f2ec71b AS builder
 RUN apt-get update && apt-get upgrade -y \
   && apt-get install -y --no-install-recommends binutils \
   && rm -rf /var/lib/apt/lists/*
