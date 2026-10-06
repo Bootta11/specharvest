@@ -1,0 +1,35 @@
+# VCS / editor / CI
+.git
+.github
+.gitignore
+.vscode
+.idea
+
+# Dependencies and build output (rebuilt in the image)
+node_modules
+**/node_modules
+**/dist
+
+# Env files: secrets come from the host at runtime
+.env
+.env.*
+!.env.example
+
+# Local state
+data
+*.db
+*.db-*
+.run
+tmp
+*.log
+
+# Not needed to build or run
+docs
+scripts
+README.md
+compose.yaml
+docker-compose*.yml
+Dockerfile
+.dockerignore
+**/*.test.ts
+server/vitest.config.ts

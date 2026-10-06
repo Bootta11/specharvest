@@ -1,0 +1,47 @@
+# One file for both uses: a host with only this file + .env pulls the published image;
+# a checkout can build it locally with `docker compose up -d --build`.
+services:
+  app:
+    image: ${IMAGE:-ghcr.io/bootta11/specharvest:latest}
+    build: .
+    pull_policy: ${PULL_POLICY:-missing}
+    init: true
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Fixed inside the container; HOST_PORT only picks the host port.
+      PORT: "3100"
+      DATA_DIR: /app/data
+    ports:
+      # Defaults to localhost only: Docker-published ports bypass host firewalls (ufw).
+      # Put a reverse proxy in front, or set HOST_BIND to a private/VPN address.
+      - "${HOST_BIND:-127.0.0.1}:${HOST_PORT:-3100}:3100"
+    volumes:
+      - specharvest-data:/app/data
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: ${MEM_LIMIT:-1g}
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options: { max-size: 10m, max-file: "3" }
+
+  # Optional bridge to 130+ notification services: docker compose --profile apprise up -d
+  # then Settings → Apprise → API URL http://apprise:8000
+  apprise:
+    image: caronc/apprise:latest
+    restart: unless-stopped
+    profiles: [apprise]
+    volumes:
+      - apprise-config:/config
+    logging:
+      driver: json-file
+      options: { max-size: 10m, max-file: "3" }
+
+volumes:
+  specharvest-data:
+  apprise-config:

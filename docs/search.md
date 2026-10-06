@@ -1,0 +1,106 @@
+# Search & web lookups
+
+`POST /api/search` with `{ collectionId?, query? | plan?, enrich? }`.
+
+## Query plan
+
+The LLM (given the key registry with sample values / numeric ranges) turns the
+request into:
+
+```json
+{
+  "filters": [{ "key": "fuel_type", "op": "eq", "value": "diesel" },
+              { "key": "engine_power_kw", "op": "gt", "value": 100 }],
+  "sort": { "key": "mileage_km", "dir": "asc" },
+  "semanticText": "comfortable family car",
+  "missingAttributes": [{ "key": "acceleration_0_100_s", "type": "number", "unit": "s", "label": "0-100 km/h acceleration" }],
+  "show": ["boot_capacity_liters"]
+}
+```
+
+`show` lists attributes the user wants to see or compare without a condition
+("compare boot space and power"). Unknown `show` keys are added to
+`missingAttributes` and looked up like any other missing key; known ones with
+poor coverage also trigger a lookup. Older plans without `show` still parse.
+
+Plans are **cached** in `query_cache` by (collection, lowercased/trimmed
+request). A repeated search costs no LLM call. A cached plan is used only
+while the collection's key registry is unchanged (sha1 of `key:type:unit`).
+New, merged or web-added keys trigger a fresh parse. `GET /api/searches`
+lists recent cached requests (the UI shows them as *Recent* chips).
+
+The parser is also given every key already looked up on the web
+(`web_facts`, including "not found" ones). A later "boot space" request then
+reuses `trunk_volume_liters` and hits the cache instead of inventing
+`boot_capacity_liters` and paying for a new web search.
+
+Units are converted to the key's unit, other languages map to stored values
+("dizel" → "diesel"), superlatives become sorts. The UI shows the plan as chips;
+removing one re-runs the search with the edited `plan` (no LLM call).
+
+## Execution
+
+1. `filters.ts` builds a parametrized query (listings marked *gone* are
+   excluded unless `includeGone`) — keys are bound, never
+   interpolated (`json_extract(specs, '$.' || json_quote(?))`). Each condition
+   is `value IS NULL OR <cond>` so items **missing** a filtered key come back.
+2. Items missing an active filter key go to the **unknown** bucket ("can't be
+   judged yet") instead of disappearing.
+3. If `semanticText` is set, candidates are ranked by cosine similarity in
+   LanceDB (`item_id IN (…)` prefilter).
+4. An explicit sort wins; semantic score breaks ties; missing sort values go last.
+
+## Results list & sources
+
+When the plan names any fields (sort, filters, `show`, missing attributes), the
+UI defaults to a **List** view: one row per item, a column per requested field
+(sorted-by first), e.g. `biggest boot space` → Boot capacity 540 L, 420 L,
+350 L… The Cards/List choice is remembered per browser.
+
+Every value carries its source: **Listing** (scraped from the item's page,
+links to it) or 🌐 *host* (web lookup, links to `sourceUrl`, confidence in the
+tooltip). An item's `sources` map only holds non-page keys, so a value without
+an entry is from the page. Cells show "looking up…" while a lookup job runs.
+
+## Web lookups (enrichment)
+
+Triggered when the plan has `missingAttributes`, or a filtered/sorted key is
+present on fewer than `ENRICH_COVERAGE_THRESHOLD` (80 %) of candidates. Also
+available manually ("Look up on the web" under the unknown bucket,
+`POST /api/enrich`).
+
+- Items are grouped by `identity` (normalized brand/model/variant/year from
+  extraction), so **one lookup answers every listing of the same model**.
+- Spelling variants of the same product ("golf life+ 2.0 tdi" / "golf life plus
+  2.0 tdi 85kw") are grouped first (`server/src/enrich/group.ts`): identities
+  never seen before go to one LLM call per ~120 (purpose `group`), together with
+  the already-known products of the same brands. The result is saved in
+  `identity_aliases` (raw → canonical), so each identity is asked about only
+  once, and `web_facts` are stored under the canonical identity. Grouping is
+  strict: a deterministic check (`sameProduct`) rejects any merge whose brand,
+  year, displacement, power (hp/kW-aware), gearbox/drivetrain or trim words
+  differ. The longer name may only add engine words like "hybrid" or "t-gdi".
+  If the call fails, identities stay ungrouped and are retried next job.
+- Before a paid lookup, a value that another listing of the same product states
+  on **its own page** is copied (saved as a web fact with that listing's URL,
+  confidence 0.95).
+- Cached `web_facts` are applied synchronously during the search; only
+  never-looked-up identities start a background job (max `ENRICH_MAX_LOOKUPS`
+  per job, products with the most listings first). When capped, the job's
+  `itemsRemaining` drives a "Look up N more products" button, which re-runs
+  the search with enrichment so the next batch starts (the first is cached now).
+- "Not found" answers are retried after `ENRICH_NOT_FOUND_TTL_DAYS` (30, `0` =
+  never); found facts don't expire.
+- Each lookup is one chat completion with the OpenRouter server tool
+  `{"type":"openrouter:web_search","parameters":{"engine":"auto","max_results":5,"max_uses":2}}`
+  ([docs](https://openrouter.ai/docs/guides/features/server-tools/web-search)),
+  asking for value + unit + confidence + source URL per attribute.
+- Answers below `ENRICH_MIN_CONFIDENCE` (0.6) are cached as "not found".
+- A value from the item's own page always wins over a web value; re-crawls keep
+  web values the page still doesn't state.
+- The UI follows the job over SSE and re-runs the same plan with
+  `enrich: false` when it finishes (no loops).
+
+Cost: roughly one web search per distinct product per attribute set
+(OpenRouter's Exa engine is about $0.007/search) plus tokens. The job reports
+`webSearches` from `usage.server_tool_use`.

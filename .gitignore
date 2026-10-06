@@ -1,0 +1,31 @@
+# Dependencies
+node_modules
+
+# Build output
+dist
+*.tsbuildinfo
+.vite/
+coverage/
+
+# Runtime data (SQLite DB, LanceDB, downloaded models)
+data/
+
+# Dev process PIDs and logs
+.run/
+*.pid
+*.log
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+
+# Claude Code local settings
+.claude/settings.local.json

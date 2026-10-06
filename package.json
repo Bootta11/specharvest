@@ -1,0 +1,36 @@
+{
+  "name": "specharvest",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "shared",
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "dev": "./scripts/dev.sh",
+    "kill": "./scripts/kill.sh",
+    "dev:server": "npm run dev --workspace server",
+    "dev:client": "npm run dev --workspace client",
+    "build": "npm run build --workspace client",
+    "start": "npm run start --workspace server",
+    "typecheck": "npm run typecheck --workspace server && npm run typecheck --workspace client",
+    "test": "npm test --workspace server",
+    "seed:admin": "npm run seed:admin --workspace server --"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "allowScripts": {
+    "onnxruntime-node@1.30.0": true,
+    "sharp@0.35.5": true,
+    "esbuild@0.28.2": true,
+    "protobufjs@7.6.6": true
+  },
+  "overrides": {
+    "sharp": "^0.35.5",
+    "@lancedb/lancedb": {
+      "@huggingface/transformers": "^4.3.0"
+    }
+  }
+}
