@@ -24,6 +24,7 @@ const job = (over: Partial<Job> = {}): Job => ({
   webSearches: 0,
   llmCost: 0.0042,
   itemsRemaining: 0,
+  lookup: null,
   message: "40 new, 0 changed, 0 unchanged, 0 gone, 0 failed",
   error: null,
   startedAt: 0,

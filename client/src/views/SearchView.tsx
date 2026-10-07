@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import type { Collection, Filter, Item, QueryPlan, RecentSearch, SearchResponse, SpecKey } from "@specharvest/shared";
 import { formatSpecValue, humanizeKey, specLabel } from "@specharvest/shared";
 import { api, formatUsd, storageGet, storageSet, useJobStream, type AppConfig } from "../lib/api.ts";
+import { LookupSummary } from "../components/LookupSummary.tsx";
 import { GlobeIcon, ItemCard, formatPrice } from "../components/ItemCard.tsx";
 import { ItemModal } from "../components/ItemModal.tsx";
 import { CompareTable } from "../components/CompareTable.tsx";
@@ -305,17 +306,21 @@ export function SearchView({ config, collections, collectionId, onSelectCollecti
       {(enriching || (result?.enrichNote && !enrichJobId)) && (
         <div className="flex flex-wrap items-center gap-3 rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900 dark:border-sky-900 dark:bg-sky-950 dark:text-sky-200">
           <GlobeIcon className={`size-4 ${enriching ? "animate-spin [animation-duration:3s]" : ""}`} />
-          <span className="min-w-0 flex-1">
+          <div className="min-w-0 flex-1">
             {enriching ? (
               <>
-                {result?.enrichNote ?? "Looking up missing specs on the web"} — {enrich.job!.itemsIndexed}/{enrich.job!.itemsFound} products
+                {enrich.job!.lookup ? `Looking up ${enrich.job!.lookup.attributes.join(", ")} on the web` : (result?.enrichNote ?? "Looking up missing specs on the web")}
+                {enrich.job!.lookup
+                  ? ` — ${Math.max(0, enrich.job!.itemsIndexed - enrich.job!.lookup.cached)} of ${enrich.job!.lookup.toLookUp} products looked up`
+                  : ` — ${enrich.job!.itemsIndexed}/${enrich.job!.itemsFound} products`}
                 {enrich.job!.webSearches ? `, ${enrich.job!.webSearches} searches` : ""}
                 {enrich.job!.llmCost ? ` · ${formatUsd(enrich.job!.llmCost)}` : ""}
+                {enrich.job!.lookup && <LookupSummary stats={enrich.job!.lookup} className="mt-2" />}
               </>
             ) : (
               result?.enrichNote
             )}
-          </span>
+          </div>
         </div>
       )}
       {enrichDone && enrich.job && (
@@ -331,6 +336,7 @@ export function SearchView({ config, collections, collectionId, onSelectCollecti
               <GlobeIcon /> Look up {enrich.job.itemsRemaining} more product{enrich.job.itemsRemaining === 1 ? "" : "s"}
             </button>
           )}
+          {enrich.job.lookup && <LookupSummary stats={enrich.job.lookup} className="w-full" />}
         </div>
       )}
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { LlmPurpose, UsageSummary } from "@specharvest/shared";
+import type { LlmPurpose, ProviderCredits, UsageSummary } from "@specharvest/shared";
 import { api, formatUsd } from "../lib/api.ts";
 
 const PURPOSE_LABEL: Record<LlmPurpose, string> = {
@@ -16,11 +16,48 @@ const REFRESH_MS = 20_000;
 const calls = (n: number) => `${n} call${n === 1 ? "" : "s"}`;
 const fmtTokens = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
 
+/** OpenRouter balance: whole account (with a management key) and the server's API key. */
+function CreditsBlock({ credits }: { credits: ProviderCredits | null }) {
+  if (!credits) return <p className="text-xs text-stone-500">Loading OpenRouter credits…</p>;
+  const { account, key, errors } = credits;
+  return (
+    <section aria-label="OpenRouter credits" className="mb-4 rounded-md bg-stone-50 p-3 dark:bg-stone-800/60">
+      <h3 className="text-xs font-medium uppercase tracking-wide text-stone-500">OpenRouter credits</h3>
+      {account && (
+        <div className="mt-1">
+          <span className="text-lg font-semibold tabular-nums">{formatUsd(account.remaining)}</span>
+          <span className="ml-1.5 text-xs text-stone-500">left of {formatUsd(account.totalCredits)} purchased</span>
+        </div>
+      )}
+      {key && (
+        <div className="mt-1 text-xs text-stone-600 tabular-nums dark:text-stone-300">
+          {key.limit === null ? (
+            <>API key: uncapped</>
+          ) : (
+            <>
+              API key: <span className="font-medium">{formatUsd(key.remaining ?? 0)}</span> left of {formatUsd(key.limit)}
+            </>
+          )}
+          {" · "}
+          {formatUsd(key.usageDaily)} today · {formatUsd(key.usageMonthly)} this month
+          {key.freeTier && " · free tier"}
+        </div>
+      )}
+      {errors.map((e) => (
+        <p key={e} className="mt-1 text-xs text-stone-500">
+          {e}
+        </p>
+      ))}
+    </section>
+  );
+}
+
 /** Header pill with your all-time LLM spend; opens a today / 30 days / all-time breakdown (admins can switch to everyone's). */
 export function SpendMenu({ isAdmin = false }: { isAdmin?: boolean }) {
   const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [open, setOpen] = useState(false);
   const [everyone, setEveryone] = useState(false);
+  const [credits, setCredits] = useState<ProviderCredits | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
 
   const refresh = useCallback(() => {
@@ -36,6 +73,7 @@ export function SpendMenu({ isAdmin = false }: { isAdmin?: boolean }) {
   useEffect(() => {
     if (!open) return;
     refresh();
+    if (isAdmin) api.credits().then(setCredits, () => {});
     const onDown = (e: PointerEvent) => !rootRef.current?.contains(e.target as Node) && setOpen(false);
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
     document.addEventListener("pointerdown", onDown);
@@ -44,7 +82,7 @@ export function SpendMenu({ isAdmin = false }: { isAdmin?: boolean }) {
       document.removeEventListener("pointerdown", onDown);
       document.removeEventListener("keydown", onKey);
     };
-  }, [open, refresh]);
+  }, [open, refresh, isAdmin]);
 
   if (!usage) return null;
 
@@ -65,6 +103,7 @@ export function SpendMenu({ isAdmin = false }: { isAdmin?: boolean }) {
           aria-label="LLM spend"
           className="card fixed inset-x-4 top-16 z-30 max-h-[calc(100dvh-5rem)] overflow-y-auto p-4 text-sm shadow-lg sm:absolute sm:inset-x-auto sm:right-0 sm:top-full sm:mt-2 sm:w-96"
         >
+          {isAdmin && <CreditsBlock credits={credits} />}
           <div className="flex items-center gap-2">
             <h2 className="mr-auto font-medium">{everyone ? "LLM spend — all users" : "Your LLM spend"}</h2>
             {isAdmin && (

@@ -93,7 +93,7 @@ All settings are runtime environment variables. Nothing is baked in at build
 time except the commit SHA. The client bundle reads everything from the API.
 
 Secrets can come from files instead of env (Docker/Compose secrets): set
-`OPENROUTER_API_KEY_FILE`, `PUPPETEER_WS_API_KEY_FILE`,
+`OPENROUTER_API_KEY_FILE`, `OPENROUTER_MANAGEMENT_KEY_FILE`, `PUPPETEER_WS_API_KEY_FILE`,
 `PUPPETEER_WS_PASSWORD_FILE`, `PROXY_PASSWORD_FILE`, `VAPID_PRIVATE_KEY_FILE`
 or `ADMIN_PASSWORD_FILE` to a path such as `/run/secrets/openrouter`.
 

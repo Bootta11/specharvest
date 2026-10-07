@@ -23,6 +23,26 @@ const item = (collectionId: number, url: string) => ({
   rawText: null,
 });
 
+describe("lookup stats", () => {
+  it("round-trips the web lookup breakdown through the job row", () => {
+    const job = db.createJob("enrich", null);
+    expect(job.lookup).toBeNull();
+    const lookup = {
+      attributes: ["wheelbase"],
+      listings: 194,
+      products: 157,
+      merged: 1,
+      merges: [{ from: "golf life+ 2.0 tdi 2026", to: "golf life plus 2.0 tdi 2026" }],
+      cached: 1,
+      fromSiblings: 1,
+      toLookUp: 3,
+      remaining: 153,
+    };
+    expect(db.updateJob(job.id, { lookup, itemsRemaining: 153 }).lookup).toEqual(lookup);
+    expect(db.getJob(job.id)?.itemsRemaining).toBe(153);
+  });
+});
+
 describe("resumable crawl jobs", () => {
   it("is resumable only when a crawl with saved params is stopped or interrupted", () => {
     const c = db.createCollection("shop", "https://shop.example/a", "shop.example");

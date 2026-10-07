@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { Item, SpecKey } from "@specharvest/shared";
+import type { Item, ItemDetail, SpecKey } from "@specharvest/shared";
 import { humanizeKey, specLabel } from "@specharvest/shared";
 import { api } from "../lib/api.ts";
 import { formatPrice, GlobeIcon, GoneBadge, SpecRow } from "./ItemCard.tsx";
@@ -12,7 +12,9 @@ interface Props {
 }
 
 export function ItemModal({ item, keys, highlightKeys, onClose }: Props) {
-  const [rawText, setRawText] = useState<string | null>(null);
+  // Full detail (page text, same-product listings), loaded when the modal opens.
+  const [detail, setDetail] = useState<ItemDetail | null>(null);
+  const [detailFailed, setDetailFailed] = useState(false);
   const [showRaw, setShowRaw] = useState(false);
 
   useEffect(() => {
@@ -26,8 +28,19 @@ export function ItemModal({ item, keys, highlightKeys, onClose }: Props) {
   }, [onClose]);
 
   useEffect(() => {
-    if (showRaw && rawText === null) api.item(item.id).then((d) => setRawText(d.rawText ?? ""), () => setRawText(""));
-  }, [showRaw, rawText, item.id]);
+    let live = true;
+    setDetail(null);
+    setDetailFailed(false);
+    api.item(item.id).then(
+      (d) => live && setDetail(d),
+      () => live && setDetailFailed(true),
+    );
+    return () => {
+      live = false;
+    };
+  }, [item.id]);
+  const rawText = detail ? (detail.rawText ?? "") : detailFailed ? "" : null;
+  const same = detail?.sameProduct ?? null;
 
   const entries = Object.entries(item.specs);
   const values = entries.filter(([, v]) => typeof v !== "boolean").map(([k]) => k);
@@ -72,6 +85,8 @@ export function ItemModal({ item, keys, highlightKeys, onClose }: Props) {
             </div>
           </div>
 
+          {same && <SameProductSection same={same} ownIdentity={item.identity} />}
+
           <h3 className="mt-5 text-sm font-semibold">Specifications</h3>
           <div className="mt-2 grid gap-x-6 sm:grid-cols-2">
             {values.map((k) => (
@@ -112,5 +127,38 @@ export function ItemModal({ item, keys, highlightKeys, onClose }: Props) {
         </div>
       </div>
     </div>
+  );
+}
+
+/** Other listings grouped as this same product — they share one web lookup. */
+function SameProductSection({ same, ownIdentity }: { same: NonNullable<ItemDetail["sameProduct"]>; ownIdentity: string | null }) {
+  const count = same.listings.length + same.more;
+  return (
+    <section className="mt-5 rounded-lg border border-stone-200 p-3 dark:border-stone-800">
+      <h3 className="text-sm font-semibold">
+        Same product · {count} other listing{count === 1 ? "" : "s"}
+      </h3>
+      <p className="mt-0.5 text-xs text-stone-500">
+        Grouped as <span className="font-medium text-stone-700 dark:text-stone-300">{same.canonical}</span>
+        {ownIdentity && ownIdentity !== same.canonical && <> (this listing: {ownIdentity})</>} — web lookups are shared across these listings.
+      </p>
+      <ul className="mt-2 divide-y divide-stone-100 text-sm dark:divide-stone-800">
+        {same.listings.map((l) => (
+          <li key={l.id} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 py-1.5">
+            <a href={l.url} target="_blank" rel="noreferrer" className="min-w-0 flex-1 truncate text-brand-700 hover:underline dark:text-brand-500" title={l.title}>
+              {l.title} ↗
+            </a>
+            <GoneBadge item={l} />
+            {l.price != null && <span className="shrink-0 text-xs text-stone-500">{formatPrice(l.price, l.currency)}</span>}
+            {l.identity && l.identity !== same.canonical && (
+              <span className="w-full truncate text-xs text-stone-500" title="Name variant grouped into this product">
+                as “{l.identity}”
+              </span>
+            )}
+          </li>
+        ))}
+      </ul>
+      {same.more > 0 && <p className="mt-1 text-xs text-stone-500">…and {same.more} more</p>}
+    </section>
   );
 }

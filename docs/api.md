@@ -51,6 +51,7 @@ curl -H "X-Api-Key: shk_…" https://specharvest.example/api/collections
 | `POST /api/jobs/:id/stop` | | running crawl → *stopped* once open pages finish; job (202), 409 if not a running crawl |
 | `POST /api/jobs/:id/resume` | | continues a *stopped*/*interrupted* crawl in the same job; job (202), 409 if not resumable or the collection is busy |
 | `GET /api/usage` | `?scope=all` (admin: everyone's) | your LLM spend `{today, last30d, allTime, byPurpose, byModel, unpricedCalls}` (USD, from OpenRouter's `usage.cost`) |
+| `GET /api/usage/credits` | admin | OpenRouter balance `{provider, key, account, errors, fetchedAt}`: `key` = API key limit/remaining/usage (`/api/v1/key`); `account` = purchased/used/remaining credits, only when `OPENROUTER_MANAGEMENT_KEY` is set. Cached 60 s |
 | `GET /api/jobs/events` | SSE | your jobs (admins: all): `jobs` (active jobs snapshot on connect), then `job` on every change |
 | `GET /api/jobs/:id/events` | SSE | events `job`, `log`, `item`, `queue` (history replayed) |
 | `GET /api/settings/notifications` | | your notification settings, secrets replaced by `********` |

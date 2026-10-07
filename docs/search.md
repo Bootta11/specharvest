@@ -81,6 +81,24 @@ available manually ("Look up on the web" under the unknown bucket,
   year, displacement, power (hp/kW-aware), gearbox/drivetrain or trim words
   differ. The longer name may only add engine words like "hybrid" or "t-gdi".
   If the call fails, identities stay ungrouped and are retried next job.
+  Matching has two levels. **Certain** (`sameProduct`): nothing contradicts
+  and the model/trim words are identical. Engine words only set the fuel
+  (`turbo` = `t-gdi`), and years/power/engine may be missing on one side.
+  These are grouped automatically, by the LLM for new names and by a free
+  rule-based `regroup` over all names. **Possible** (`maybeSameProduct`): one
+  name's words are a subset of the other's (usually a missing trim). These are
+  never grouped automatically; the owner confirms them in the Products view
+  ("Same product" / "Different product"). Decisions and "Not the same" splits
+  are stored in `identity_rejections`, so the same pair is never grouped or
+  suggested again.
+  Grouping also runs at the end of every crawl that extracted something, and
+  the first time a collection's owner opens its **Products** view
+  (`GET /api/collections/:id/products`; read-only viewers are never billed).
+  Collections report `productCount` (active listings, variants counted once).
+  Each merge is written to the job log (`Same product: "a" → "b"`), and the
+  item modal shows a "Same product" section (from `GET /api/items/:id` →
+  `sameProduct`) listing the other listings you can see and the name variant
+  each was grouped from.
 - Before a paid lookup, a value that another listing of the same product states
   on **its own page** is copied (saved as a web fact with that listing's URL,
   confidence 0.95).
@@ -89,6 +107,10 @@ available manually ("Look up on the web" under the unknown bucket,
   per job, products with the most listings first). When capped, the job's
   `itemsRemaining` drives a "Look up N more products" button, which re-runs
   the search with enrichment so the next batch starts (the first is cached now).
+- Each lookup job stores a breakdown on `job.lookup` (listings → products,
+  name variants merged, already known, copied from siblings, looked up,
+  left for next run, plus the merged names). It is shown in the search banner,
+  the "Web lookup finished" line and the job card on the Ingest view.
 - "Not found" answers are retried after `ENRICH_NOT_FOUND_TTL_DAYS` (30, `0` =
   never); found facts don't expire.
 - Each lookup is one chat completion with the OpenRouter server tool

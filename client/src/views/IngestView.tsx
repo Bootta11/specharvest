@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { isActiveJob, type Collection, type CrawlMode, type Job } from "@specharvest/shared";
 import { api, formatUsd, storageGet, storageSet, useJobStream, type AppConfig, type JobsFeed } from "../lib/api.ts";
 import { JobProgress, StatusBadge, jobPercent } from "../components/JobProgress.tsx";
+import { ProductsModal } from "../components/ProductsModal.tsx";
 
 interface Props {
   config: AppConfig | null;
@@ -39,6 +40,7 @@ export function IngestView({ config, collections, feed, onChanged, onSearch }: P
   const [jobId, setJobId] = useState<number | null>(() => Number(storageGet("crawlJobId")) || null);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [streamNonce, setStreamNonce] = useState(0);
+  const [productsOf, setProductsOf] = useState<Collection | null>(null);
   const stream = useJobStream(jobId, streamNonce);
 
   const loadJobs = () => api.jobs().then(setJobs, () => {});
@@ -296,13 +298,25 @@ export function IngestView({ config, collections, feed, onChanged, onSearch }: P
                     </div>
                     <div className="truncate text-xs text-stone-500">
                       {!c.canEdit && c.ownerEmail && <>by {c.ownerEmail} · </>}
-                      {c.itemCount} items · {c.host} · {timeAgo(c.createdAt)}
+                      {c.itemCount} items ·{" "}
+                      <button
+                        type="button"
+                        className="hover:text-brand-700 hover:underline dark:hover:text-brand-500"
+                        onClick={() => setProductsOf(c)}
+                        title="Listings of the same product (name variants included) count once"
+                      >
+                        {c.productCount} products
+                      </button>{" "}
+                      · {c.host} · {timeAgo(c.createdAt)}
                       {c.llmCost > 0 && <span title="Spent on LLM calls for this collection"> · {formatUsd(c.llmCost)} LLM</span>}
                     </div>
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <button className="btn-primary btn-sm" onClick={() => onSearch(c.id)}>
                       Search
+                    </button>
+                    <button className="btn-ghost btn-sm" onClick={() => setProductsOf(c)}>
+                      Products
                     </button>
                     {c.canEdit && (
                       <>
@@ -359,6 +373,7 @@ export function IngestView({ config, collections, feed, onChanged, onSearch }: P
           </div>
         )}
       </section>
+      {productsOf && <ProductsModal collection={productsOf} onClose={() => setProductsOf(null)} onGrouped={onChanged} />}
     </div>
   );
 }

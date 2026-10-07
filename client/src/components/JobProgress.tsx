@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { isActiveJob, type Job } from "@specharvest/shared";
 import { formatUsd, type JobStream } from "../lib/api.ts";
+import { LookupSummary } from "./LookupSummary.tsx";
 
 const statusStyle: Record<Job["status"], string> = {
   queued: "bg-stone-100 text-stone-700 dark:bg-stone-800 dark:text-stone-300",
@@ -97,13 +98,15 @@ export function JobProgress({ stream, title, onStop, onResume }: JobProgressProp
         ) : (
           <>
             <Stat label="products" value={job.itemsFound} />
-            <Stat label="resolved" value={job.itemsIndexed} />
+            <Stat label="done" value={job.itemsIndexed} />
             <Stat label="web searches" value={job.webSearches} />
             <Stat label="failed" value={job.itemsFailed} />
             <Stat label="LLM cost" value={formatUsd(job.llmCost)} />
           </>
         )}
       </div>
+
+      {job.kind === "enrich" && job.lookup && <LookupSummary stats={job.lookup} className="mt-3" />}
 
       {recentItems.length > 0 && (
         <ul className="mt-3 space-y-1 text-sm">

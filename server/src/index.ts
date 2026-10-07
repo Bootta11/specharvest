@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import fastifyStatic from "@fastify/static";
 import { z, ZodError } from "zod";
-import { crawlRequestSchema, enrichRequestSchema, isActiveJob, notificationChannels, searchRequestSchema } from "@specharvest/shared";
+import { crawlRequestSchema, enrichRequestSchema, isActiveJob, notificationChannels, searchRequestSchema, type CollectionProducts, type ItemDetail } from "@specharvest/shared";
 import { env } from "./config.ts";
 import * as db from "./db/sqlite.ts";
 import { deleteVectors } from "./db/lance.ts";
@@ -13,15 +13,17 @@ import { emitJob, jobChannel, JOBS_CHANNEL, ResumeError, resumeCrawl, startCrawl
 import { getNotificationSettings, maskSettings, saveNotificationSettings, sendTest } from "./notify/index.ts";
 import { vapidKeys } from "./notify/push.ts";
 import { startEnrichment } from "./enrich/web.ts";
+import { canonicalizeIdentities, lookupIdentity, matchSuggestions, productGroups, regroup, sameProductOf, ungroupedCount } from "./enrich/group.ts";
 import { search } from "./search/hybrid.ts";
 import { proposeKeyMerges } from "./llm/consolidate.ts";
 import { withLlmContext } from "./llm/usage.ts";
+import { getProviderCredits } from "./llm/credits.ts";
 import { subscribe } from "./sse/hub.ts";
 import { createLogger, errorMessage } from "./lib/logger.ts";
 import { httpError } from "./lib/http-error.ts";
 import { bootstrapAdmin } from "./auth/bootstrap.ts";
 import { requireCollection, requireJob } from "./auth/ownership.ts";
-import { currentUser, registerAuth } from "./auth/plugin.ts";
+import { currentUser, registerAuth, requireAdmin } from "./auth/plugin.ts";
 import { registerAuthRoutes } from "./auth/routes.ts";
 import { pruneSessions } from "./auth/sessions.ts";
 
@@ -113,6 +115,56 @@ app.delete("/api/collections/:id", async (req) => {
   return { ok: true };
 });
 
+// Products (name variants grouped). For the owner, names never seen before are grouped first (one cheap LLM
+// call) and the rule-based regroup runs (free); possible matches come back as suggestions to confirm.
+app.get("/api/collections/:id/products", async (req): Promise<CollectionProducts> => {
+  const user = currentUser(req);
+  const collection = requireCollection(idParam(req.params), user, "read");
+  const items = db.listItems(collection.id, 5000);
+  if (collection.canEdit) {
+    if (env.OPENROUTER_API_KEY && ungroupedCount(items) > 0) {
+      await withLlmContext({ collectionId: collection.id, userId: user.id }, () => canonicalizeIdentities(items));
+    } else regroup(items.map(lookupIdentity));
+  }
+  return {
+    products: productGroups(items),
+    suggestions: collection.canEdit ? matchSuggestions(items) : [],
+    listings: items.length,
+    grouped: ungroupedCount(items) === 0,
+  };
+});
+
+const matchDecisionSchema = z.object({ identity: z.string().min(1), to: z.string().min(1).nullable() });
+
+// Answer a suggestion: `to` = same product as that candidate; null = different from every candidate.
+app.post("/api/collections/:id/matches", async (req) => {
+  const collection = requireCollection(idParam(req.params), currentUser(req), "write");
+  const body = matchDecisionSchema.parse(req.body);
+  const items = db.listItems(collection.id, 5000);
+  const suggestion = matchSuggestions(items).find((s) => s.identity === body.identity);
+  if (!suggestion) throw httpError(404, "No such suggestion — reload the products");
+  if (body.to === null) for (const c of suggestion.candidates) db.rejectPair(suggestion.identity, c.canonical);
+  else {
+    if (!suggestion.candidates.some((c) => c.canonical === body.to)) throw httpError(400, "Not one of the suggested products");
+    db.mergeCanonical(suggestion.identity, body.to);
+  }
+  return { ok: true };
+});
+
+const splitSchema = z.object({ identity: z.string().min(1) });
+
+// "Not the same product": take one name out of its group for good.
+app.post("/api/collections/:id/split", async (req) => {
+  const collection = requireCollection(idParam(req.params), currentUser(req), "write");
+  const { identity } = splitSchema.parse(req.body);
+  const canonical = db.getCanonicalIdentity(identity);
+  if (canonical === identity) throw httpError(400, "That name isn't grouped into another product");
+  if (!db.listItems(collection.id, 5000).some((i) => lookupIdentity(i) === identity)) throw httpError(404, "No listing in this collection has that name");
+  db.rejectPair(identity, canonical);
+  db.splitIdentity(identity);
+  return { ok: true };
+});
+
 app.post("/api/collections/:id/consolidate", async (req) => {
   const user = currentUser(req);
   const id = requireCollection(idParam(req.params), user, "write").id;
@@ -131,8 +183,9 @@ app.get("/api/items", async (req) => {
 app.get("/api/items/:id", async (req, reply) => {
   const item = db.getItem(idParam(req.params));
   if (!item) return notFound(reply);
-  requireCollection(item.collectionId, currentUser(req), "read");
-  return item;
+  const user = currentUser(req);
+  requireCollection(item.collectionId, user, "read");
+  return { ...item, sameProduct: sameProductOf(item, db.readableScope(user)) } satisfies ItemDetail;
 });
 
 // ---------- Jobs ----------
@@ -168,6 +221,12 @@ app.get("/api/usage", async (req) => {
   const user = currentUser(req);
   const all = user.role === "admin" && (req.query as { scope?: string }).scope === "all";
   return db.usageSummary(Date.now(), all ? null : user.id);
+});
+
+// Remaining OpenRouter balance — the shared server account, so admins only.
+app.get("/api/usage/credits", async (req) => {
+  requireAdmin(req);
+  return getProviderCredits();
 });
 
 app.get("/api/jobs", async (req) => db.listJobs(30, currentUser(req)));

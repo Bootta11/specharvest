@@ -29,6 +29,8 @@ const envSchema = z.object({
   OPENROUTER_SMART_MODEL: z.string().default("google/gemini-2.5-flash"),
   OPENROUTER_MAX_RETRIES: z.coerce.number().default(3),
   OPENROUTER_TIMEOUT_MS: z.coerce.number().default(90_000),
+  // Optional management key: only used to read the account credit balance.
+  OPENROUTER_MANAGEMENT_KEY: optionalNonEmpty(),
 
   WEB_SEARCH_ENABLED: bool(true),
   WEB_SEARCH_ENGINE: z.enum(["auto", "native", "exa", "parallel", "perplexity", "firecrawl"]).default("auto"),
@@ -75,7 +77,7 @@ const envSchema = z.object({
 });
 
 // Secrets can also come from files (Docker/Compose secrets): OPENROUTER_API_KEY_FILE=/run/secrets/openrouter.
-const FILE_SECRETS = ["OPENROUTER_API_KEY", "PUPPETEER_WS_API_KEY", "PUPPETEER_WS_PASSWORD", "PROXY_PASSWORD", "VAPID_PRIVATE_KEY", "ADMIN_PASSWORD"];
+const FILE_SECRETS = ["OPENROUTER_API_KEY", "OPENROUTER_MANAGEMENT_KEY", "PUPPETEER_WS_API_KEY", "PUPPETEER_WS_PASSWORD", "PROXY_PASSWORD", "VAPID_PRIVATE_KEY", "ADMIN_PASSWORD"];
 for (const key of FILE_SECRETS) {
   const file = process.env[`${key}_FILE`];
   if (file && !process.env[key]) process.env[key] = fs.readFileSync(file, "utf8").trim();

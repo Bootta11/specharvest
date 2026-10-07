@@ -11,6 +11,8 @@ export interface Collection {
   host: string;
   createdAt: number;
   itemCount: number;
+  /** Distinct products among the active items (name variants grouped as one). */
+  productCount: number;
   /** USD spent on LLM calls for this collection (crawls, lookups, searches). */
   llmCost: number;
   ownerId: number | null;
@@ -54,6 +56,47 @@ export interface Item {
   /** Set when the listing was missing from a complete re-crawl (sold/removed). */
   goneAt: number | null;
   score?: number | null;
+}
+
+/** Other listings grouped as the same product (spelling variants share web lookups). */
+export interface SameProduct {
+  /** The name web facts are stored under. */
+  canonical: string;
+  /** Other listings of this product the viewer can see (not including the item itself). */
+  listings: Array<Pick<Item, "id" | "collectionId" | "title" | "url" | "identity" | "price" | "currency" | "goneAt">>;
+  /** How many more matched than are listed. */
+  more: number;
+}
+
+/** One product in a collection and every listing of it (spelling variants included). */
+export interface ProductGroup {
+  /** The name the product is grouped (and looked up) under. */
+  canonical: string;
+  listings: SameProduct["listings"];
+}
+
+/** A product that might be the same as one (or one of several) others — waiting for the user. */
+export interface MatchSuggestion {
+  /** The less specific name, e.g. "geely starray em-i 2026". */
+  identity: string;
+  listings: number;
+  title: string;
+  /** Products it might be (pick one, or none). */
+  candidates: Array<{ canonical: string; listings: number; title: string }>;
+}
+
+export interface CollectionProducts {
+  products: ProductGroup[];
+  /** Possible matches to confirm (only for users who can edit the collection). */
+  suggestions: MatchSuggestion[];
+  listings: number;
+  /** False when some names were never grouped (only the collection's owner triggers grouping). */
+  grouped: boolean;
+}
+
+export interface ItemDetail extends Item {
+  rawText: string | null;
+  sameProduct: SameProduct | null;
 }
 
 // ---------- Query plan ----------
@@ -138,12 +181,36 @@ export interface Job {
   llmCost: number;
   /** Web lookups: products left out because of ENRICH_MAX_LOOKUPS (run again to continue). */
   itemsRemaining: number;
+  /** Web lookups: how listings became products and where values came from (null for crawls / older jobs). */
+  lookup: LookupStats | null;
   message: string | null;
   error: string | null;
   startedAt: number;
   finishedAt: number | null;
   /** A stopped/interrupted crawl whose start options were saved, so it can pick up where it left off. */
   resumable: boolean;
+}
+
+/** Breakdown of one web lookup job. */
+export interface LookupStats {
+  /** Attribute labels being looked up. */
+  attributes: string[];
+  /** Listings missing at least one of them. */
+  listings: number;
+  /** Distinct products those listings are, after grouping name variants. */
+  products: number;
+  /** Name variants merged into another product by this run's grouping. */
+  merged: number;
+  /** The merges themselves (first 100). */
+  merges: Array<{ from: string; to: string }>;
+  /** Products fully answered without the web (cache or sibling listings). */
+  cached: number;
+  /** Values copied from another listing of the same product that states them on its own page. */
+  fromSiblings: number;
+  /** Products sent to the web this run (at most ENRICH_MAX_LOOKUPS). */
+  toLookUp: number;
+  /** Products left for the next run. */
+  remaining: number;
 }
 
 /** Still queued or running (anything else is a final or paused state). */
@@ -301,6 +368,18 @@ export interface UsageSummary {
   byModel: Array<{ model: string; cost: number; calls: number; promptTokens: number; completionTokens: number }>;
   /** Calls whose response carried no price (counted as $0 above). */
   unpricedCalls: number;
+}
+
+/** Remaining balance at the LLM provider (admin-only). */
+export interface ProviderCredits {
+  provider: "openrouter";
+  /** The server's API key: `limit` null = uncapped. */
+  key: { label: string | null; limit: number | null; remaining: number | null; usage: number; usageDaily: number; usageMonthly: number; freeTier: boolean } | null;
+  /** Whole account; needs OPENROUTER_MANAGEMENT_KEY. */
+  account: { totalCredits: number; totalUsage: number; remaining: number } | null;
+  /** Why a part is missing (no key, 403, network). */
+  errors: string[];
+  fetchedAt: string;
 }
 
 // ---------- Notifications ----------

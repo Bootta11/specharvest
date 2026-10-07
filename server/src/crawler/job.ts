@@ -6,6 +6,7 @@ import { upsertVector } from "../db/lance.ts";
 import { embed } from "../embedding.ts";
 import { extractItem } from "../llm/extract.ts";
 import { proposeKeyMerges } from "../llm/consolidate.ts";
+import { canonicalizeIdentities } from "../enrich/group.ts";
 import { withLlmContext } from "../llm/usage.ts";
 import { createLogger, errorMessage } from "../lib/logger.ts";
 import { notifyJobFinished } from "../notify/index.ts";
@@ -361,6 +362,7 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
   // Key merging and gone-marking need the whole listing handled — they run when the resumed crawl completes.
   throwIfStopped(signal);
   if (extracted > 0) await consolidateKeys(jobId, collectionId);
+  if (extracted > 0) await groupProducts(jobId, collectionId);
 
   // ---- 4. Listings missing from a complete walk are gone (sold/removed) ----
   let gone = 0;
@@ -387,6 +389,19 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
   });
   jobLog(jobId, `Done: ${summary} — ${extracted} LLM extractions`);
   retireChannel(jobChannel(jobId));
+}
+
+/** LLM pass that groups name variants of the same product (only names never grouped before). Non-fatal. */
+export async function groupProducts(jobId: number, collectionId: number) {
+  try {
+    patchJob(jobId, { message: "Grouping product names" });
+    const { merges, calls } = await canonicalizeIdentities(db.listItems(collectionId, 5000, 0, true));
+    if (calls === 0) return;
+    jobLog(jobId, `Grouped product names: ${merges.length} variant${merges.length === 1 ? "" : "s"} merged into the same product`);
+    for (const m of merges) jobLog(jobId, `Same product: "${m.from}" → "${m.to}"`);
+  } catch (err) {
+    jobLog(jobId, `Product grouping skipped: ${errorMessage(err)}`, "warn");
+  }
 }
 
 /** LLM pass that merges synonym keys (e.g. engine_power_kw → engine_kw, hp → kW). Non-fatal. */

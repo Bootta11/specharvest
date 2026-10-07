@@ -177,7 +177,8 @@ async function runEnrichment(jobId: number, input: EnrichInput) {
   // Spelling variants of the same product share one lookup (one LLM call for identities never grouped before).
   const needing = items.filter((item) => input.attributes.some((a) => item.specs[a.key] === undefined));
   const grouping = await canonicalizeIdentities(needing);
-  if (grouping.calls) jobLog(jobId, `Grouped product names: ${grouping.merged} variants merged into the same product`);
+  if (grouping.calls) jobLog(jobId, `Grouped product names: ${grouping.merged} variant${grouping.merged === 1 ? "" : "s"} merged into the same product`);
+  for (const m of grouping.merges) jobLog(jobId, `Same product: "${m.from}" → "${m.to}"`);
 
   // Group items needing any attribute by canonical product identity → one web call per product.
   const groups = new Map<string, { items: Item[]; attrs: Map<string, MissingAttribute> }>();
@@ -221,6 +222,12 @@ async function runEnrichment(jobId: number, input: EnrichInput) {
     if (uncached.length) toFetch.push([identity, { items: g.items, attrs: uncached }]);
   }
 
+  // Name variants inside this job's products (grouped now or by an earlier job).
+  const merges: Array<{ from: string; to: string }> = [];
+  for (const [identity, g] of groups) {
+    for (const from of new Set(g.items.map(lookupIdentity))) if (from !== identity) merges.push({ from, to: identity });
+  }
+
   // Products with the most listings first: each paid lookup then fills the most items.
   toFetch.sort((a, b) => b[1].items.length - a[1].items.length);
   const capped = toFetch.slice(0, env.ENRICH_MAX_LOOKUPS);
@@ -228,6 +235,17 @@ async function runEnrichment(jobId: number, input: EnrichInput) {
     itemsFound: groups.size,
     itemsIndexed: groups.size - toFetch.length,
     itemsRemaining: toFetch.length - capped.length,
+    lookup: {
+      attributes: input.attributes.map((a) => a.label),
+      listings: needing.length,
+      products: groups.size,
+      merged: merges.length,
+      merges: merges.slice(0, 100),
+      cached: groups.size - toFetch.length,
+      fromSiblings: siblingFills,
+      toLookUp: capped.length,
+      remaining: toFetch.length - capped.length,
+    },
     message: `${groups.size} products, ${groups.size - toFetch.length} cached, ${capped.length} to look up${toFetch.length > capped.length ? ` (capped at ${env.ENRICH_MAX_LOOKUPS})` : ""}`,
   });
   jobLog(jobId, `Need ${labels} for ${groups.size} distinct products (${needing.length} listings); ${toFetch.length} not cached${siblingFills ? `, ${siblingFills} values copied from sibling listings` : ""}`);

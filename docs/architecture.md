@@ -55,3 +55,7 @@ only; SQLite is the source of truth.
 | `OPENROUTER_EXTRACTION_MODEL` | = main | per-item spec extraction (the bulk of the cost) |
 | `OPENROUTER_SMART_MODEL` | `google/gemini-2.5-flash` | merging duplicate keys (needs judgement) |
 | `OPENROUTER_WEB_MODEL` | = smart | web lookups (tool use + strict JSON) |
+
+Admins see the OpenRouter credit balance in the spend menu (`GET /api/usage/credits`).
+The regular key yields its own limit and usage; the account balance needs an optional
+`OPENROUTER_MANAGEMENT_KEY` (OpenRouter's `/api/v1/credits` rejects regular keys).

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import type { Collection, Item, Job, JobKind, LlmPurpose, SpecKey, SpecOrigin, SpecSource, SpecType, SpecValue, UsageSummary } from "@specharvest/shared";
+import type { Collection, Item, Job, JobKind, LlmPurpose, LookupStats, SpecKey, SpecOrigin, SpecSource, SpecType, SpecValue, UsageSummary } from "@specharvest/shared";
 import { env } from "../config.ts";
 
 let db: DatabaseSync | null = null;
@@ -69,6 +69,13 @@ CREATE TABLE IF NOT EXISTS identity_aliases (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS identity_aliases_canonical ON identity_aliases(canonical);
+-- Name pairs the user said are different products (a < b) — never grouped or suggested again.
+CREATE TABLE IF NOT EXISTS identity_rejections (
+  a TEXT NOT NULL,
+  b TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (a, b)
+);
 CREATE TABLE IF NOT EXISTS query_cache (
   collection_id INTEGER NOT NULL DEFAULT 0,
   query TEXT NOT NULL,
@@ -182,6 +189,7 @@ export function getDb(): DatabaseSync {
   addColumnIfMissing("jobs", "llm_cost", "REAL NOT NULL DEFAULT 0");
   addColumnIfMissing("jobs", "params", "TEXT");
   addColumnIfMissing("jobs", "items_remaining", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing("jobs", "details", "TEXT");
   // Ownership (users). NULL = created before users existed; handed to the first admin by assignOrphansTo().
   addColumnIfMissing("collections", "user_id", "INTEGER REFERENCES users(id) ON DELETE SET NULL");
   addColumnIfMissing("collections", "is_shared", "INTEGER NOT NULL DEFAULT 0");
@@ -287,6 +295,7 @@ function toCollection(r: Row, viewer?: Viewer): Collection {
     host: String(r.host),
     createdAt: Number(r.created_at),
     itemCount: Number(r.item_count ?? 0),
+    productCount: Number(r.product_count ?? 0),
     llmCost: Number(r.llm_cost ?? 0),
     ownerId,
     ownerEmail: r.owner_email == null ? null : String(r.owner_email),
@@ -296,6 +305,8 @@ function toCollection(r: Row, viewer?: Viewer): Collection {
 }
 
 const COLLECTION_SELECT = `SELECT c.*, u.email AS owner_email, (SELECT COUNT(*) FROM items i WHERE i.collection_id = c.id) AS item_count,
+  (SELECT COUNT(DISTINCT COALESCE(a.canonical, NULLIF(i.identity, ''), lower(trim(i.title)))) FROM items i
+     LEFT JOIN identity_aliases a ON a.identity = i.identity WHERE i.collection_id = c.id AND i.gone_at IS NULL) AS product_count,
   (SELECT COALESCE(SUM(l.cost), 0) FROM llm_usage l WHERE l.collection_id = c.id) AS llm_cost
   FROM collections c LEFT JOIN users u ON u.id = c.user_id`;
 
@@ -679,10 +690,59 @@ export function knownCanonicals(brand: string, limit = 200): string[] {
   ).map((r) => String(r.identity));
 }
 
+/** Moves every name of product `from` (and `from` itself) under product `to`. */
+export function mergeCanonical(from: string, to: string) {
+  if (from === to) return;
+  const d = getDb();
+  d.prepare("UPDATE identity_aliases SET canonical = ? WHERE canonical = ?").run(to, from);
+  d.prepare("INSERT OR REPLACE INTO identity_aliases (identity, canonical, created_at) VALUES (?, ?, ?)").run(from, to, Date.now());
+  d.prepare("INSERT OR IGNORE INTO identity_aliases (identity, canonical, created_at) VALUES (?, ?, ?)").run(to, to, Date.now());
+}
+
+/** Takes one name out of its product (it becomes its own product again). */
+export function splitIdentity(identity: string) {
+  getDb().prepare("INSERT OR REPLACE INTO identity_aliases (identity, canonical, created_at) VALUES (?, ?, ?)").run(identity, identity, Date.now());
+}
+
+const orderedPair = (x: string, y: string) => (x < y ? [x, y] : [y, x]);
+
+export function rejectPair(x: string, y: string) {
+  if (x === y) return;
+  getDb().prepare("INSERT OR IGNORE INTO identity_rejections (a, b, created_at) VALUES (?, ?, ?)").run(...orderedPair(x, y), Date.now());
+}
+
+export function isRejected(x: string, y: string): boolean {
+  return !!getDb().prepare("SELECT 1 FROM identity_rejections WHERE a = ? AND b = ?").get(...orderedPair(x, y));
+}
+
+/** Rejected pairs touching any of these names. */
+export function rejectedPairs(identities: string[]): Array<[string, string]> {
+  if (identities.length === 0) return [];
+  const out: Array<[string, string]> = [];
+  for (let i = 0; i < identities.length; i += 400) {
+    const chunk = identities.slice(i, i + 400);
+    const marks = chunk.map(() => "?").join(",");
+    const rows = getDb().prepare(`SELECT a, b FROM identity_rejections WHERE a IN (${marks}) OR b IN (${marks})`).all(...chunk, ...chunk) as Row[];
+    for (const r of rows) out.push([String(r.a), String(r.b)]);
+  }
+  return out;
+}
+
 /** Every raw identity grouped under `canonical` (including itself). */
 export function aliasesOf(canonical: string): string[] {
   const rows = getDb().prepare("SELECT identity FROM identity_aliases WHERE canonical = ?").all(canonical) as Row[];
   return [...new Set([canonical, ...rows.map((r) => String(r.identity))])];
+}
+
+/** Listings whose identity is one of `identities`, within `scope`, newest first. */
+export function listItemsByIdentities(identities: string[], scope: CollectionScope, limit = 50): { items: Item[]; total: number } {
+  if (identities.length === 0) return { items: [], total: 0 };
+  const cond = scopeCondition(scope);
+  const where = [`identity IN (${identities.map(() => "?").join(",")})`, cond?.sql].filter(Boolean).join(" AND ");
+  const params = [...identities, ...(cond?.params ?? [])];
+  const total = Number((getDb().prepare(`SELECT COUNT(*) AS n FROM items WHERE ${where}`).get(...params) as Row).n);
+  const rows = getDb().prepare(`SELECT ${ITEM_COLUMNS} FROM items WHERE ${where} ORDER BY gone_at IS NOT NULL, indexed_at DESC LIMIT ?`).all(...params, limit) as Row[];
+  return { items: rows.map((r) => toItem(r)), total };
 }
 
 /**
@@ -770,6 +830,7 @@ function toJob(r: Row): Job {
     webSearches: Number(r.web_searches),
     llmCost: Number(r.llm_cost ?? 0),
     itemsRemaining: Number(r.items_remaining ?? 0),
+    lookup: parseJson<LookupStats | null>(r.details, null),
     message: r.message == null ? null : String(r.message),
     error: r.error == null ? null : String(r.error),
     startedAt: Number(r.started_at),
@@ -819,6 +880,7 @@ const JOB_COLUMNS: Record<string, string> = {
   itemsFailed: "items_failed",
   webSearches: "web_searches",
   itemsRemaining: "items_remaining",
+  lookup: "details",
   message: "message",
   error: "error",
   finishedAt: "finished_at",
@@ -830,7 +892,7 @@ export function updateJob(id: number, patch: Partial<Omit<Job, "id" | "kind" | "
     const set = entries.map(([k]) => `${JOB_COLUMNS[k]} = ?`).join(", ");
     getDb()
       .prepare(`UPDATE jobs SET ${set} WHERE id = ?`)
-      .run(...entries.map(([, v]) => (v ?? null) as SQLInputValue), id);
+      .run(...entries.map(([, v]) => (v !== null && typeof v === "object" ? JSON.stringify(v) : (v ?? null)) as SQLInputValue), id);
   }
   return getJob(id)!;
 }
