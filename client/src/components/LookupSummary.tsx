@@ -48,6 +48,11 @@ export function LookupSummary({ stats, className = "" }: { stats: LookupStats; c
           </Chip>
         )}
         {stats.toLookUp > 0 && <Chip tone="sky">{stats.toLookUp} looked up on the web</Chip>}
+        {!!stats.prefetched && (
+          <Chip tone="emerald" title="Other likely-wanted specs found by the same searches and saved — later searches for them cost nothing">
+            +{plural(stats.prefetched, "extra spec")} cached
+          </Chip>
+        )}
         {stats.remaining > 0 && (
           <Chip tone="amber" title="Over the per-run limit (ENRICH_MAX_LOOKUPS) — products with the most listings went first">
             {stats.remaining} left for next run

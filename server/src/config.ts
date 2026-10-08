@@ -34,7 +34,11 @@ const envSchema = z.object({
 
   WEB_SEARCH_ENABLED: bool(true),
   WEB_SEARCH_ENGINE: z.enum(["auto", "native", "exa", "parallel", "perplexity", "firecrawl"]).default("auto"),
+  // Searches one lookup may run; each costs a fee (~$0.007), so one is the default.
+  WEB_SEARCH_MAX_USES: z.coerce.number().int().min(1).max(5).default(1),
   ENRICH_MAX_LOOKUPS: z.coerce.number().int().min(1).default(15),
+  // Extra, likely-wanted attributes asked for in the same paid lookup and cached for later searches (0 = off).
+  ENRICH_PREFETCH_MAX: z.coerce.number().int().min(0).max(30).default(12),
   ENRICH_COVERAGE_THRESHOLD: z.coerce.number().min(0).max(1).default(0.8),
   ENRICH_MIN_CONFIDENCE: z.coerce.number().min(0).max(1).default(0.6),
   // "Not found" web answers are retried after this many days (0 = never).

@@ -8,6 +8,8 @@ describe("namesRelated", () => {
     ["trunk_volume_liters", "trunk_capacity_liters"],
     ["airbag", "airbags"],
     ["hill_start_assist", "hill_assist"],
+    ["trunk_volume_liters", "boot_capacity_liters"],
+    ["top_speed_kmh", "max_speed_kmh"],
   ])("accepts %s ~ %s", (a, b) => expect(namesRelated(a, b)).toBe(true));
 
   it.each([
@@ -16,6 +18,7 @@ describe("namesRelated", () => {
     ["heated_rear_window", "rear_window_wiper"],
     ["rain_sensor", "light_sensor"],
     ["esp", "battery_discharge_prevention"],
+    ["fuel_tank_liters", "boot_capacity_liters"],
   ])("rejects %s ~ %s", (a, b) => expect(namesRelated(a, b)).toBe(false));
 
   it("requires identical tokens for booleans", () => {

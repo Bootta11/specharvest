@@ -9,6 +9,7 @@ const PURPOSE_LABEL: Record<LlmPurpose, string> = {
   search: "Search parsing",
   "web-lookup": "Web lookups",
   group: "Product grouping",
+  predict: "Spec prediction",
 };
 
 const REFRESH_MS = 20_000;

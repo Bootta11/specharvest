@@ -39,6 +39,9 @@ curl -H "X-Api-Key: shk_…" https://specharvest.example/api/collections
 | `GET /api/collections` | | readable collections with item counts, `llmCost` (USD), `ownerEmail`, `isShared`, `canEdit` |
 | `PATCH /api/collections/:id` | `{name?, isShared?}` (owner/admin) | collection |
 | `DELETE /api/collections/:id` | | deletes items + vectors |
+| `GET /api/collections/:id/export` | (any reader) | `.json` download (see [Export file](#export-file)) |
+| `GET /api/collections/export` | | `.json` download of every readable collection (`format: "specharvest.collections"`) |
+| `POST /api/collections/import` | an export file, single or *Export all* (≤ 500 MB) | new private collection(s) of the caller (201): the collection, or an array for a bundle (all or nothing); vectors are rebuilt in the background |
 | `GET /api/collections/:id/keys`, `GET /api/keys` | | key registry (one collection / merged) |
 | `POST /api/collections/:id/consolidate` | | `{merges, moved}` — merge duplicate keys now |
 | `GET /api/items` | `?collectionId&limit&offset&includeGone=1` | items (gone listings hidden unless `includeGone`) |
@@ -59,6 +62,22 @@ curl -H "X-Api-Key: shk_…" https://specharvest.example/api/collections
 | `POST /api/notifications/test` | `{channel: "ntfy"\|"telegram"\|"discord"\|"webhook"\|"apprise"\|"push"}` | `{ok, error?}` |
 | `GET /api/push/key` | | `{publicKey}` (VAPID) |
 | `POST /api/push/subscribe`, `DELETE /api/push/subscribe` | `PushSubscription` JSON / `{endpoint}` | `{ok}` |
+
+## Export file
+
+`{format: "specharvest.collection", version: 1, exportedAt, collection, specKeys, items, aliases, webFacts}`:
+
+- `collection`: `{name, startUrl, host, createdAt, detection}`. Import always creates a new collection; on a name clash
+  with one of yours it gets an ` (imported)` suffix.
+- `items`: every listing (gone ones included) with `specs`, per-key `sources` (web lookup values: origin, source URL,
+  confidence), raw/detail text and change-detection hashes, so a later *Re-crawl* still skips unchanged ads. No ids.
+- `specKeys`: the key registry (counts are recomputed on import).
+- `aliases`, `webFacts`: product grouping and the web lookup cache for the collection's product names. Imported with
+  insert-or-ignore, so grouping decisions and lookups already on the target server win.
+
+*Export all* wraps several of these: `{format: "specharvest.collections", version: 1, exportedAt, collections: [<export>, …]}`.
+
+Not included: vectors (re-embedded locally), jobs, LLM spend, search history, "not the same product" decisions.
 
 ## LLM spend
 

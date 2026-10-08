@@ -4,12 +4,13 @@ import { fileURLToPath } from "node:url";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import fastifyStatic from "@fastify/static";
 import { z, ZodError } from "zod";
-import { crawlRequestSchema, enrichRequestSchema, isActiveJob, notificationChannels, searchRequestSchema, type CollectionProducts, type ItemDetail } from "@specharvest/shared";
+import { crawlRequestSchema, importRequestSchema, enrichRequestSchema, isActiveJob, notificationChannels, searchRequestSchema, type CollectionProducts, type ItemDetail } from "@specharvest/shared";
 import { env } from "./config.ts";
 import * as db from "./db/sqlite.ts";
-import { deleteVectors } from "./db/lance.ts";
+import { deleteVectors, upsertVector } from "./db/lance.ts";
+import { embed } from "./embedding.ts";
 import { checkBrowser, proxyConfigured } from "./crawler/browser.ts";
-import { emitJob, jobChannel, JOBS_CHANNEL, ResumeError, resumeCrawl, startCrawl, stopCrawl } from "./crawler/job.ts";
+import { embeddingText, emitJob, jobChannel, JOBS_CHANNEL, ResumeError, resumeCrawl, startCrawl, stopCrawl } from "./crawler/job.ts";
 import { getNotificationSettings, maskSettings, saveNotificationSettings, sendTest } from "./notify/index.ts";
 import { vapidKeys } from "./notify/push.ts";
 import { startEnrichment } from "./enrich/web.ts";
@@ -113,6 +114,45 @@ app.delete("/api/collections/:id", async (req) => {
   const id = requireCollection(idParam(req.params), currentUser(req), "write").id;
   await deleteVectors(db.deleteCollection(id));
   return { ok: true };
+});
+
+const downloadName = (name: string) =>
+  `${name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60) || "collection"}-${new Date().toISOString().slice(0, 10)}.json`;
+
+app.get("/api/collections/:id/export", async (req, reply) => {
+  const id = requireCollection(idParam(req.params), currentUser(req), "read").id;
+  const data = db.exportCollection(id);
+  reply.header("Content-Disposition", `attachment; filename="${downloadName(data.collection.name)}"`);
+  return data;
+});
+
+// Every collection the caller can read, in one file.
+app.get("/api/collections/export", async (req, reply) => {
+  const data = db.exportCollections(currentUser(req));
+  reply.header("Content-Disposition", `attachment; filename="${downloadName("specharvest-all")}"`);
+  return data;
+});
+
+// Always new private collections for the importer (one, or all from an "Export all" file, atomically).
+// Vectors are rebuilt in the background (local model, no LLM cost).
+app.post("/api/collections/import", { bodyLimit: 500_000_000 }, async (req, reply) => {
+  const user = currentUser(req);
+  const body = importRequestSchema.parse(req.body);
+  const imported = db.importCollections("collections" in body ? body.collections : [body], user.id);
+  void (async () => {
+    for (const { collectionId, itemIds } of imported) {
+      for (const item of db.getItemsByIds(itemIds)) {
+        try {
+          await upsertVector(item.id, collectionId, await embed(embeddingText(item)));
+        } catch (err) {
+          log.warn("import embed failed", errorMessage(err));
+        }
+      }
+      log.info(`Imported collection ${collectionId}: embedded ${itemIds.length} items`);
+    }
+  })();
+  const collections = imported.map(({ collectionId }) => db.getCollection(collectionId, user));
+  return reply.status(201).send("collections" in body ? collections : collections[0]);
 });
 
 // Products (name variants grouped). For the owner, names never seen before are grouped first (one cheap LLM

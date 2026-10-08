@@ -77,7 +77,7 @@ export async function parseQuery(query: string, scope: db.CollectionScope, keys:
     const parsed = queryPlanSchema.safeParse(JSON.parse(cached));
     if (parsed.success) {
       log.info(`plan cache hit: "${normalized}"`);
-      return sanitizePlan(parsed.data, keys);
+      return sanitizePlan(parsed.data, keys, db.keyAliasesOf);
     }
   }
   const { data } = await askForJson(
@@ -86,15 +86,24 @@ export async function parseQuery(query: string, scope: db.CollectionScope, keys:
     `Attribute registry:\n${registryForPrompt(scope, keys)}${webKeysForPrompt(keys)}\n\nRequest: ${query}`,
     { purpose: "search", maxTokens: 1200, jsonMode: true },
   );
-  const plan = sanitizePlan(data, keys);
+  const plan = sanitizePlan(data, keys, db.keyAliasesOf);
   db.saveCachedPlan(collectionId, normalized, sig, JSON.stringify(plan));
   return plan;
 }
 
-/** Normalizes keys and keeps missingAttributes consistent with the registry. */
-export function sanitizePlan(plan: Omit<QueryPlan, "show"> & { show?: string[] }, keys: SpecKey[]): QueryPlan {
+/**
+ * Normalizes keys and keeps missingAttributes consistent with the registry. `synonyms` (key_aliases) maps a
+ * key to every name of the same attribute, canonical first: an unknown key becomes the registry's name for it,
+ * else the canonical one — so web facts cached under any synonym are found.
+ */
+export function sanitizePlan(plan: Omit<QueryPlan, "show"> & { show?: string[] }, keys: SpecKey[], synonyms: (key: string) => string[] = (k) => [k]): QueryPlan {
   const known = new Set(["price", "title", ...keys.map((k) => k.key)]);
-  const fix = (k: string) => (k === "price" || k === "title" ? k : normalizeKey(k));
+  const resolve = (k: string) => {
+    if (!k || known.has(k)) return k;
+    const names = synonyms(k);
+    return names.find((n) => known.has(n)) ?? names[0] ?? k;
+  };
+  const fix = (k: string) => (k === "price" || k === "title" ? k : resolve(normalizeKey(k)));
   const filters = plan.filters.map((f) => ({ ...f, key: fix(f.key) })).filter((f) => f.key);
   const sort = plan.sort ? { ...plan.sort, key: fix(plan.sort.key) } : null;
   const used = new Set([...filters.map((f) => f.key), ...(sort ? [sort.key] : [])]);

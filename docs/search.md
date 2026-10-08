@@ -24,7 +24,8 @@ request into:
 poor coverage also trigger a lookup. Older plans without `show` still parse.
 
 Plans are **cached** in `query_cache` by (collection, lowercased/trimmed
-request). A repeated search costs no LLM call. A cached plan is used only
+request). A repeated search costs no LLM call. A miss falls back to the same
+request cached for another collection with an identical registry signature. A cached plan is used only
 while the collection's key registry is unchanged (sha1 of `key:type:unit`).
 New, merged or web-added keys trigger a fresh parse. `GET /api/searches`
 lists recent cached requests (the UI shows them as *Recent* chips).
@@ -111,10 +112,29 @@ available manually ("Look up on the web" under the unknown bucket,
   name variants merged, already known, copied from siblings, looked up,
   left for next run, plus the merged names). It is shown in the search banner,
   the "Web lookup finished" line and the job card on the Ingest view.
+- **Predicted extras (prefetch)**: the search fee is per search, not per
+  attribute, so each paid lookup also asks for up to `ENRICH_PREFETCH_MAX`
+  (12) likely-wanted specs nobody requested yet — keys already looked up for
+  this collection or for products of the same brands, then the collection's
+  *spec profile* (spec-sheet attributes for this kind of product, never
+  listing-specific ones like mileage or color; one cheap `predict` LLM call
+  per collection, stored in `settings`). The model fills them only from pages
+  it already found. Found values are cached in `web_facts` and applied when
+  someone asks for them (free, instant); misses are **not** cached as "not
+  found", so a later explicit request still gets a real lookup. Cost: a few
+  output tokens per extra (~$0.002 for 12). Shown as "+N extra specs cached".
+- **Shared across users**: `web_facts` are global. Two jobs (any users) that
+  need the same product + key at the same time share one paid lookup — the
+  second waits for the first and reads the cache.
+- **Key synonyms**: before lookups, web keys never checked before are reviewed
+  once for synonyms of known ones (`trunk_volume_liters` = `boot_capacity_liters`,
+  one `consolidate` call) and saved in `key_aliases`. Cache reads, sibling
+  copies and query plans treat synonyms as one key.
 - "Not found" answers are retried after `ENRICH_NOT_FOUND_TTL_DAYS` (30, `0` =
   never); found facts don't expire.
 - Each lookup is one chat completion with the OpenRouter server tool
-  `{"type":"openrouter:web_search","parameters":{"engine":"auto","max_results":5,"max_uses":2}}`
+  `{"type":"openrouter:web_search","parameters":{"engine":"auto","max_results":5,"max_uses":1}}`
+  (`WEB_SEARCH_MAX_USES`, default 1 — each extra search is another fee)
   ([docs](https://openrouter.ai/docs/guides/features/server-tools/web-search)),
   asking for value + unit + confidence + source URL per attribute.
 - Answers below `ENRICH_MIN_CONFIDENCE` (0.6) are cached as "not found".
@@ -123,6 +143,6 @@ available manually ("Look up on the web" under the unknown bucket,
 - The UI follows the job over SSE and re-runs the same plan with
   `enrich: false` when it finishes (no loops).
 
-Cost: roughly one web search per distinct product per attribute set
+Cost: roughly one web search per distinct product (requested + predicted attributes together)
 (OpenRouter's Exa engine is about $0.007/search) plus tokens. The job reports
 `webSearches` from `usage.server_tool_use`.

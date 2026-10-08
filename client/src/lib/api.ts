@@ -58,6 +58,11 @@ export const api = {
   renameCollection: (id: number, name: string) => request<Collection>("PATCH", `/api/collections/${id}`, { name }),
   shareCollection: (id: number, isShared: boolean) => request<Collection>("PATCH", `/api/collections/${id}`, { isShared }),
   deleteCollection: (id: number) => request<{ ok: true }>("DELETE", `/api/collections/${id}`),
+  /** Same-origin link — the session cookie authenticates the download. */
+  exportCollectionUrl: (id: number) => `/api/collections/${id}/export`,
+  exportAllCollectionsUrl: "/api/collections/export",
+  /** A single-collection export returns that collection; an "Export all" file returns the list. */
+  importCollection: (data: unknown) => request<Collection | Collection[]>("POST", "/api/collections/import", data),
   collectionProducts: (id: number) => request<CollectionProducts>("GET", `/api/collections/${id}/products`),
   /** Answer a possible match: `to` = same product as that candidate, null = different from all of them. */
   decideMatch: (id: number, identity: string, to: string | null) => request<{ ok: true }>("POST", `/api/collections/${id}/matches`, { identity, to }),

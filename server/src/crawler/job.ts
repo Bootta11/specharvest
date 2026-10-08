@@ -4,7 +4,7 @@ import { env } from "../config.ts";
 import * as db from "../db/sqlite.ts";
 import { upsertVector } from "../db/lance.ts";
 import { embed } from "../embedding.ts";
-import { extractItem } from "../llm/extract.ts";
+import { coerceToType, extractItem, type Extraction } from "../llm/extract.ts";
 import { proposeKeyMerges } from "../llm/consolidate.ts";
 import { canonicalizeIdentities } from "../enrich/group.ts";
 import { withLlmContext } from "../llm/usage.ts";
@@ -200,6 +200,19 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
       }
     }
     if (!detection) {
+      // Another collection on the same site (anyone's) already taught us its cards and pagination.
+      const fromHost = db.findDetectionForHost(collection.host, collectionId);
+      if (fromHost) {
+        await gotoAndSettle(page, url);
+        const urls = await collectItemUrls(page, fromHost);
+        if (urls.length >= 2) {
+          detection = fromHost;
+          db.saveDetection(collectionId, detection);
+          jobLog(jobId, `Reusing the listing structure already known for ${collection.host} (${urls.length} items on page 1)`);
+        }
+      }
+    }
+    if (!detection) {
       patchJob(jobId, { message: "Detecting item cards and pagination" });
       const result = await detectListingStructure(page, url, (m) => jobLog(jobId, m));
       detection = result.detection;
@@ -265,6 +278,7 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
   // ---- 3. Detail pages: render → (fingerprint) → LLM extract → store → embed ----
   let indexed = unchanged + skipped;
   let extracted = 0;
+  let reused = 0;
   let changed = 0;
   let failed = 0;
   const queue = new PQueue({ concurrency: env.SCRAPE_MAX_CONCURRENT_PAGES });
@@ -272,7 +286,11 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
 
   const extractAndStore = async (itemUrl: string, snapshot: DetailSnapshot, cardHash: string) => {
     if (snapshot.text.length < 50) throw new Error("Page had almost no text");
-    const extraction = await extractItem(snapshot, db.listSpecKeys(collectionId));
+    const contentHash = fingerprint(snapshot.stableText);
+    // The same unchanged ad was already read in another collection: copy it instead of paying the LLM again
+    // (a full re-crawl always re-extracts). Nothing about where it came from is stored or shown.
+    const donor = mode === "full" ? null : db.findReusableExtraction(itemUrl, contentHash, collectionId);
+    const extraction = donor ? adoptExtraction(donor, db.listSpecKeys(collectionId)) : await extractItem(snapshot, db.listSpecKeys(collectionId));
     const specs: Record<string, SpecValue> = Object.fromEntries(extraction.specs.map((s) => [s.key, s.value]));
     const itemId = db.upsertItem({
       collectionId,
@@ -286,14 +304,15 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
       specs,
       rawText: snapshot.text,
       cardHash,
-      contentHash: fingerprint(snapshot.stableText),
+      contentHash,
       contentText: snapshot.stableText,
     });
     for (const s of extraction.specs) {
       db.upsertSpecKey(collectionId, { key: s.key, type: s.type, unit: s.unit, label: s.label, example: String(s.value).slice(0, 60), origin: "page" });
     }
     await upsertVector(itemId, collectionId, await embed(embeddingText({ ...extraction, specs })));
-    extracted++;
+    if (donor) reused++;
+    else extracted++;
     emit(jobId, { type: "item", title: extraction.title, url: itemUrl });
   };
 
@@ -361,8 +380,8 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
   db.recountSpecKeys(collectionId);
   // Key merging and gone-marking need the whole listing handled — they run when the resumed crawl completes.
   throwIfStopped(signal);
-  if (extracted > 0) await consolidateKeys(jobId, collectionId);
-  if (extracted > 0) await groupProducts(jobId, collectionId);
+  if (extracted + reused > 0) await consolidateKeys(jobId, collectionId);
+  if (extracted + reused > 0) await groupProducts(jobId, collectionId);
 
   // ---- 4. Listings missing from a complete walk are gone (sold/removed) ----
   let gone = 0;
@@ -387,8 +406,25 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
     error: status === "failed" ? "No items could be extracted" : null,
     finishedAt: Date.now(),
   });
-  jobLog(jobId, `Done: ${summary} — ${extracted} LLM extractions`);
+  jobLog(jobId, `Done: ${summary} — ${extracted} LLM extractions${reused ? `, ${reused} ads reused from cache (no LLM call)` : ""}`);
   retireChannel(jobChannel(jobId));
+}
+
+/**
+ * An extraction copied from the same ad in another collection, fitted to this collection's registry:
+ * a donor key this registry knows under a synonym takes the registry's name, values take its type.
+ */
+function adoptExtraction(donor: db.ReusableExtraction, registry: ReturnType<typeof db.listSpecKeys>): Extraction {
+  const byKey = new Map(registry.map((k) => [k.key, k]));
+  const specs: Extraction["specs"] = [];
+  for (const s of donor.specs) {
+    const key = byKey.has(s.key) ? s.key : (db.keyAliasesOf(s.key).find((k) => byKey.has(k)) ?? s.key);
+    const known = byKey.get(key);
+    const value = coerceToType(s.value, known?.type ?? s.type);
+    if (value === null || specs.some((x) => x.key === key)) continue;
+    specs.push({ key, value, type: known?.type ?? s.type, unit: known?.unit ?? s.unit, label: s.label });
+  }
+  return { title: donor.title, price: donor.price, currency: donor.currency, mainImage: donor.mainImage, description: donor.description, identity: donor.identity, specs };
 }
 
 /** LLM pass that groups name variants of the same product (only names never grouped before). Non-fatal. */

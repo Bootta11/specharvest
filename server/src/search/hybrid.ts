@@ -39,7 +39,7 @@ async function runSearch(req: SearchRequest, viewer: db.Viewer): Promise<Omit<Se
   const limit = req.limit ?? DEFAULT_LIMIT;
 
   let plan: QueryPlan;
-  if (req.plan) plan = sanitizePlan(req.plan, keys);
+  if (req.plan) plan = sanitizePlan(req.plan, keys, db.keyAliasesOf);
   else if (req.query?.trim()) {
     plan = await parseQuery(req.query.trim(), scope, keys);
     db.recordSearch(viewer.id, collectionId, normalizeQuery(req.query));

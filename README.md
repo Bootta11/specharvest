@@ -62,6 +62,10 @@ CI tests, scans and publishes the image on every push to `master`. See
    tiles, *Deep check* every ad page) and marks vanished ads as gone. *Stop* a
    running crawl, or one cut off by a restart, and *Resume* it later — ads
    already read are skipped ([details](docs/crawling.md#stop--resume)).
+   *Export* downloads a collection (items, specs, web lookup results) as
+   `.json`, *Export all* every collection you can see in one file; *Import*
+   adds the collection(s) from such a file as new ones of yours
+   ([format](docs/api.md#export-file)).
 2. **Search** tab → type a request in any language (repeat searches are
    cached and shown as *Recent*), e.g.
    `automatic diesel with the lowest mileage and over 100 kW`. The parsed plan
@@ -91,7 +95,7 @@ variable with comments. The essentials:
 | `PUPPETEER_WS_ENDPOINT` | Remote browser (`ws://`/`wss://`); `PUPPETEER_WS_API_KEY` / `_USER` / `_PASSWORD` for gated endpoints |
 | `PUPPETEER_EXECUTABLE_PATH` | Local Chrome, used when the WS endpoint is blank |
 | `OPENROUTER_MODEL` / `_EXTRACTION_MODEL` / `_SMART_MODEL` / `_WEB_MODEL` | Models per task |
-| `WEB_SEARCH_ENABLED`, `ENRICH_*` | Web lookup switch, caps and thresholds |
+| `WEB_SEARCH_*`, `ENRICH_*` | Web lookup switch, searches per lookup, caps, prefetch and thresholds |
 | `MAX_PAGES`, `MAX_ITEMS`, `SCRAPE_MAX_CONCURRENT_PAGES` | Crawl limits |
 | `PUBLIC_URL`, `VAPID_*` | Links in notifications; Web Push keys (auto-generated if blank) |
 | `ADMIN_EMAIL`, `ADMIN_PASSWORD` | First admin, created on boot when no user exists |

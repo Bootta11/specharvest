@@ -211,6 +211,8 @@ export interface LookupStats {
   toLookUp: number;
   /** Products left for the next run. */
   remaining: number;
+  /** Extra values found and cached by the same lookups (predicted attributes nobody asked for yet). Older jobs lack it. */
+  prefetched?: number;
 }
 
 /** Still queued or running (anything else is a final or paused state). */
@@ -256,6 +258,98 @@ export const enrichRequestSchema = z.object({
   itemIds: z.array(z.number().int().positive()).max(500).optional(),
 });
 export type EnrichRequest = z.infer<typeof enrichRequestSchema>;
+
+// ---------- Collection export / import ----------
+
+export const COLLECTION_EXPORT_FORMAT = "specharvest.collection";
+
+const specValueSchema = z.union([z.number(), z.boolean(), z.string()]);
+const specOriginSchema = z.enum(["page", "web"]);
+const nullableString = z.string().nullable().default(null);
+const nullableNumber = z.number().nullable().default(null);
+
+/**
+ * One collection as a portable file: items with their specs and spec sources (web lookups
+ * included), the spec key registry, and the product-grouping / lookup cache rows for its
+ * products. No ids, owners, jobs or LLM spend — import always creates a new collection.
+ */
+export const collectionExportSchema = z.object({
+  format: z.literal(COLLECTION_EXPORT_FORMAT),
+  version: z.literal(1),
+  exportedAt: z.number(),
+  collection: z.object({
+    name: z.string().trim().min(1).max(200),
+    startUrl: z.string().min(1),
+    host: z.string(),
+    createdAt: z.number(),
+    detection: z.record(z.string(), z.unknown()).nullable().default(null),
+  }),
+  specKeys: z
+    .array(
+      z.object({
+        key: z.string().min(1),
+        type: z.enum(["number", "boolean", "string"]),
+        unit: nullableString,
+        label: z.string(),
+        example: nullableString,
+        origin: specOriginSchema,
+      }),
+    )
+    .max(5000),
+  items: z
+    .array(
+      z.object({
+        url: z.string().min(1),
+        title: z.string(),
+        price: nullableNumber,
+        currency: nullableString,
+        mainImage: nullableString,
+        description: nullableString,
+        identity: nullableString,
+        specs: z.record(z.string(), specValueSchema),
+        sources: z.record(z.string(), z.object({ origin: specOriginSchema, sourceUrl: nullableString, confidence: nullableNumber })).default({}),
+        rawText: nullableString,
+        contentText: nullableString,
+        contentHash: nullableString,
+        cardHash: nullableString,
+        indexedAt: z.number(),
+        lastSeenAt: nullableNumber,
+        checkedAt: nullableNumber,
+        goneAt: nullableNumber,
+      }),
+    )
+    .max(20_000),
+  aliases: z.array(z.object({ identity: z.string().min(1), canonical: z.string().min(1) })).default([]),
+  webFacts: z
+    .array(
+      z.object({
+        identity: z.string().min(1),
+        key: z.string().min(1),
+        value: specValueSchema.nullable(),
+        unit: nullableString,
+        sourceUrl: nullableString,
+        confidence: nullableNumber,
+        found: z.boolean(),
+        fetchedAt: z.number(),
+      }),
+    )
+    .default([]),
+});
+export type CollectionExport = z.infer<typeof collectionExportSchema>;
+
+export const COLLECTIONS_EXPORT_FORMAT = "specharvest.collections";
+
+/** Several collections in one file ("Export all"): each entry is a single-collection export. */
+export const collectionsExportSchema = z.object({
+  format: z.literal(COLLECTIONS_EXPORT_FORMAT),
+  version: z.literal(1),
+  exportedAt: z.number(),
+  collections: z.array(collectionExportSchema).max(1000),
+});
+export type CollectionsExport = z.infer<typeof collectionsExportSchema>;
+
+/** What import accepts: one collection or an "Export all" bundle. */
+export const importRequestSchema = z.discriminatedUnion("format", [collectionExportSchema, collectionsExportSchema]);
 
 /** A previously parsed search, served from the plan cache. */
 export interface RecentSearch {
@@ -358,7 +452,7 @@ export const createUserSchema = z.object({ email: z.string().trim().toLowerCase(
 
 // ---------- LLM spend ----------
 
-export type LlmPurpose = "detect" | "extract" | "consolidate" | "search" | "web-lookup" | "group";
+export type LlmPurpose = "detect" | "extract" | "consolidate" | "search" | "web-lookup" | "group" | "predict";
 
 export interface UsageSummary {
   today: number;

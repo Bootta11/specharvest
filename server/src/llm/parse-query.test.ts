@@ -29,6 +29,18 @@ describe("sanitizePlan", () => {
     expect(plan.missingAttributes.map((m) => m.key)).toEqual(["boot_capacity_liters"]);
   });
 
+  it("maps unknown keys to a registry synonym, else to the canonical name", () => {
+    const synonyms = (k: string) => (k === "kw" ? ["power_kw", "kw"] : k === "trunk_volume_liters" ? ["boot_capacity_liters", "trunk_volume_liters"] : [k]);
+    const plan = sanitizePlan(
+      { filters: [{ key: "kw", op: "gt", value: 100 }], sort: { key: "trunk_volume_liters", dir: "desc" }, semanticText: null, missingAttributes: [{ key: "trunk_volume_liters", type: "number", unit: "l", label: "boot" }] },
+      keys,
+      synonyms,
+    );
+    expect(plan.filters[0].key).toBe("power_kw");
+    expect(plan.sort?.key).toBe("boot_capacity_liters");
+    expect(plan.missingAttributes.map((m) => m.key)).toEqual(["boot_capacity_liters"]);
+  });
+
   it("defaults show to an empty list for older plans", () => {
     expect(sanitizePlan({ filters: [], sort: null, semanticText: null, missingAttributes: [] }, keys).show).toEqual([]);
   });

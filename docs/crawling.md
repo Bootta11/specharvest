@@ -23,7 +23,9 @@ Strategy adapted from twinlisting:
    and handles SPA "next" buttons that have no `href` (OLX.ba is one).
 
 The result is saved on the collection; a re-crawl reuses it and only
-re-detects when it stops matching.
+re-detects when it stops matching. A new collection on a host another
+collection (anyone's) already detected tries that structure first and keeps
+it when it yields ≥ 2 items on the live page — no LLM call.
 
 ## 2. Listing walk
 
@@ -48,6 +50,12 @@ Per new or changed item (concurrency `SCRAPE_MAX_CONCURRENT_PAGES`; see
 - The **first item runs alone** to seed the registry before parallel workers
   start; otherwise each worker invents its own names.
 - A bot challenge on a detail page is retried with backoff (8 s, 20 s).
+- **Reuse across collections**: if the same ad (URL) with the same content hash
+  was already extracted in another collection — any user's — its page values
+  are copied instead of calling the LLM (web-filled values are left out; keys
+  are mapped to this registry's names via key synonyms). The job log says
+  "N ads reused from cache"; nothing about the other collection or its owner is
+  stored or shown. A *Full* re-crawl always re-extracts.
 
 ## 4. Key consolidation
 
@@ -60,6 +68,11 @@ accepted only if:
   *adaptive* reject),
 - booleans (equipment flags) have identical meaningful tokens,
 - the canonical key is the one more items already use.
+
+Same-unit merges are also saved as global **key synonyms** (`key_aliases`), so
+web lookups cached under either name serve every collection. The name check
+folds a few everyday synonyms (*trunk/cargo/luggage = boot*, *top = max*,
+*kerb = curb*).
 
 The cheap model merged unrelated features (cooled → heated seats) in testing;
 that is why both the stronger model and the name check exist. Run manually with

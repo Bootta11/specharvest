@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import type { Collection, Item, Job, JobKind, LlmPurpose, LookupStats, SpecKey, SpecOrigin, SpecSource, SpecType, SpecValue, UsageSummary } from "@specharvest/shared";
+import { COLLECTION_EXPORT_FORMAT, COLLECTIONS_EXPORT_FORMAT, type Collection, type CollectionExport, type CollectionsExport, type Item, type Job, type JobKind, type LlmPurpose, type LookupStats, type SpecKey, type SpecOrigin, type SpecSource, type SpecType, type SpecValue, type UsageSummary } from "@specharvest/shared";
 import { env } from "../config.ts";
 
 let db: DatabaseSync | null = null;
@@ -76,6 +76,14 @@ CREATE TABLE IF NOT EXISTS identity_rejections (
   created_at INTEGER NOT NULL,
   PRIMARY KEY (a, b)
 );
+-- Spec key synonym → canonical key, shared by every collection, so web_facts cached under one name answer the other.
+-- A row with alias = canonical marks a key whose synonyms were already checked (enrich/web.ts reviewWebKeys).
+CREATE TABLE IF NOT EXISTS key_aliases (
+  alias TEXT PRIMARY KEY,
+  canonical TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS key_aliases_canonical ON key_aliases(canonical);
 CREATE TABLE IF NOT EXISTS query_cache (
   collection_id INTEGER NOT NULL DEFAULT 0,
   query TEXT NOT NULL,
@@ -199,6 +207,8 @@ export function getDb(): DatabaseSync {
   db.exec(
     "CREATE INDEX IF NOT EXISTS collections_user ON collections(user_id); CREATE INDEX IF NOT EXISTS jobs_user ON jobs(user_id); CREATE INDEX IF NOT EXISTS llm_usage_user ON llm_usage(user_id);",
   );
+  // Cross-collection reuse: the same ad in another collection, the same request's plan for another collection.
+  db.exec("CREATE INDEX IF NOT EXISTS items_url ON items(url); CREATE INDEX IF NOT EXISTS query_cache_query ON query_cache(query, registry_sig);");
   // Jobs cut off by a restart: crawls with saved options can be resumed, everything else can never finish.
   const now = Date.now();
   db.prepare(
@@ -326,6 +336,17 @@ export function getCollection(id: number, viewer?: Viewer): (Collection & { dete
   return { ...toCollection(r, viewer), detection: parseJson<CollectionDetection | null>(r.detection, null) };
 }
 
+/**
+ * Listing structure already detected for another collection on the same host (any owner), newest first.
+ * Selectors are site structure, not user data; the caller validates them on the live page before use.
+ */
+export function findDetectionForHost(host: string, excludeCollectionId: number): CollectionDetection | null {
+  const r = getDb()
+    .prepare("SELECT detection FROM collections WHERE host = ? AND id != ? AND detection IS NOT NULL ORDER BY created_at DESC LIMIT 1")
+    .get(host, excludeCollectionId) as Row | undefined;
+  return r ? parseJson<CollectionDetection | null>(r.detection, null) : null;
+}
+
 /** The user's own collection for a start URL — re-crawling someone else's (shared) URL makes a new one. */
 export function findCollectionByUrl(startUrl: string, userId: number | null) {
   const r = getDb().prepare("SELECT id FROM collections WHERE start_url = ? AND user_id IS ?").get(startUrl, userId) as Row | undefined;
@@ -356,7 +377,152 @@ export function deleteCollection(id: number): number[] {
   getDb().prepare("DELETE FROM collections WHERE id = ?").run(id);
   getDb().prepare("DELETE FROM query_cache WHERE collection_id = ?").run(id);
   getDb().prepare("DELETE FROM search_history WHERE collection_id = ?").run(id);
+  deleteSetting(`attr-profile:${id}`);
   return ids;
+}
+
+// ---------- Export / import ----------
+
+const str = (v: SQLInputValue | undefined) => (v == null ? null : String(v));
+const num = (v: SQLInputValue | undefined) => (v == null ? null : Number(v));
+
+/** Rows of `table` whose `column` is one of `values` (chunked under SQLite's parameter cap). */
+function rowsWhereIn(table: string, column: string, values: string[]): Row[] {
+  const rows: Row[] = [];
+  for (let i = 0; i < values.length; i += 500) {
+    const chunk = values.slice(i, i + 500);
+    rows.push(...(getDb().prepare(`SELECT * FROM ${table} WHERE ${column} IN (${chunk.map(() => "?").join(",")})`).all(...chunk) as Row[]));
+  }
+  return rows;
+}
+
+/** A collection as a portable file — see collectionExportSchema. */
+export function exportCollection(id: number): CollectionExport {
+  const d = getDb();
+  const c = getCollection(id);
+  if (!c) throw new Error(`Collection ${id} not found`);
+  const itemRows = d.prepare("SELECT * FROM items WHERE collection_id = ? ORDER BY id").all(id) as Row[];
+  const sources = sourcesFor(itemRows.map((r) => Number(r.id)));
+  // Grouping and lookup cache rows are global, keyed by product name: take those touching this collection's names.
+  const identities = [...new Set(itemRows.map((r) => str(r.identity)).filter((s): s is string => !!s))];
+  const aliasRows = rowsWhereIn("identity_aliases", "identity", identities);
+  const canonicals = [...new Set([...identities, ...aliasRows.map((r) => String(r.canonical))])];
+  const factRows = rowsWhereIn("web_facts", "identity", canonicals);
+  return {
+    format: COLLECTION_EXPORT_FORMAT,
+    version: 1,
+    exportedAt: Date.now(),
+    collection: { name: c.name, startUrl: c.startUrl, host: c.host, createdAt: c.createdAt, detection: c.detection as Record<string, unknown> | null },
+    specKeys: (d.prepare("SELECT * FROM spec_keys WHERE collection_id = ? ORDER BY key").all(id) as Row[]).map((r) => {
+      const { count: _, ...k } = toSpecKey(r);
+      return k;
+    }),
+    items: itemRows.map((r) => ({
+      url: String(r.url),
+      title: String(r.title),
+      price: num(r.price),
+      currency: str(r.currency),
+      mainImage: str(r.main_image),
+      description: str(r.description),
+      identity: str(r.identity),
+      specs: parseJson<Record<string, SpecValue>>(r.specs, {}),
+      sources: sources.get(Number(r.id)) ?? {},
+      rawText: str(r.raw_text),
+      contentText: str(r.content_text),
+      contentHash: str(r.content_hash),
+      cardHash: str(r.card_hash),
+      indexedAt: Number(r.indexed_at),
+      lastSeenAt: num(r.last_seen_at),
+      checkedAt: num(r.checked_at),
+      goneAt: num(r.gone_at),
+    })),
+    aliases: aliasRows.map((r) => ({ identity: String(r.identity), canonical: String(r.canonical) })),
+    webFacts: factRows.map((r) => ({
+      identity: String(r.identity),
+      key: String(r.key),
+      value: parseJson<SpecValue | null>(r.value, null),
+      unit: str(r.unit),
+      sourceUrl: str(r.source_url),
+      confidence: num(r.confidence),
+      found: Number(r.found) === 1,
+      fetchedAt: Number(r.fetched_at),
+    })),
+  };
+}
+
+/** Every collection `viewer` can read, as one file ("Export all"). */
+export function exportCollections(viewer: Viewer): CollectionsExport {
+  return {
+    format: COLLECTIONS_EXPORT_FORMAT,
+    version: 1,
+    exportedAt: Date.now(),
+    collections: listCollections(viewer).map((c) => exportCollection(c.id)),
+  };
+}
+
+export interface ImportedCollection {
+  collectionId: number;
+  itemIds: number[];
+}
+
+/**
+ * Creates a new private collection for `userId` from an export, in one transaction.
+ * Grouping and lookup cache rows already present here win (INSERT OR IGNORE).
+ * Returns the new ids — the caller embeds the items for vector search.
+ */
+export function importCollection(data: CollectionExport, userId: number): ImportedCollection {
+  return importCollections([data], userId)[0];
+}
+
+/** Several exports ("Export all" file) as new collections of `userId` — all or nothing. */
+export function importCollections(list: CollectionExport[], userId: number): ImportedCollection[] {
+  const d = getDb();
+  d.exec("BEGIN");
+  try {
+    const imported = list.map((data) => insertImportedCollection(data, userId));
+    d.exec("COMMIT");
+    return imported;
+  } catch (err) {
+    d.exec("ROLLBACK");
+    throw err;
+  }
+}
+
+function insertImportedCollection(data: CollectionExport, userId: number): ImportedCollection {
+  const d = getDb();
+  const taken = new Set((d.prepare("SELECT name FROM collections WHERE user_id = ?").all(userId) as Row[]).map((r) => String(r.name)));
+  const name = taken.has(data.collection.name) ? `${data.collection.name} (imported)` : data.collection.name;
+  const collectionId = createCollection(name, data.collection.startUrl, data.collection.host, userId);
+  d.prepare("UPDATE collections SET created_at = ?, detection = ? WHERE id = ?").run(
+    data.collection.createdAt,
+    data.collection.detection ? JSON.stringify(data.collection.detection) : null,
+    collectionId,
+  );
+  const keyStmt = d.prepare("INSERT OR IGNORE INTO spec_keys (collection_id, key, type, unit, label, example, count, origin) VALUES (?, ?, ?, ?, ?, ?, 0, ?)");
+  for (const k of data.specKeys) keyStmt.run(collectionId, k.key, k.type, k.unit, k.label, k.example, k.origin);
+  const itemStmt = d.prepare(
+    `INSERT OR IGNORE INTO items (collection_id, url, title, price, currency, main_image, description, identity, specs, raw_text, indexed_at,
+       card_hash, content_hash, content_text, last_seen_at, checked_at, gone_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const sourceStmt = d.prepare("INSERT OR REPLACE INTO spec_sources (item_id, key, origin, source_url, confidence, fetched_at) VALUES (?, ?, ?, ?, ?, ?)");
+  const itemIds: number[] = [];
+  for (const it of data.items) {
+    const res = itemStmt.run(
+      collectionId, it.url, it.title, it.price, it.currency, it.mainImage, it.description, it.identity, JSON.stringify(it.specs), it.rawText,
+      it.indexedAt, it.cardHash, it.contentHash, it.contentText, it.lastSeenAt, it.checkedAt, it.goneAt,
+    );
+    if (!res.changes) continue; // duplicate URL in the file
+    const itemId = Number(res.lastInsertRowid);
+    itemIds.push(itemId);
+    for (const [key, s] of Object.entries(it.sources)) sourceStmt.run(itemId, key, s.origin, s.sourceUrl, s.confidence, it.indexedAt);
+  }
+  const now = Date.now();
+  const aliasStmt = d.prepare("INSERT OR IGNORE INTO identity_aliases (identity, canonical, created_at) VALUES (?, ?, ?)");
+  for (const a of data.aliases) aliasStmt.run(a.identity, a.canonical, now);
+  const factStmt = d.prepare("INSERT OR IGNORE INTO web_facts (identity, key, value, unit, source_url, confidence, found, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+  for (const f of data.webFacts) factStmt.run(f.identity, f.key, JSON.stringify(f.value), f.unit, f.sourceUrl, f.confidence, f.found ? 1 : 0, f.fetchedAt);
+  recountSpecKeys(collectionId);
+  return { collectionId, itemIds };
 }
 
 // ---------- Items ----------
@@ -467,6 +633,47 @@ export function markGone(collectionId: number, seenUrls: Iterable<string>): numb
 export function urlsSeenSince(collectionId: number, since: number): Set<string> {
   const rows = getDb().prepare("SELECT url FROM items WHERE collection_id = ? AND last_seen_at >= ?").all(collectionId, since) as Row[];
   return new Set(rows.map((r) => String(r.url)));
+}
+
+export interface ReusableExtraction {
+  title: string;
+  price: number | null;
+  currency: string | null;
+  mainImage: string | null;
+  description: string | null;
+  identity: string | null;
+  /** Values the donor's page stated (web-filled ones left out), with the donor registry's type/unit/label. */
+  specs: Array<{ key: string; value: SpecValue; type: SpecType; unit: string | null; label: string }>;
+}
+
+/**
+ * The same ad (URL) with the same page content, already extracted in another collection — any owner's.
+ * Copying it skips the LLM call. Nothing identifying the donor collection or its owner is returned.
+ */
+export function findReusableExtraction(url: string, contentHash: string, excludeCollectionId: number): ReusableExtraction | null {
+  const d = getDb();
+  const r = d
+    .prepare("SELECT id, collection_id, title, price, currency, main_image, description, identity, specs FROM items WHERE url = ? AND content_hash = ? AND collection_id != ? ORDER BY indexed_at DESC LIMIT 1")
+    .get(url, contentHash, excludeCollectionId) as Row | undefined;
+  if (!r) return null;
+  const webKeys = new Set((d.prepare("SELECT key FROM spec_sources WHERE item_id = ? AND origin = 'web'").all(Number(r.id)) as Row[]).map((x) => String(x.key)));
+  const registry = new Map(listSpecKeys(Number(r.collection_id)).map((k) => [k.key, k]));
+  const specs: ReusableExtraction["specs"] = [];
+  for (const [key, value] of Object.entries(parseJson<Record<string, SpecValue>>(r.specs, {}))) {
+    if (webKeys.has(key) || value === null) continue;
+    const k = registry.get(key);
+    const type: SpecType = k?.type ?? (typeof value === "number" ? "number" : typeof value === "boolean" ? "boolean" : "string");
+    specs.push({ key, value, type, unit: k?.unit ?? null, label: k?.label ?? key });
+  }
+  return {
+    title: String(r.title),
+    price: r.price == null ? null : Number(r.price),
+    currency: r.currency == null ? null : String(r.currency),
+    mainImage: r.main_image == null ? null : String(r.main_image),
+    description: r.description == null ? null : String(r.description),
+    identity: r.identity == null ? null : String(r.identity),
+    specs,
+  };
 }
 
 export function itemExists(collectionId: number, url: string): boolean {
@@ -770,6 +977,100 @@ export function findPageValue(identities: string[], key: string): { value: SpecV
   return { value, url: String(r.url) };
 }
 
+/**
+ * Product attributes found on the web for products like these: keys looked up for this collection
+ * (registry origin 'web') plus keys found for other products of the same brands — most-asked first.
+ */
+export function webKeysNear(collectionId: number | null, brands: string[], limit = 40): Array<{ key: string; type: SpecType; unit: string | null; n: number }> {
+  const d = getDb();
+  const out = new Map<string, { key: string; type: SpecType; unit: string | null; n: number }>();
+  const add = (key: string, type: SpecType, unit: string | null, n: number) => {
+    const prev = out.get(key);
+    out.set(key, { key, type: prev?.type ?? type, unit: prev?.unit ?? unit, n: (prev?.n ?? 0) + n });
+  };
+  if (collectionId != null) {
+    for (const r of d.prepare("SELECT key, type, unit, count FROM spec_keys WHERE collection_id = ? AND origin = 'web'").all(collectionId) as Row[]) {
+      add(String(r.key), String(r.type) as SpecType, r.unit == null ? null : String(r.unit), Number(r.count));
+    }
+  }
+  for (const brand of new Set(brands.filter(Boolean))) {
+    const rows = d
+      .prepare(
+        `SELECT key, MAX(unit) AS unit, MAX(json_type(value)) AS t, COUNT(DISTINCT identity) AS n FROM web_facts
+         WHERE found = 1 AND identity LIKE ? GROUP BY key ORDER BY n DESC LIMIT ?`,
+      )
+      .all(`${brand.replace(/[%_\\]/g, "")} %`, limit) as Row[];
+    for (const r of rows) {
+      const t = String(r.t);
+      add(String(r.key), t === "integer" || t === "real" ? "number" : t === "true" || t === "false" ? "boolean" : "string", r.unit == null ? null : String(r.unit), Number(r.n));
+    }
+  }
+  return [...out.values()].sort((a, b) => b.n - a.n).slice(0, limit);
+}
+
+// ---------- Key aliases (synonym spec keys, global) ----------
+
+/** The canonical name of a spec key, or the key itself. Aliases are kept one hop deep. */
+export function canonicalKey(key: string): string {
+  const r = getDb().prepare("SELECT canonical FROM key_aliases WHERE alias = ?").get(key) as Row | undefined;
+  return r ? String(r.canonical) : key;
+}
+
+/** Every name of the same attribute as `key` (canonical first), including `key` itself. */
+export function keyAliasesOf(key: string): string[] {
+  const canonical = canonicalKey(key);
+  const rows = getDb().prepare("SELECT alias FROM key_aliases WHERE canonical = ?").all(canonical) as Row[];
+  return [...new Set([canonical, ...rows.map((r) => String(r.alias)), key])];
+}
+
+/**
+ * Records `alias` as another name of `canonical` (alias = canonical just marks the key as reviewed).
+ * Keeps the table flat and never creates a cycle; returns false when the pair was refused.
+ */
+export function saveKeyAlias(alias: string, canonical: string): boolean {
+  const d = getDb();
+  const now = Date.now();
+  if (alias === canonical) {
+    d.prepare("INSERT OR IGNORE INTO key_aliases (alias, canonical, created_at) VALUES (?, ?, ?)").run(alias, alias, now);
+    return true;
+  }
+  const target = canonicalKey(canonical);
+  if (target === alias || canonicalKey(alias) === target) return target !== alias;
+  d.prepare("UPDATE key_aliases SET canonical = ? WHERE canonical = ?").run(target, alias);
+  d.prepare("INSERT OR REPLACE INTO key_aliases (alias, canonical, created_at) VALUES (?, ?, ?)").run(alias, target, now);
+  d.prepare("INSERT OR IGNORE INTO key_aliases (alias, canonical, created_at) VALUES (?, ?, ?)").run(target, target, now);
+  return true;
+}
+
+/** Which of these keys have already been checked for synonyms. */
+export function reviewedKeys(keys: string[]): Set<string> {
+  if (keys.length === 0) return new Set();
+  const rows = getDb().prepare(`SELECT alias FROM key_aliases WHERE alias IN (${keys.map(() => "?").join(",")})`).all(...keys) as Row[];
+  return new Set(rows.map((r) => String(r.alias)));
+}
+
+/** Every web-looked-up key with its type, unit and number of products — input for the synonym review. */
+export function webFactKeyStats(limit = 300): SpecKey[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT key, MAX(unit) AS unit, MAX(CASE WHEN found = 1 THEN json_type(value) END) AS t, COUNT(DISTINCT identity) AS n, MAX(CASE WHEN found = 1 THEN value END) AS example
+       FROM web_facts GROUP BY key ORDER BY n DESC LIMIT ?`,
+    )
+    .all(limit) as Row[];
+  return rows.map((r) => {
+    const t = String(r.t);
+    return {
+      key: String(r.key),
+      type: t === "integer" || t === "real" ? "number" : t === "true" || t === "false" ? "boolean" : "string",
+      unit: r.unit == null ? null : String(r.unit),
+      label: String(r.key),
+      example: r.example == null ? null : String(parseJson<SpecValue | null>(r.example, null)),
+      count: Number(r.n),
+      origin: "web",
+    } satisfies SpecKey;
+  });
+}
+
 /** Every attribute key ever looked up on the web (found or not), so query parsing reuses the names. */
 export function webFactKeys(): string[] {
   return (getDb().prepare("SELECT key, COUNT(*) AS n FROM web_facts GROUP BY key ORDER BY n DESC LIMIT 100").all() as Row[]).map((r) => String(r.key));
@@ -780,9 +1081,16 @@ export function webFactKeys(): string[] {
 export function getCachedPlan(collectionId: number | null, query: string, registrySig: string): string | null {
   const d = getDb();
   const r = d.prepare("SELECT plan, registry_sig FROM query_cache WHERE collection_id = ? AND query = ?").get(collectionId ?? 0, query) as Row | undefined;
-  if (!r || String(r.registry_sig) !== registrySig) return null;
-  d.prepare("UPDATE query_cache SET used_at = ?, hits = hits + 1 WHERE collection_id = ? AND query = ?").run(Date.now(), collectionId ?? 0, query);
-  return String(r.plan);
+  if (r && String(r.registry_sig) === registrySig) {
+    d.prepare("UPDATE query_cache SET used_at = ?, hits = hits + 1 WHERE collection_id = ? AND query = ?").run(Date.now(), collectionId ?? 0, query);
+    return String(r.plan);
+  }
+  // Same request parsed for another collection with an identical registry (same keys, types, units): the plan
+  // only holds keys and values, so it fits here too. Copied into this collection's slot for next time.
+  const other = d.prepare("SELECT plan FROM query_cache WHERE query = ? AND registry_sig = ? ORDER BY used_at DESC LIMIT 1").get(query, registrySig) as Row | undefined;
+  if (!other) return null;
+  saveCachedPlan(collectionId, query, registrySig, String(other.plan));
+  return String(other.plan);
 }
 
 export function saveCachedPlan(collectionId: number | null, query: string, registrySig: string, plan: string) {
@@ -979,6 +1287,8 @@ export function applyKeyMerges(collectionId: number, merges: Array<{ from: strin
       if (dirty) d.prepare("UPDATE items SET specs = ? WHERE id = ?").run(JSON.stringify(specs), Number(r.id));
     }
     for (const m of merges) d.prepare("DELETE FROM spec_keys WHERE collection_id = ? AND key = ?").run(collectionId, m.from);
+    // Same-unit synonyms become global aliases, so web facts cached under either name serve every collection.
+    for (const m of merges) if (m.factor === 1) saveKeyAlias(m.from, m.to);
     d.exec("COMMIT");
   } catch (err) {
     d.exec("ROLLBACK");

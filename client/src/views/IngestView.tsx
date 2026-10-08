@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { isActiveJob, type Collection, type CrawlMode, type Job } from "@specharvest/shared";
 import { api, formatUsd, storageGet, storageSet, useJobStream, type AppConfig, type JobsFeed } from "../lib/api.ts";
 import { JobProgress, StatusBadge, jobPercent } from "../components/JobProgress.tsx";
@@ -41,6 +41,9 @@ export function IngestView({ config, collections, feed, onChanged, onSearch }: P
   const [jobs, setJobs] = useState<Job[]>([]);
   const [streamNonce, setStreamNonce] = useState(0);
   const [productsOf, setProductsOf] = useState<Collection | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
+  const importInput = useRef<HTMLInputElement>(null);
   const stream = useJobStream(jobId, streamNonce);
 
   const loadJobs = () => api.jobs().then(setJobs, () => {});
@@ -137,6 +140,28 @@ export function IngestView({ config, collections, feed, onChanged, onSearch }: P
     if (!name || name === c.name) return;
     await api.renameCollection(c.id, name).catch((err) => setError((err as Error).message));
     onChanged();
+  };
+
+  const importFile = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setImporting(true);
+    setImportError(null);
+    try {
+      let data: unknown;
+      try {
+        data = JSON.parse(await file.text());
+      } catch {
+        throw new Error(`${file.name} isn't a SpecHarvest export (not valid JSON)`);
+      }
+      await api.importCollection(data);
+      onChanged();
+    } catch (err) {
+      setImportError((err as Error).message);
+    } finally {
+      setImporting(false);
+    }
   };
 
   return (
@@ -272,10 +297,24 @@ export function IngestView({ config, collections, feed, onChanged, onSearch }: P
         )}
 
         <div className="card">
-          <div className="flex items-center justify-between border-b border-stone-200 px-4 py-3 dark:border-stone-800">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-stone-200 px-4 py-3 dark:border-stone-800">
             <h2 className="font-semibold">Collections</h2>
             <span className="text-sm text-stone-500">{collections.reduce((n, c) => n + c.itemCount, 0)} items</span>
+            <a
+              className={`btn-ghost btn-sm ml-auto ${collections.length === 0 ? "pointer-events-none opacity-50" : ""}`}
+              href={api.exportAllCollectionsUrl}
+              download
+              aria-disabled={collections.length === 0}
+              title="Download every collection you can see as one .json file"
+            >
+              Export all
+            </a>
+            <button className="btn-ghost btn-sm" disabled={importing} onClick={() => importInput.current?.click()} title="Add collections from an exported .json file (one or Export all)">
+              {importing ? "Importing…" : "Import"}
+            </button>
+            <input ref={importInput} type="file" accept=".json,application/json" className="hidden" onChange={importFile} />
           </div>
+          {importError && <p className="border-b border-stone-200 px-4 py-2 text-sm text-red-700 dark:border-stone-800 dark:text-red-300">{importError}</p>}
           {collections.length === 0 ? (
             <p className="p-4 text-sm text-stone-500">Nothing crawled yet.</p>
           ) : (
@@ -318,6 +357,9 @@ export function IngestView({ config, collections, feed, onChanged, onSearch }: P
                     <button className="btn-ghost btn-sm" onClick={() => setProductsOf(c)}>
                       Products
                     </button>
+                    <a className="btn-ghost btn-sm" href={api.exportCollectionUrl(c.id)} download title="Download as .json — items, specs and web lookup results">
+                      Export
+                    </a>
                     {c.canEdit && (
                       <>
                         <button

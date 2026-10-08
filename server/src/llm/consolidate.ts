@@ -68,11 +68,15 @@ export async function proposeKeyMerges(keys: SpecKey[]): Promise<KeyMerge[]> {
 const UNIT_TOKENS = new Set(["kw", "hp", "ps", "cc", "ccm", "l", "liters", "litres", "kg", "mm", "cm", "m", "inch", "km", "gb", "tb", "mah", "w", "years", "months", "s"]);
 const FILLER = new Set(["power", "capacity", "volume", "size", "number", "of", "count", "total", "type", "system", "function", "feature", "with", "and"]);
 
+// Regional / everyday synonyms folded to one token, so "trunk_volume_liters" ~ "boot_capacity_liters" can merge.
+const SYNONYMS: Record<string, string> = { trunk: "boot", cargo: "boot", luggage: "boot", kerb: "curb", maximum: "max", top: "max", mass: "weight" };
+
 function tokens(key: string): Set<string> {
   return new Set(
     key
       .split("_")
       .map((t) => t.replace(/s$/, ""))
+      .map((t) => SYNONYMS[t] ?? t)
       .filter((t) => t && !UNIT_TOKENS.has(t) && !FILLER.has(t)),
   );
 }
