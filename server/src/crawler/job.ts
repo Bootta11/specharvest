@@ -6,7 +6,7 @@ import { upsertVector } from "../db/lance.ts";
 import { embed } from "../embedding.ts";
 import { coerceToType, extractItem, type Extraction } from "../llm/extract.ts";
 import { proposeKeyMerges } from "../llm/consolidate.ts";
-import { canonicalizeIdentities } from "../enrich/group.ts";
+import { groupForCollection } from "../enrich/group.ts";
 import { withLlmContext } from "../llm/usage.ts";
 import { createLogger, errorMessage } from "../lib/logger.ts";
 import { notifyJobFinished } from "../notify/index.ts";
@@ -427,14 +427,19 @@ function adoptExtraction(donor: db.ReusableExtraction, registry: ReturnType<type
   return { title: donor.title, price: donor.price, currency: donor.currency, mainImage: donor.mainImage, description: donor.description, identity: donor.identity, specs };
 }
 
-/** LLM pass that groups name variants of the same product (only names never grouped before). Non-fatal. */
+/**
+ * Groups name variants of the same product (LLM only for names never grouped before), per the collection's
+ * grouping mode — loose also merges single-candidate possible matches. Non-fatal.
+ */
 export async function groupProducts(jobId: number, collectionId: number) {
   try {
     patchJob(jobId, { message: "Grouping product names" });
-    const { merges, calls } = await canonicalizeIdentities(db.listItems(collectionId, 5000, 0, true));
-    if (calls === 0) return;
-    jobLog(jobId, `Grouped product names: ${merges.length} variant${merges.length === 1 ? "" : "s"} merged into the same product`);
-    for (const m of merges) jobLog(jobId, `Same product: "${m.from}" → "${m.to}"`);
+    const { merges, calls, loose } = await groupForCollection(collectionId, db.listItems(collectionId, 5000, 0, true));
+    if (calls > 0) {
+      jobLog(jobId, `Grouped product names: ${merges.length} variant${merges.length === 1 ? "" : "s"} merged into the same product`);
+      for (const m of merges) jobLog(jobId, `Same product: "${m.from}" → "${m.to}"`);
+    }
+    for (const m of loose) jobLog(jobId, `Same product (loose): "${m.from}" → "${m.to}"`);
   } catch (err) {
     jobLog(jobId, `Product grouping skipped: ${errorMessage(err)}`, "warn");
   }

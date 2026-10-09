@@ -9,6 +9,7 @@ import type {
   CrawlRequest,
   EnrichRequest,
   GroupInput,
+  GroupingMode,
   Item,
   ItemDetail,
   Job,
@@ -59,6 +60,7 @@ export const api = {
   keys: (collectionId: number | null) => request<SpecKey[]>("GET", collectionId ? `/api/collections/${collectionId}/keys` : "/api/keys"),
   renameCollection: (id: number, name: string) => request<Collection>("PATCH", `/api/collections/${id}`, { name }),
   shareCollection: (id: number, isShared: boolean) => request<Collection>("PATCH", `/api/collections/${id}`, { isShared }),
+  setCollectionGrouping: (id: number, grouping: GroupingMode) => request<Collection>("PATCH", `/api/collections/${id}`, { grouping }),
   deleteCollection: (id: number) => request<{ ok: true }>("DELETE", `/api/collections/${id}`),
   /** Same-origin link — the session cookie authenticates the download. */
   exportCollectionUrl: (id: number) => `/api/collections/${id}/export`,

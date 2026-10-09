@@ -7,7 +7,7 @@ import { afterAll, describe, expect, it } from "vitest";
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "specharvest-group-"));
 process.env.DATA_DIR = dataDir;
 const db = await import("../db/sqlite.ts");
-const { sameProduct, maybeSameProduct, regroup, matchSuggestions, resolvedIdentity, sameProductOf, productGroups, ungroupedCount } = await import("./group.ts");
+const { sameProduct, maybeSameProduct, regroup, matchSuggestions, resolvedIdentity, sameProductOf, productGroups, ungroupedCount, autoConfirmMatches, groupForCollection } = await import("./group.ts");
 
 afterAll(() => fs.rmSync(dataDir, { recursive: true, force: true }));
 
@@ -200,6 +200,47 @@ describe("collection products", () => {
     ]);
     expect(db.listCollections().find((x) => x.id === c)?.productCount).toBe(3);
     expect(ungroupedCount(items)).toBe(1); // "corsa basic" never went through grouping
+  });
+});
+
+describe("grouping modes", () => {
+  const collectionWith = (mode: "strict" | "loose", names: string[]) => {
+    const c = db.createCollection(mode, `https://${mode}.example/`, `${mode}.example`);
+    db.setCollectionGrouping(c, mode);
+    const base = { collectionId: c, price: null, currency: null, mainImage: null, description: null, rawText: null, specs: {} };
+    names.forEach((identity, n) => db.upsertItem({ ...base, url: `https://${mode}.example/${n}`, title: identity, identity }));
+    db.saveIdentityAliases(names.map((identity) => ({ identity, canonical: identity })));
+    return c;
+  };
+
+  it("loose: groups single-candidate possible matches, keeps ambiguous and rejected ones as suggestions", async () => {
+    const c = collectionWith("loose", [
+      "zeekr seven 2026",
+      "zeekr seven premium 2026",
+      "byd seal 2025",
+      "byd seal design 2025",
+      "byd seal excellence 2025",
+      "byd atto 2026",
+      "byd atto comfort 2026",
+    ]);
+    db.rejectPair("byd atto 2026", "byd atto comfort 2026");
+    expect(db.getCollection(c)?.grouping).toBe("loose");
+
+    const { loose } = await groupForCollection(c, db.listItems(c, 100), { llm: false });
+    expect(loose).toEqual([{ from: "zeekr seven 2026", to: "zeekr seven premium 2026" }]);
+    expect(db.getCanonicalIdentity("byd atto 2026")).toBe("byd atto 2026");
+    expect(matchSuggestions(db.listItems(c, 100)).map((s) => [s.identity, s.candidates.length])).toEqual([["byd seal 2025", 2]]);
+  });
+
+  it("strict (default): possible matches only become suggestions", async () => {
+    const c = collectionWith("strict", ["nio et 2026", "nio et touring 2026"]);
+    expect(db.getCollection(db.createCollection("new", "https://n.example/", "n.example"))?.grouping).toBe("strict");
+    const { loose } = await groupForCollection(c, db.listItems(c, 100), { llm: false });
+    expect(loose).toEqual([]);
+    expect(db.getCanonicalIdentity("nio et 2026")).toBe("nio et 2026");
+    expect(matchSuggestions(db.listItems(c, 100))).toHaveLength(1);
+    // Switching to loose (what PATCH grouping does) confirms it.
+    expect(autoConfirmMatches(db.listItems(c, 100))).toEqual([{ from: "nio et 2026", to: "nio et touring 2026" }]);
   });
 });
 

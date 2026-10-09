@@ -29,6 +29,8 @@ describe("collection export / import", () => {
   db.saveWebFact({ identity: "Bike A 2024", key: "weight_kg", value: 180, unit: "kg", sourceUrl: "https://maker.example/a", confidence: 0.9, found: true });
   db.mergeCanonical("bike a 2024", "Bike A 2024");
 
+  db.setCollectionGrouping(sourceId, "loose");
+
   const exported = collectionExportSchema.parse(JSON.parse(JSON.stringify(db.exportCollection(sourceId))));
 
   it("exports items, web lookup sources, keys and the related cache rows", () => {
@@ -43,12 +45,17 @@ describe("collection export / import", () => {
     expect(exported.collection.detection).toMatchObject({ listItemSelector: ".card" });
   });
 
+  it("reads files from before grouping modes as strict", () => {
+    const { grouping: _drop, ...oldCollection } = exported.collection;
+    expect(collectionExportSchema.parse({ ...exported, collection: oldCollection }).collection.grouping).toBe("strict");
+  });
+
   it("imports as a new private collection of the importer", () => {
     const { collectionId, itemIds } = db.importCollection(exported, importer);
     expect(collectionId).not.toBe(sourceId);
     expect(itemIds).toHaveLength(2);
     const c = db.getCollection(collectionId, { id: importer, role: "user" })!;
-    expect(c).toMatchObject({ name: "Bikes", ownerId: importer, isShared: false, canEdit: true, itemCount: 2 });
+    expect(c).toMatchObject({ name: "Bikes", ownerId: importer, isShared: false, canEdit: true, itemCount: 2, grouping: "loose" });
     expect(c.detection).toMatchObject({ paginationType: "pages" });
 
     const items = db.listItems(collectionId, 10);

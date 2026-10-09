@@ -36,8 +36,8 @@ curl -H "X-Api-Key: shk_…" https://specharvest.example/api/collections
 | --- | --- | --- |
 | `GET /api/health` (also `HEAD`) | public | `{ok, status, checks: {database: {ok, latencyMs}}, uptimeSeconds, timestamp}`; 503 with `ok:false` if the DB is down |
 | `GET /api/config` | | `version` (commit), proxy/web/LLM flags, crawl defaults, models |
-| `GET /api/collections` | | readable collections with item counts, `llmCost` (USD), `ownerEmail`, `isShared`, `canEdit` |
-| `PATCH /api/collections/:id` | `{name?, isShared?}` (owner/admin) | collection |
+| `GET /api/collections` | | readable collections with item counts, `llmCost` (USD), `ownerEmail`, `isShared`, `grouping`, `canEdit` |
+| `PATCH /api/collections/:id` | `{name?, isShared?, grouping?: "strict" \| "loose"}` (owner/admin; switching to `loose` groups waiting single-candidate matches) | collection |
 | `DELETE /api/collections/:id` | | deletes items + vectors |
 | `GET /api/collections/:id/export` | (any reader) | `.json` download (see [Export file](#export-file)) |
 | `GET /api/collections/export` | | `.json` download of every readable collection (`format: "specharvest.collections"`) |
@@ -70,7 +70,7 @@ curl -H "X-Api-Key: shk_…" https://specharvest.example/api/collections
 
 `{format: "specharvest.collection", version: 1, exportedAt, collection, specKeys, items, aliases, webFacts}`:
 
-- `collection`: `{name, startUrl, host, createdAt, detection}`. Import always creates a new collection; on a name clash
+- `collection`: `{name, startUrl, host, createdAt, grouping, detection}` (`grouping` defaults to `"strict"` when absent). Import always creates a new collection; on a name clash
   with one of yours it gets an ` (imported)` suffix.
 - `items`: every listing (gone ones included) with `specs`, per-key `sources` (web lookup values: origin, source URL,
   confidence), raw/detail text and change-detection hashes, so a later *Re-crawl* still skips unchanged ads. No ids.

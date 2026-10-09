@@ -87,11 +87,20 @@ available manually ("Look up on the web" under the unknown bucket,
   (`turbo` = `t-gdi`), and years/power/engine may be missing on one side.
   These are grouped automatically, by the LLM for new names and by a free
   rule-based `regroup` over all names. **Possible** (`maybeSameProduct`): one
-  name's words are a subset of the other's (usually a missing trim). These are
-  never grouped automatically; the owner confirms them in the Products view
-  ("Same product" / "Different product"). Decisions and "Not the same" splits
-  are stored in `identity_rejections`, so the same pair is never grouped or
-  suggested again.
+  name's words are a subset of the other's (usually a missing trim). In
+  **Strict** mode (the default) these are never grouped automatically; the
+  owner confirms them in the Products view ("Same product" / "Different
+  product"). Decisions and "Not the same" splits are stored in
+  `identity_rejections`, so the same pair is never grouped or suggested again.
+  **Grouping mode** is set per collection by its owner (Products view →
+  *Grouping: Strict · Loose*, `PATCH /api/collections/:id {grouping}`). In
+  **Loose** mode, a possible match with exactly **one** candidate is grouped
+  automatically, the same as clicking "Same product" (free, no LLM). This runs
+  when switching to Loose, after crawls, before web lookups and when the owner
+  opens Products. Names with several candidates still wait for the owner, and
+  rejected pairs are never grouped. Product names are shared, so a loose merge
+  also applies to other collections with those names. Switching back to Strict
+  stops new loose merges; existing ones stay until split ("Not the same").
   Grouping also runs at the end of every crawl that extracted something, and
   the first time a collection's owner opens its **Products** view
   (`GET /api/collections/:id/products`; read-only viewers are never billed).

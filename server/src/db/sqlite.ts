@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import { COLLECTION_EXPORT_FORMAT, COLLECTIONS_EXPORT_FORMAT, type Collection, type CollectionExport, type CollectionGroup, type CollectionsExport, type Item, type Job, type JobKind, type LlmPurpose, type LookupStats, type SpecKey, type SpecOrigin, type SpecSource, type SpecType, type SpecValue, type UsageSummary } from "@specharvest/shared";
+import { COLLECTION_EXPORT_FORMAT, COLLECTIONS_EXPORT_FORMAT, type Collection, type CollectionExport, type GroupingMode, type CollectionGroup, type CollectionsExport, type Item, type Job, type JobKind, type LlmPurpose, type LookupStats, type SpecKey, type SpecOrigin, type SpecSource, type SpecType, type SpecValue, type UsageSummary } from "@specharvest/shared";
 import { env } from "../config.ts";
 
 let db: DatabaseSync | null = null;
@@ -215,6 +215,8 @@ export function getDb(): DatabaseSync {
   // Ownership (users). NULL = created before users existed; handed to the first admin by assignOrphansTo().
   addColumnIfMissing("collections", "user_id", "INTEGER REFERENCES users(id) ON DELETE SET NULL");
   addColumnIfMissing("collections", "is_shared", "INTEGER NOT NULL DEFAULT 0");
+  // Product grouping mode (enrich/group.ts): 'strict' groups certain matches only, 'loose' also single-candidate possible ones.
+  addColumnIfMissing("collections", "grouping", "TEXT NOT NULL DEFAULT 'strict'");
   addColumnIfMissing("jobs", "user_id", "INTEGER");
   addColumnIfMissing("llm_usage", "user_id", "INTEGER");
   addColumnIfMissing("push_subscriptions", "user_id", "INTEGER");
@@ -324,6 +326,7 @@ function toCollection(r: Row, viewer?: Viewer): Collection {
     ownerId,
     ownerEmail: r.owner_email == null ? null : String(r.owner_email),
     isShared: Number(r.is_shared ?? 0) === 1,
+    grouping: r.grouping === "loose" ? "loose" : "strict",
     canEdit: !!viewer && (viewer.role === "admin" || ownerId === viewer.id),
   };
 }
@@ -376,6 +379,10 @@ export function createCollection(name: string, startUrl: string, host: string, u
 
 export function setCollectionShared(id: number, shared: boolean) {
   getDb().prepare("UPDATE collections SET is_shared = ? WHERE id = ?").run(shared ? 1 : 0, id);
+}
+
+export function setCollectionGrouping(id: number, mode: GroupingMode) {
+  getDb().prepare("UPDATE collections SET grouping = ? WHERE id = ?").run(mode, id);
 }
 
 export function saveDetection(id: number, detection: CollectionDetection | null) {
@@ -493,7 +500,7 @@ export function exportCollection(id: number): CollectionExport {
     format: COLLECTION_EXPORT_FORMAT,
     version: 1,
     exportedAt: Date.now(),
-    collection: { name: c.name, startUrl: c.startUrl, host: c.host, createdAt: c.createdAt, detection: c.detection as Record<string, unknown> | null },
+    collection: { name: c.name, startUrl: c.startUrl, host: c.host, createdAt: c.createdAt, grouping: c.grouping, detection: c.detection as Record<string, unknown> | null },
     specKeys: (d.prepare("SELECT * FROM spec_keys WHERE collection_id = ? ORDER BY key").all(id) as Row[]).map((r) => {
       const { count: _, ...k } = toSpecKey(r);
       return k;
@@ -574,8 +581,9 @@ function insertImportedCollection(data: CollectionExport, userId: number): Impor
   const taken = new Set((d.prepare("SELECT name FROM collections WHERE user_id = ?").all(userId) as Row[]).map((r) => String(r.name)));
   const name = taken.has(data.collection.name) ? `${data.collection.name} (imported)` : data.collection.name;
   const collectionId = createCollection(name, data.collection.startUrl, data.collection.host, userId);
-  d.prepare("UPDATE collections SET created_at = ?, detection = ? WHERE id = ?").run(
+  d.prepare("UPDATE collections SET created_at = ?, grouping = ?, detection = ? WHERE id = ?").run(
     data.collection.createdAt,
+    data.collection.grouping,
     data.collection.detection ? JSON.stringify(data.collection.detection) : null,
     collectionId,
   );

@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import fastifyStatic from "@fastify/static";
 import { z, ZodError } from "zod";
-import { crawlRequestSchema, groupInputSchema, importRequestSchema, enrichRequestSchema, isActiveJob, notificationChannels, searchRequestSchema, type CollectionProducts, type ItemDetail } from "@specharvest/shared";
+import { crawlRequestSchema, groupInputSchema, groupingModes, importRequestSchema, enrichRequestSchema, isActiveJob, notificationChannels, searchRequestSchema, type CollectionProducts, type ItemDetail } from "@specharvest/shared";
 import { env } from "./config.ts";
 import * as db from "./db/sqlite.ts";
 import { deleteVectors, upsertVector } from "./db/lance.ts";
@@ -14,7 +14,7 @@ import { embeddingText, emitJob, jobChannel, JOBS_CHANNEL, ResumeError, resumeCr
 import { getNotificationSettings, maskSettings, saveNotificationSettings, sendTest } from "./notify/index.ts";
 import { vapidKeys } from "./notify/push.ts";
 import { startEnrichment } from "./enrich/web.ts";
-import { canonicalizeIdentities, lookupIdentity, matchSuggestions, productGroups, regroup, sameProductOf, ungroupedCount } from "./enrich/group.ts";
+import { autoConfirmMatches, groupForCollection, lookupIdentity, matchSuggestions, productGroups, sameProductOf, ungroupedCount } from "./enrich/group.ts";
 import { search } from "./search/hybrid.ts";
 import { proposeKeyMerges } from "./llm/consolidate.ts";
 import { withLlmContext } from "./llm/usage.ts";
@@ -99,15 +99,24 @@ app.get("/api/collections", async (req) => db.listCollections(currentUser(req)))
 app.get("/api/collections/:id/keys", async (req) => db.listSpecKeys(readScope(req, idParam(req.params))));
 app.get("/api/keys", async (req) => db.listSpecKeys(readScope(req, null)));
 
-const collectionPatchSchema = z.object({ name: z.string().trim().min(1).max(200).optional(), isShared: z.boolean().optional() });
+const collectionPatchSchema = z.object({
+  name: z.string().trim().min(1).max(200).optional(),
+  isShared: z.boolean().optional(),
+  grouping: z.enum(groupingModes).optional(),
+});
 
 app.patch("/api/collections/:id", async (req) => {
   const user = currentUser(req);
   const id = requireCollection(idParam(req.params), user, "write").id;
   const body = collectionPatchSchema.parse(req.body);
-  if (body.name === undefined && body.isShared === undefined) throw httpError(400, "Nothing to change");
+  if (body.name === undefined && body.isShared === undefined && body.grouping === undefined) throw httpError(400, "Nothing to change");
   if (body.name !== undefined) db.renameCollection(id, body.name);
   if (body.isShared !== undefined) db.setCollectionShared(id, body.isShared);
+  if (body.grouping !== undefined) {
+    db.setCollectionGrouping(id, body.grouping);
+    // Switching to loose groups the waiting single-candidate matches right away (free, no LLM).
+    if (body.grouping === "loose") autoConfirmMatches(db.listItems(id, 5000, 0, true));
+  }
   return db.getCollection(id, user);
 });
 
@@ -188,9 +197,7 @@ app.get("/api/collections/:id/products", async (req): Promise<CollectionProducts
   const collection = requireCollection(idParam(req.params), user, "read");
   const items = db.listItems(collection.id, 5000);
   if (collection.canEdit) {
-    if (env.OPENROUTER_API_KEY && ungroupedCount(items) > 0) {
-      await withLlmContext({ collectionId: collection.id, userId: user.id }, () => canonicalizeIdentities(items));
-    } else regroup(items.map(lookupIdentity));
+    await withLlmContext({ collectionId: collection.id, userId: user.id }, () => groupForCollection(collection.id, items, { llm: !!env.OPENROUTER_API_KEY }));
   }
   return {
     products: productGroups(items),

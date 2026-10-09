@@ -4,6 +4,9 @@ export type SpecValue = number | boolean | string;
 export type SpecType = "number" | "boolean" | "string";
 export type SpecOrigin = "page" | "web";
 
+export type GroupingMode = "strict" | "loose";
+export const groupingModes = ["strict", "loose"] as const satisfies readonly GroupingMode[];
+
 export interface Collection {
   id: number;
   name: string;
@@ -19,6 +22,8 @@ export interface Collection {
   ownerEmail: string | null;
   /** Readable (search only) by every signed-in user. */
   isShared: boolean;
+  /** How product names are grouped: strict = certain matches only; loose = also a possible match with a single candidate. */
+  grouping: GroupingMode;
   /** The viewer owns it or is an admin: may crawl, rename, share or delete. */
   canEdit: boolean;
 }
@@ -301,6 +306,8 @@ export const collectionExportSchema = z.object({
     startUrl: z.string().min(1),
     host: z.string(),
     createdAt: z.number(),
+    // Absent in files from before grouping modes existed.
+    grouping: z.enum(groupingModes).default("strict"),
     detection: z.record(z.string(), z.unknown()).nullable().default(null),
   }),
   specKeys: z

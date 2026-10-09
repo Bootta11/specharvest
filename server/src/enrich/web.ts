@@ -12,7 +12,7 @@ import { proposeKeyMerges } from "../llm/consolidate.ts";
 import { createLogger, errorMessage } from "../lib/logger.ts";
 import { retireChannel } from "../sse/hub.ts";
 import { embeddingText, emitJob, jobChannel, jobLog, patchJob } from "../crawler/job.ts";
-import { canonicalizeIdentities, lookupIdentity, resolvedIdentity } from "./group.ts";
+import { autoConfirmMatches, canonicalizeIdentities, lookupIdentity, resolvedIdentity } from "./group.ts";
 import { candidateAttributes } from "./predict.ts";
 
 export { lookupIdentity };
@@ -235,6 +235,10 @@ async function runEnrichment(jobId: number, input: EnrichInput) {
   const grouping = await canonicalizeIdentities(needing);
   if (grouping.calls) jobLog(jobId, `Grouped product names: ${grouping.merged} variant${grouping.merged === 1 ? "" : "s"} merged into the same product`);
   for (const m of grouping.merges) jobLog(jobId, `Same product: "${m.from}" → "${m.to}"`);
+  // A loose collection also groups its single-candidate possible matches (over all its listings, not just these).
+  if (input.collectionId != null && db.getCollection(input.collectionId)?.grouping === "loose") {
+    for (const m of autoConfirmMatches(db.listItems(input.collectionId, 5000, 0, true))) jobLog(jobId, `Same product (loose): "${m.from}" → "${m.to}"`);
+  }
 
   // Group items needing any attribute by canonical product identity → one web call per product.
   const groups = new Map<string, { items: Item[]; attrs: Map<string, MissingAttribute> }>();

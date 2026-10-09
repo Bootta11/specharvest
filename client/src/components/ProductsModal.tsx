@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { Collection, CollectionProducts, MatchSuggestion } from "@specharvest/shared";
+import type { Collection, CollectionProducts, GroupingMode, MatchSuggestion } from "@specharvest/shared";
 import { api } from "../lib/api.ts";
 import { formatPrice, GoneBadge } from "./ItemCard.tsx";
 import { Modal, Notice } from "./Modal.tsx";
@@ -12,6 +12,7 @@ export function ProductsModal({ collection, onClose, onGrouped }: { collection: 
   const [multiOnly, setMultiOnly] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
+  const [grouping, setGrouping] = useState<GroupingMode>(collection.grouping);
 
   useEffect(() => {
     let live = true;
@@ -64,9 +65,23 @@ export function ProductsModal({ collection, onClose, onGrouped }: { collection: 
       )}
       {data && (
         <div className="space-y-3">
-          <p className="text-sm text-stone-600 dark:text-stone-400">
-            {data.listings} listings → <strong className="text-stone-900 dark:text-stone-100">{data.products.length} products</strong> · {multi} with several listings
-          </p>
+          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+            <p className="text-sm text-stone-600 dark:text-stone-400">
+              {data.listings} listings → <strong className="text-stone-900 dark:text-stone-100">{data.products.length} products</strong> · {multi} with several listings
+            </p>
+            <GroupingSelect
+              value={grouping}
+              canEdit={collection.canEdit}
+              busy={busy !== null}
+              onChange={(mode) =>
+                act("grouping", async () => {
+                  await api.setCollectionGrouping(collection.id, mode);
+                  setGrouping(mode);
+                  onGrouped?.();
+                })
+              }
+            />
+          </div>
           {data.suggestions.length > 0 && (
             <Suggestions
               suggestions={data.suggestions}
@@ -150,6 +165,44 @@ export function ProductsModal({ collection, onClose, onGrouped }: { collection: 
         </div>
       )}
     </Modal>
+  );
+}
+
+const GROUPING_HINT: Record<GroupingMode, string> = {
+  strict: "Strict: only names that clearly match are grouped; possible matches wait for you.",
+  loose: "Loose: also groups a name that only leaves out details (e.g. the trim) when there is one clear match.",
+};
+
+/** Strict / Loose product grouping for the collection (owners change it; others see it). */
+function GroupingSelect({ value, canEdit, busy, onChange }: { value: GroupingMode; canEdit: boolean; busy: boolean; onChange: (mode: GroupingMode) => void }) {
+  if (!canEdit) {
+    return (
+      <span className="text-xs text-stone-500" title={GROUPING_HINT[value]}>
+        Grouping: {value === "strict" ? "Strict" : "Loose"}
+      </span>
+    );
+  }
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      <span className="text-stone-500">Grouping</span>
+      <span className="inline-flex rounded-lg border border-stone-200 p-0.5 dark:border-stone-700" role="group" aria-label="Product grouping">
+        {(["strict", "loose"] as const).map((mode) => (
+          <button
+            key={mode}
+            type="button"
+            disabled={busy}
+            aria-pressed={value === mode}
+            title={GROUPING_HINT[mode]}
+            onClick={() => value !== mode && onChange(mode)}
+            className={`rounded-md px-2.5 py-1 font-medium disabled:opacity-60 ${
+              value === mode ? "bg-brand-600 text-white" : "text-stone-600 hover:text-stone-900 dark:text-stone-400 dark:hover:text-stone-100"
+            }`}
+          >
+            {mode === "strict" ? "Strict" : "Loose"}
+          </button>
+        ))}
+      </span>
+    </div>
   );
 }
 

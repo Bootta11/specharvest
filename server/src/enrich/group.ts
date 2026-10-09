@@ -354,3 +354,45 @@ export function matchSuggestions(items: Item[]): MatchSuggestion[] {
     .map(([identity, to]) => ({ ...brief(identity), identity, candidates: to.map(brief).sort((x, y) => y.listings - x.listings) }))
     .sort((x, y) => x.identity.localeCompare(y.identity));
 }
+
+/**
+ * Loose grouping: confirms every possible match that has exactly one candidate, as if the owner had clicked
+ * "Same product" (names marked different are never suggested). Repeats while merges reveal new
+ * single-candidate matches. No LLM. Returns the merges made.
+ */
+export function autoConfirmMatches(items: Item[], maxRounds = 5): Array<{ from: string; to: string }> {
+  const merges: Array<{ from: string; to: string }> = [];
+  for (let round = 0; round < maxRounds; round++) {
+    const single = matchSuggestions(items).filter((s) => s.candidates.length === 1);
+    if (single.length === 0) break;
+    for (const s of single) {
+      const from = db.getCanonicalIdentity(s.identity);
+      const to = db.getCanonicalIdentity(s.candidates[0].canonical);
+      if (from === to) continue;
+      db.mergeCanonical(from, to);
+      merges.push({ from, to });
+    }
+  }
+  return merges;
+}
+
+/**
+ * Groups a collection's names per its grouping mode: certain matches always (LLM for names never seen,
+ * then the free rule-based pass); in loose mode also single-candidate possible matches.
+ * `llm: false` skips the LLM step (no key, or a viewer who must not be billed).
+ */
+export async function groupForCollection(
+  collectionId: number,
+  items: Item[],
+  opts: { llm?: boolean } = {},
+): Promise<{ calls: number; merges: Array<{ from: string; to: string }>; loose: Array<{ from: string; to: string }> }> {
+  let calls = 0;
+  const merges: Array<{ from: string; to: string }> = [];
+  if (opts.llm !== false && ungroupedCount(items) > 0) {
+    const res = await canonicalizeIdentities(items);
+    calls = res.calls;
+    merges.push(...res.merges);
+  } else merges.push(...regroup(items.map(lookupIdentity)));
+  const loose = db.getCollection(collectionId)?.grouping === "loose" ? autoConfirmMatches(items) : [];
+  return { calls, merges, loose };
+}
