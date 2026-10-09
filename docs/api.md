@@ -34,22 +34,25 @@ curl -H "X-Api-Key: shk_…" https://specharvest.example/api/collections
 
 | Method & path | Body / query | Returns |
 | --- | --- | --- |
-| `GET /api/health` | `?deep=1` also checks the browser | `{status, checks}` (503 if DB down) |
-| `GET /api/config` | | proxy/web/LLM flags, crawl defaults, models |
+| `GET /api/health` (also `HEAD`) | public | `{ok, status, checks: {database: {ok, latencyMs}}, uptimeSeconds, timestamp}`; 503 with `ok:false` if the DB is down |
+| `GET /api/config` | | `version` (commit), proxy/web/LLM flags, crawl defaults, models |
 | `GET /api/collections` | | readable collections with item counts, `llmCost` (USD), `ownerEmail`, `isShared`, `canEdit` |
 | `PATCH /api/collections/:id` | `{name?, isShared?}` (owner/admin) | collection |
 | `DELETE /api/collections/:id` | | deletes items + vectors |
 | `GET /api/collections/:id/export` | (any reader) | `.json` download (see [Export file](#export-file)) |
 | `GET /api/collections/export` | | `.json` download of every readable collection (`format: "specharvest.collections"`) |
 | `POST /api/collections/import` | an export file, single or *Export all* (≤ 500 MB) | new private collection(s) of the caller (201): the collection, or an array for a bundle (all or nothing); vectors are rebuilt in the background |
+| `GET /api/groups` | | your groups `[{id, name, collectionIds, itemCount, createdAt}]` — members you can no longer read are left out |
+| `POST /api/groups`, `PATCH /api/groups/:id` | `{name, collectionIds}` (PATCH: either) — readable collections only | group (POST: 201) |
+| `DELETE /api/groups/:id` | | `{ok}` — the collections stay |
 | `GET /api/collections/:id/keys`, `GET /api/keys` | | key registry (one collection / merged) |
 | `POST /api/collections/:id/consolidate` | | `{merges, moved}` — merge duplicate keys now |
 | `GET /api/items` | `?collectionId&limit&offset&includeGone=1` | items (gone listings hidden unless `includeGone`) |
 | `GET /api/items/:id` | | item incl. `rawText` |
 | `POST /api/crawl` | `{url, collectionId?, name?, maxPages?, maxItems?, useProxy?, mode?: "quick"\|"deep"\|"full"}` (`refresh: true` = `full`; `name` sets the collection name instead of deriving it from the page title; `collectionId` re-crawls that collection — owner/admin — otherwise your own collection for the URL is reused or a new one created) | job (202) |
-| `POST /api/search` | `{collectionId?, query? \| plan?, limit?, enrich?, includeGone?}` | `{plan, items, unknown, total, keys, enrichJobId, enrichNote, llmCost}` (`llmCost` = USD spent parsing the query, 0 when cached) |
-| `GET /api/searches` | `?collectionId&limit` | your recent searches `[{query, usedAt, hits}]` |
-| `POST /api/enrich` | `{collectionId?, attributes:[{key,type,unit,label}], itemIds?}` | `{job}` (202) |
+| `POST /api/search` | `{collectionId? \| groupId?, query? \| plan?, limit?, enrich?, includeGone?}` | `{plan, items, unknown, total, keys, enrichJobId, enrichNote, llmCost}` (`llmCost` = USD spent parsing the query, 0 when cached) |
+| `GET /api/searches` | `?collectionId \| groupId&limit` | your recent searches `[{query, usedAt, hits}]` |
+| `POST /api/enrich` | `{collectionId? \| groupId?, attributes:[{key,type,unit,label}], itemIds?}` | `{job}` (202) |
 | `GET /api/jobs`, `GET /api/jobs/:id` | | jobs (incl. `llmCost` so far, `resumable`) |
 | `POST /api/jobs/:id/stop` | | running crawl → *stopped* once open pages finish; job (202), 409 if not a running crawl |
 | `POST /api/jobs/:id/resume` | | continues a *stopped*/*interrupted* crawl in the same job; job (202), 409 if not resumable or the collection is busy |
@@ -77,7 +80,7 @@ curl -H "X-Api-Key: shk_…" https://specharvest.example/api/collections
 
 *Export all* wraps several of these: `{format: "specharvest.collections", version: 1, exportedAt, collections: [<export>, …]}`.
 
-Not included: vectors (re-embedded locally), jobs, LLM spend, search history, "not the same product" decisions.
+Not included: vectors (re-embedded locally), jobs, LLM spend, search history, groups, "not the same product" decisions.
 
 ## LLM spend
 

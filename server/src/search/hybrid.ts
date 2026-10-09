@@ -25,16 +25,18 @@ function passes(item: Item, plan: QueryPlan, activeKeys: Set<string>): boolean {
   return true;
 }
 
-/** The caller has already checked read access to `req.collectionId`; without one, the viewer's readable collections are searched. */
-export async function search(req: SearchRequest, viewer: db.Viewer): Promise<SearchResponse> {
+/**
+ * `scope` is what the caller resolved and checked read access for: `req.collectionId`, the readable members
+ * of `req.groupId`, or the viewer's readable collections.
+ */
+export async function search(req: SearchRequest, viewer: db.Viewer, scope: db.CollectionScope): Promise<SearchResponse> {
   const spent = { cost: 0 };
-  const res = await withLlmContext({ collectionId: req.collectionId ?? null, userId: viewer.id, spent }, () => runSearch(req, viewer));
+  const res = await withLlmContext({ collectionId: req.collectionId ?? null, userId: viewer.id, spent }, () => runSearch(req, viewer, scope));
   return { ...res, llmCost: spent.cost };
 }
 
-async function runSearch(req: SearchRequest, viewer: db.Viewer): Promise<Omit<SearchResponse, "llmCost">> {
+async function runSearch(req: SearchRequest, viewer: db.Viewer, scope: db.CollectionScope): Promise<Omit<SearchResponse, "llmCost">> {
   const collectionId = req.collectionId ?? null;
-  const scope: db.CollectionScope = collectionId ?? db.readableScope(viewer);
   const keys: SpecKey[] = db.listSpecKeys(scope);
   const limit = req.limit ?? DEFAULT_LIMIT;
 
@@ -42,7 +44,7 @@ async function runSearch(req: SearchRequest, viewer: db.Viewer): Promise<Omit<Se
   if (req.plan) plan = sanitizePlan(req.plan, keys, db.keyAliasesOf);
   else if (req.query?.trim()) {
     plan = await parseQuery(req.query.trim(), scope, keys);
-    db.recordSearch(viewer.id, collectionId, normalizeQuery(req.query));
+    db.recordSearch(viewer.id, db.historySlot(collectionId, req.groupId), normalizeQuery(req.query));
   }
   else plan = { filters: [], sort: null, semanticText: null, missingAttributes: [], show: [] };
 
@@ -78,7 +80,7 @@ async function runSearch(req: SearchRequest, viewer: db.Viewer): Promise<Omit<Se
     } else if (!env.WEB_SEARCH_ENABLED) enrichNote = "Web lookups are disabled (WEB_SEARCH_ENABLED=false)";
     else if (!env.OPENROUTER_API_KEY) enrichNote = "Web lookups need OPENROUTER_API_KEY";
     else if (req.enrich !== false) {
-      const job = startEnrichment({ collectionId, userId: viewer.id, attributes: attrs, itemIds: needLookup.map((i) => i.id) });
+      const job = startEnrichment({ collectionId, groupId: req.groupId, userId: viewer.id, attributes: attrs, itemIds: needLookup.map((i) => i.id) });
       enrichJobId = job.id;
       enrichNote = `Looking up ${labels} on the web for ${needLookup.length} items`;
     }

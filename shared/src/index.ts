@@ -132,8 +132,26 @@ export const queryPlanSchema = z.object({
 });
 export type QueryPlan = z.infer<typeof queryPlanSchema>;
 
+/** A saved, private set of collections searched together. */
+export interface CollectionGroup {
+  id: number;
+  name: string;
+  /** Members the viewer can still read (unshared or deleted collections drop out). */
+  collectionIds: number[];
+  itemCount: number;
+  createdAt: number;
+}
+
+export const groupInputSchema = z.object({
+  name: z.string().trim().min(1).max(200),
+  collectionIds: z.array(z.number().int().positive()).min(1).max(200),
+});
+export type GroupInput = z.infer<typeof groupInputSchema>;
+
 export const searchRequestSchema = z.object({
   collectionId: z.number().int().positive().nullable().optional(),
+  /** Search a saved group instead of one collection (not both). */
+  groupId: z.number().int().positive().nullable().optional(),
   query: z.string().max(1000).optional(),
   plan: queryPlanSchema.optional(),
   limit: z.number().int().min(1).max(200).optional(),
@@ -254,6 +272,7 @@ export type CrawlRequest = z.infer<typeof crawlRequestSchema>;
 
 export const enrichRequestSchema = z.object({
   collectionId: z.number().int().positive().nullable().optional(),
+  groupId: z.number().int().positive().nullable().optional(),
   attributes: z.array(missingAttributeSchema).min(1).max(5),
   itemIds: z.array(z.number().int().positive()).max(500).optional(),
 });

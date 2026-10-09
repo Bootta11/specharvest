@@ -65,9 +65,11 @@ CI tests, scans and publishes the image on every push to `master`. See
    *Export* downloads a collection (items, specs, web lookup results) as
    `.json`, *Export all* every collection you can see in one file; *Import*
    adds the collection(s) from such a file as new ones of yours
-   ([format](docs/api.md#export-file)).
-2. **Search** tab → type a request in any language (repeat searches are
-   cached and shown as *Recent*), e.g.
+   ([format](docs/api.md#export-file)). *Groups* → *New group* bundles
+   several collections (e.g. all your car sites as "Cars") to search together.
+2. **Search** tab → pick a collection, a group or *All collections*, then type
+   a request in any language (repeat searches are cached and shown as
+   *Recent*), e.g.
    `automatic diesel with the lowest mileage and over 100 kW`. The parsed plan
    appears as chips; remove one to widen the search.
 3. Ask for something listings don't state (`biggest boot`, `fastest 0-100`) and

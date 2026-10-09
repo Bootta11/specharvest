@@ -4,9 +4,11 @@ import type {
   ApiKeySummary,
   AuthStatus,
   Collection,
+  CollectionGroup,
   CollectionProducts,
   CrawlRequest,
   EnrichRequest,
+  GroupInput,
   Item,
   ItemDetail,
   Job,
@@ -99,8 +101,30 @@ export const api = {
   setUserDisabled: (id: number, disabled: boolean) => request<UserSummary>("PATCH", `/api/users/${id}`, { disabled }),
   adminSettings: () => request<AdminSettings>("GET", "/api/settings/admin"),
   saveAdminSettings: (body: AdminSettings) => request<AdminSettings>("PUT", "/api/settings/admin", body),
-  recentSearches: (collectionId: number | null) => request<RecentSearch[]>("GET", `/api/searches${collectionId ? `?collectionId=${collectionId}` : ""}`),
+  recentSearches: (scope: SearchScope) => {
+    const { collectionId, groupId } = scopeParams(scope);
+    return request<RecentSearch[]>("GET", `/api/searches${collectionId ? `?collectionId=${collectionId}` : groupId ? `?groupId=${groupId}` : ""}`);
+  },
+  groups: () => request<CollectionGroup[]>("GET", "/api/groups"),
+  createGroup: (body: GroupInput) => request<CollectionGroup>("POST", "/api/groups", body),
+  updateGroup: (id: number, body: Partial<GroupInput>) => request<CollectionGroup>("PATCH", `/api/groups/${id}`, body),
+  deleteGroup: (id: number) => request<{ ok: true }>("DELETE", `/api/groups/${id}`),
 };
+
+/** What Search covers: "all" collections, one collection "c:<id>" or a group "g:<id>". */
+export type SearchScope = "all" | `c:${number}` | `g:${number}`;
+
+export function parseScope(raw: string | null): SearchScope | null {
+  if (raw === "all") return "all";
+  const m = /^([cg]):(\d+)$/.exec(raw ?? "");
+  return m ? (`${m[1]}:${Number(m[2])}` as SearchScope) : null;
+}
+
+/** Request fields for a scope — at most one of them is set. */
+export function scopeParams(scope: SearchScope): { collectionId: number | null; groupId: number | null } {
+  const id = Number(scope.slice(2)) || null;
+  return { collectionId: scope.startsWith("c:") ? id : null, groupId: scope.startsWith("g:") ? id : null };
+}
 
 /** USD with enough precision for sub-cent LLM calls: $0, $0.0042, $1.24. */
 export function formatUsd(n: number): string {

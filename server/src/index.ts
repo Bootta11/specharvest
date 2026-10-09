@@ -4,12 +4,12 @@ import { fileURLToPath } from "node:url";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import fastifyStatic from "@fastify/static";
 import { z, ZodError } from "zod";
-import { crawlRequestSchema, importRequestSchema, enrichRequestSchema, isActiveJob, notificationChannels, searchRequestSchema, type CollectionProducts, type ItemDetail } from "@specharvest/shared";
+import { crawlRequestSchema, groupInputSchema, importRequestSchema, enrichRequestSchema, isActiveJob, notificationChannels, searchRequestSchema, type CollectionProducts, type ItemDetail } from "@specharvest/shared";
 import { env } from "./config.ts";
 import * as db from "./db/sqlite.ts";
 import { deleteVectors, upsertVector } from "./db/lance.ts";
 import { embed } from "./embedding.ts";
-import { checkBrowser, proxyConfigured } from "./crawler/browser.ts";
+import { proxyConfigured } from "./crawler/browser.ts";
 import { embeddingText, emitJob, jobChannel, JOBS_CHANNEL, ResumeError, resumeCrawl, startCrawl, stopCrawl } from "./crawler/job.ts";
 import { getNotificationSettings, maskSettings, saveNotificationSettings, sendTest } from "./notify/index.ts";
 import { vapidKeys } from "./notify/push.ts";
@@ -23,7 +23,7 @@ import { subscribe } from "./sse/hub.ts";
 import { createLogger, errorMessage } from "./lib/logger.ts";
 import { httpError } from "./lib/http-error.ts";
 import { bootstrapAdmin } from "./auth/bootstrap.ts";
-import { requireCollection, requireJob } from "./auth/ownership.ts";
+import { requireCollection, requireGroup, requireJob } from "./auth/ownership.ts";
 import { currentUser, registerAuth, requireAdmin } from "./auth/plugin.ts";
 import { registerAuthRoutes } from "./auth/routes.ts";
 import { pruneSessions } from "./auth/sessions.ts";
@@ -56,27 +56,26 @@ registerAuthRoutes(app);
 
 // ---------- Health / config ----------
 
-app.get("/api/health", async (req, reply) => {
-  const checks: Record<string, string> = { db: "ok" };
+/** Liveness + DB readiness, same shape across projects. Errors are logged only, never returned. HEAD is auto-routed. */
+app.get("/api/health", async (_req, reply) => {
+  const start = Date.now();
+  let dbOk = true;
   try {
     db.getDb().prepare("SELECT 1").get();
   } catch (err) {
-    checks.db = errorMessage(err);
+    dbOk = false;
+    log.error("health: database check failed", errorMessage(err));
   }
-  checks.openrouter = env.OPENROUTER_API_KEY ? "configured" : "missing OPENROUTER_API_KEY";
-  if ((req.query as { deep?: string }).deep) {
-    try {
-      await checkBrowser();
-      checks.browser = "ok";
-    } catch (err) {
-      checks.browser = errorMessage(err);
-    }
-  }
-  const ok = checks.db === "ok";
-  return reply.status(ok ? 200 : 503).send({ status: ok ? "ok" : "error", version: env.APP_GIT_SHA ?? "dev", checks });
+  const checks = { database: { ok: dbOk, latencyMs: Date.now() - start } };
+  const ok = Object.values(checks).every((c) => c.ok);
+  return reply
+    .status(ok ? 200 : 503)
+    .header("Cache-Control", "no-store")
+    .send({ ok, status: ok ? "ok" : "error", checks, uptimeSeconds: Math.round(process.uptime()), timestamp: new Date().toISOString() });
 });
 
 app.get("/api/config", async () => ({
+  version: env.APP_GIT_SHA ?? "dev",
   proxyConfigured: proxyConfigured(),
   webSearchEnabled: env.WEB_SEARCH_ENABLED && !!env.OPENROUTER_API_KEY,
   llmConfigured: !!env.OPENROUTER_API_KEY,
@@ -86,10 +85,12 @@ app.get("/api/config", async () => ({
 
 // ---------- Collections & items ----------
 
-/** One readable collection when `collectionId` is given, else everything the user may read. */
-function readScope(req: FastifyRequest, collectionId: number | null | undefined): db.CollectionScope {
+/** One readable collection, the readable members of one of the user's groups, or everything the user may read. */
+function readScope(req: FastifyRequest, collectionId: number | null | undefined, groupId?: number | null): db.CollectionScope {
   const user = currentUser(req);
+  if (collectionId && groupId) throw httpError(400, "Pass collectionId or groupId, not both");
   if (collectionId) return requireCollection(collectionId, user, "read").id;
+  if (groupId) return requireGroup(groupId, user).collectionIds;
   return db.readableScope(user);
 }
 
@@ -135,6 +136,31 @@ app.get("/api/collections/export", async (req, reply) => {
 
 // Always new private collections for the importer (one, or all from an "Export all" file, atomically).
 // Vectors are rebuilt in the background (local model, no LLM cost).
+// ---------- Groups (private sets of collections searched together) ----------
+
+app.get("/api/groups", async (req) => db.listGroups(currentUser(req)));
+
+app.post("/api/groups", async (req, reply) => {
+  const user = currentUser(req);
+  const body = groupInputSchema.parse(req.body);
+  for (const id of body.collectionIds) requireCollection(id, user, "read");
+  return reply.status(201).send(db.getGroup(db.createGroup(user.id, body.name, body.collectionIds), user));
+});
+
+app.patch("/api/groups/:id", async (req) => {
+  const user = currentUser(req);
+  const id = requireGroup(idParam(req.params), user).id;
+  const body = groupInputSchema.partial().parse(req.body);
+  for (const cid of body.collectionIds ?? []) requireCollection(cid, user, "read");
+  db.updateGroup(id, body);
+  return db.getGroup(id, user);
+});
+
+app.delete("/api/groups/:id", async (req) => {
+  db.deleteGroup(requireGroup(idParam(req.params), currentUser(req)).id);
+  return { ok: true };
+});
+
 app.post("/api/collections/import", { bodyLimit: 500_000_000 }, async (req, reply) => {
   const user = currentUser(req);
   const body = importRequestSchema.parse(req.body);
@@ -243,7 +269,7 @@ app.post("/api/enrich", async (req, reply) => {
   const body = enrichRequestSchema.parse(req.body);
   if (!env.WEB_SEARCH_ENABLED || !env.OPENROUTER_API_KEY) return reply.status(400).send({ error: "Web lookups are not enabled" });
   // Shared collections can be enriched by readers too — the lookups are billed to them.
-  const scope = readScope(req, body.collectionId);
+  const scope = readScope(req, body.collectionId, body.groupId);
   const readable = new Set(db.listItems(scope, 5000).map((i) => i.id));
   const itemIds = body.itemIds
     ? body.itemIds.filter((id) => readable.has(id))
@@ -252,7 +278,7 @@ app.post("/api/enrich", async (req, reply) => {
         .filter((i) => body.attributes.some((a) => i.specs[a.key] === undefined))
         .map((i) => i.id);
   if (itemIds.length === 0) return reply.status(200).send({ job: null, note: "Every item already has these values" });
-  const job = startEnrichment({ collectionId: body.collectionId ?? null, userId: currentUser(req).id, attributes: body.attributes, itemIds });
+  const job = startEnrichment({ collectionId: body.collectionId ?? null, groupId: body.groupId, userId: currentUser(req).id, attributes: body.attributes, itemIds });
   return reply.status(202).send({ job });
 });
 
@@ -345,13 +371,14 @@ app.delete("/api/push/subscribe", async (req) => {
 app.post("/api/search", async (req) => {
   const body = searchRequestSchema.parse(req.body);
   const user = currentUser(req);
-  if (body.collectionId) requireCollection(body.collectionId, user, "read");
-  return search(body, user);
+  return search(body, user, readScope(req, body.collectionId, body.groupId));
 });
 
 app.get("/api/searches", async (req) => {
-  const q = req.query as { collectionId?: string; limit?: string };
-  return db.listRecentQueries(currentUser(req).id, q.collectionId ? Number(q.collectionId) : null, Math.min(Number(q.limit) || 8, 50));
+  const q = req.query as { collectionId?: string; groupId?: string; limit?: string };
+  const user = currentUser(req);
+  if (q.groupId) requireGroup(Number(q.groupId), user);
+  return db.listRecentQueries(user.id, db.historySlot(q.collectionId ? Number(q.collectionId) : null, q.groupId ? Number(q.groupId) : null), Math.min(Number(q.limit) || 8, 50));
 });
 
 // ---------- Client (production build) ----------

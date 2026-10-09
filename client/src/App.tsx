@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import type { Collection, Job, UserSummary } from "@specharvest/shared";
-import { api, formatUsd, showLocalNotification, storageGet, storageSet, useJobsFeed, type AppConfig } from "./lib/api.ts";
+import type { Collection, CollectionGroup, Job, UserSummary } from "@specharvest/shared";
+import { api, formatUsd, parseScope, showLocalNotification, storageGet, storageSet, useJobsFeed, type AppConfig, type SearchScope } from "./lib/api.ts";
 import { IngestView } from "./views/IngestView.tsx";
 import { SearchView } from "./views/SearchView.tsx";
 import { SpendMenu } from "./components/SpendMenu.tsx";
@@ -12,6 +12,15 @@ import { LoginView } from "./views/LoginView.tsx";
 import { useAuth, type Auth } from "./lib/auth.ts";
 
 type Tab = "search" | "ingest";
+
+/** The remembered search scope (older builds stored a bare `collectionId`, 0 = all). */
+function readScope(): SearchScope | null {
+  const stored = parseScope(storageGet("scope"));
+  if (stored) return stored;
+  const legacy = storageGet("collectionId");
+  if (legacy === null) return null;
+  return Number(legacy) ? `c:${Number(legacy)}` : "all";
+}
 
 /** `/?job=<id>` (from a notification) opens that job on the Collections tab. */
 function takeJobParam(): boolean {
@@ -36,12 +45,16 @@ function Workspace({ user, auth }: { user: UserSummary; auth: Auth }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [collections, setCollections] = useState<Collection[]>([]);
-  const [collectionId, setCollectionId] = useState<number | null>(() => Number(storageGet("collectionId")) || null);
+  const [groups, setGroups] = useState<CollectionGroup[] | null>(null);
+  const [scope, setScope] = useState<SearchScope | null>(readScope);
   const [error, setError] = useState<string | null>(null);
 
   const refreshCollections = useCallback(async () => {
     try {
-      setCollections(await api.collections());
+      // Group item counts and members follow the collections, so they're refreshed together.
+      const [c, g] = await Promise.all([api.collections(), api.groups()]);
+      setCollections(c);
+      setGroups(g);
     } catch (err) {
       setError((err as Error).message);
     }
@@ -67,20 +80,23 @@ function Workspace({ user, auth }: { user: UserSummary; auth: Auth }) {
     refreshCollections();
   }, [refreshCollections]);
 
-  // Default to the first collection; drop a remembered one that no longer exists.
+  // Default to the first collection; drop a remembered collection or group that no longer exists.
   useEffect(() => {
-    if (collections.length === 0) return;
-    if (collectionId && !collections.some((c) => c.id === collectionId)) setCollectionId(collections[0].id);
-    else if (collectionId === null && storageGet("collectionId") === null) setCollectionId(collections[0].id);
-  }, [collections, collectionId]);
+    if (collections.length === 0 || groups === null) return;
+    const exists =
+      scope === "all" ||
+      (scope?.startsWith("c:") && collections.some((c) => `c:${c.id}` === scope)) ||
+      (scope?.startsWith("g:") && groups.some((g) => `g:${g.id}` === scope));
+    if (!exists) setScope(`c:${collections[0].id}`);
+  }, [collections, groups, scope]);
 
   const selectTab = (t: Tab) => {
     setTab(t);
     storageSet("tab", t);
   };
-  const selectCollection = (id: number | null) => {
-    setCollectionId(id);
-    storageSet("collectionId", id ? String(id) : "0");
+  const selectScope = (s: SearchScope) => {
+    setScope(s);
+    storageSet("scope", s);
   };
 
   return (
@@ -154,18 +170,20 @@ function Workspace({ user, auth }: { user: UserSummary; auth: Auth }) {
           <SearchView
             config={config}
             collections={collections}
-            collectionId={collectionId}
-            onSelectCollection={selectCollection}
+            groups={groups ?? []}
+            scope={scope ?? "all"}
+            onSelectScope={selectScope}
             onGoIngest={() => selectTab("ingest")}
           />
         ) : (
           <IngestView
             config={config}
             collections={collections}
+            groups={groups ?? []}
             feed={feed}
             onChanged={refreshCollections}
-            onSearch={(id) => {
-              selectCollection(id);
+            onSearch={(s) => {
+              selectScope(s);
               selectTab("search");
             }}
           />

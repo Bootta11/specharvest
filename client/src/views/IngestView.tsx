@@ -1,15 +1,17 @@
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
-import { isActiveJob, type Collection, type CrawlMode, type Job } from "@specharvest/shared";
-import { api, formatUsd, storageGet, storageSet, useJobStream, type AppConfig, type JobsFeed } from "../lib/api.ts";
+import { isActiveJob, type Collection, type CollectionGroup, type CrawlMode, type Job } from "@specharvest/shared";
+import { api, formatUsd, storageGet, storageSet, useJobStream, type AppConfig, type JobsFeed, type SearchScope } from "../lib/api.ts";
 import { JobProgress, StatusBadge, jobPercent } from "../components/JobProgress.tsx";
 import { ProductsModal } from "../components/ProductsModal.tsx";
+import { GroupModal } from "../components/GroupModal.tsx";
 
 interface Props {
   config: AppConfig | null;
   collections: Collection[];
+  groups: CollectionGroup[];
   feed: JobsFeed;
   onChanged: () => void;
-  onSearch: (collectionId: number) => void;
+  onSearch: (scope: SearchScope) => void;
 }
 
 const MODES: Array<{ value: CrawlMode; label: string; hint: string }> = [
@@ -28,7 +30,7 @@ const timeAgo = (ts: number) => {
 
 const jobLabel = (j: Job) => `${j.kind === "crawl" ? "Crawl" : "Web lookup"} #${j.id}`;
 
-export function IngestView({ config, collections, feed, onChanged, onSearch }: Props) {
+export function IngestView({ config, collections, groups, feed, onChanged, onSearch }: Props) {
   const [url, setUrl] = useState("");
   const [name, setName] = useState("");
   const [maxPages, setMaxPages] = useState<number | "">("");
@@ -41,6 +43,8 @@ export function IngestView({ config, collections, feed, onChanged, onSearch }: P
   const [jobs, setJobs] = useState<Job[]>([]);
   const [streamNonce, setStreamNonce] = useState(0);
   const [productsOf, setProductsOf] = useState<Collection | null>(null);
+  /** The group being edited; null = a new one. */
+  const [editingGroup, setEditingGroup] = useState<CollectionGroup | null | undefined>(undefined);
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
   const importInput = useRef<HTMLInputElement>(null);
@@ -139,6 +143,12 @@ export function IngestView({ config, collections, feed, onChanged, onSearch }: P
     const name = window.prompt("Collection name", c.name)?.trim();
     if (!name || name === c.name) return;
     await api.renameCollection(c.id, name).catch((err) => setError((err as Error).message));
+    onChanged();
+  };
+
+  const removeGroup = async (g: CollectionGroup) => {
+    if (!window.confirm(`Delete group "${g.name}"? Its collections stay.`)) return;
+    await api.deleteGroup(g.id).catch((err) => setError((err as Error).message));
     onChanged();
   };
 
@@ -351,7 +361,7 @@ export function IngestView({ config, collections, feed, onChanged, onSearch }: P
                     </div>
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    <button className="btn-primary btn-sm" onClick={() => onSearch(c.id)}>
+                    <button className="btn-primary btn-sm" onClick={() => onSearch(`c:${c.id}`)}>
                       Search
                     </button>
                     <button className="btn-ghost btn-sm" onClick={() => setProductsOf(c)}>
@@ -393,6 +403,50 @@ export function IngestView({ config, collections, feed, onChanged, onSearch }: P
           )}
         </div>
 
+        {(collections.length > 1 || groups.length > 0) && (
+          <div className="card">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-stone-200 px-4 py-3 dark:border-stone-800">
+              <h2 className="font-semibold">Groups</h2>
+              <span className="text-sm text-stone-500">search several collections at once</span>
+              <button className="btn-ghost btn-sm ml-auto" onClick={() => setEditingGroup(null)}>
+                New group
+              </button>
+            </div>
+            {groups.length === 0 ? (
+              <p className="p-4 text-sm text-stone-500">No groups yet — e.g. put all your car collections in a "Cars" group.</p>
+            ) : (
+              <ul className="divide-y divide-stone-200 dark:divide-stone-800">
+                {groups.map((g) => {
+                  const members = g.collectionIds.map((id) => collections.find((c) => c.id === id)?.name).filter(Boolean);
+                  return (
+                    <li key={g.id} className="flex flex-col gap-2 px-4 py-3">
+                      <div className="min-w-0">
+                        <div className="truncate font-medium" title={g.name}>
+                          {g.name}
+                        </div>
+                        <div className="truncate text-xs text-stone-500" title={members.join(", ")}>
+                          {g.itemCount} items · {members.length ? members.join(", ") : "no collections left"}
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <button className="btn-primary btn-sm" disabled={g.collectionIds.length === 0} onClick={() => onSearch(`g:${g.id}`)}>
+                          Search
+                        </button>
+                        <button className="btn-ghost btn-sm" onClick={() => setEditingGroup(g)}>
+                          Edit
+                        </button>
+                        <button className="btn-ghost btn-sm text-red-700 dark:text-red-300" onClick={() => removeGroup(g)}>
+                          Delete
+                        </button>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        )}
+
         {recentJobs.length > 0 && (
           <div className="card">
             <h2 className="border-b border-stone-200 px-4 py-3 font-semibold dark:border-stone-800">Recent jobs</h2>
@@ -415,6 +469,7 @@ export function IngestView({ config, collections, feed, onChanged, onSearch }: P
           </div>
         )}
       </section>
+      {editingGroup !== undefined && <GroupModal group={editingGroup} collections={collections} onSaved={onChanged} onClose={() => setEditingGroup(undefined)} />}
       {productsOf && <ProductsModal collection={productsOf} onClose={() => setProductsOf(null)} onGrouped={onChanged} />}
     </div>
   );

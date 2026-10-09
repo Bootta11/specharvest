@@ -31,6 +31,13 @@ export function requireCollection(id: number, user: db.Viewer, mode: "read" | "w
   return c;
 }
 
+/** Loads a group of the user's own — groups are private, even to admins. */
+export function requireGroup(id: number, user: db.Viewer) {
+  const g = db.getGroup(id, user);
+  if (!g || g.ownerId !== user.id) throw httpError(404, "Not found");
+  return g;
+}
+
 /** Loads a job the user may see — jobs are private to whoever started them (and admins). */
 export function requireJob(id: number, user: db.Viewer) {
   const job = db.getJob(id);

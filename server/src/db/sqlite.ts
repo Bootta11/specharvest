@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import { COLLECTION_EXPORT_FORMAT, COLLECTIONS_EXPORT_FORMAT, type Collection, type CollectionExport, type CollectionsExport, type Item, type Job, type JobKind, type LlmPurpose, type LookupStats, type SpecKey, type SpecOrigin, type SpecSource, type SpecType, type SpecValue, type UsageSummary } from "@specharvest/shared";
+import { COLLECTION_EXPORT_FORMAT, COLLECTIONS_EXPORT_FORMAT, type Collection, type CollectionExport, type CollectionGroup, type CollectionsExport, type Item, type Job, type JobKind, type LlmPurpose, type LookupStats, type SpecKey, type SpecOrigin, type SpecSource, type SpecType, type SpecValue, type UsageSummary } from "@specharvest/shared";
 import { env } from "../config.ts";
 
 let db: DatabaseSync | null = null;
@@ -170,7 +170,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
   revoked_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS api_keys_user ON api_keys(user_id);
--- Per-user "Recent" searches (query_cache stays a shared LLM plan cache). collection_id 0 = all collections.
+-- Per-user "Recent" searches (query_cache stays a shared LLM plan cache). collection_id 0 = all collections,
+-- negative = a group (-group id), see historySlot().
 CREATE TABLE IF NOT EXISTS search_history (
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   collection_id INTEGER NOT NULL DEFAULT 0,
@@ -178,6 +179,19 @@ CREATE TABLE IF NOT EXISTS search_history (
   used_at INTEGER NOT NULL,
   hits INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (user_id, collection_id, query)
+);
+-- Saved, private sets of collections searched together.
+CREATE TABLE IF NOT EXISTS collection_groups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS collection_groups_user ON collection_groups(user_id);
+CREATE TABLE IF NOT EXISTS collection_group_members (
+  group_id INTEGER NOT NULL REFERENCES collection_groups(id) ON DELETE CASCADE,
+  collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+  PRIMARY KEY (group_id, collection_id)
 );
 `;
 
@@ -379,6 +393,73 @@ export function deleteCollection(id: number): number[] {
   getDb().prepare("DELETE FROM search_history WHERE collection_id = ?").run(id);
   deleteSetting(`attr-profile:${id}`);
   return ids;
+}
+
+// ---------- Groups ----------
+
+function toGroup(r: Row, viewer: Viewer): CollectionGroup {
+  const collectionIds = groupScope(Number(r.id), viewer);
+  const cond = scopeCondition(collectionIds);
+  const itemCount = Number((getDb().prepare(`SELECT COUNT(*) AS n FROM items WHERE ${cond!.sql}`).get(...cond!.params) as Row).n);
+  return { id: Number(r.id), name: String(r.name), collectionIds, itemCount, createdAt: Number(r.created_at) };
+}
+
+/** The user's own groups, members limited to what `viewer` (the same user) can still read. */
+export function listGroups(viewer: Viewer): CollectionGroup[] {
+  return (getDb().prepare("SELECT * FROM collection_groups WHERE user_id = ? ORDER BY name COLLATE NOCASE").all(viewer.id) as Row[]).map((r) => toGroup(r, viewer));
+}
+
+export function getGroup(id: number, viewer: Viewer): (CollectionGroup & { ownerId: number }) | null {
+  const r = getDb().prepare("SELECT * FROM collection_groups WHERE id = ?").get(id) as Row | undefined;
+  return r ? { ...toGroup(r, viewer), ownerId: Number(r.user_id) } : null;
+}
+
+/** Member collections of a group that `viewer` may read (a collection unshared since drops out). */
+export function groupScope(groupId: number, viewer: Viewer): number[] {
+  const ids = (getDb().prepare("SELECT collection_id FROM collection_group_members WHERE group_id = ? ORDER BY collection_id").all(groupId) as Row[]).map((r) =>
+    Number(r.collection_id),
+  );
+  const readable = readableScope(viewer);
+  return readable === null ? ids : ids.filter((id) => (readable as readonly number[]).includes(id));
+}
+
+function setGroupMembers(groupId: number, collectionIds: number[]) {
+  const d = getDb();
+  d.prepare("DELETE FROM collection_group_members WHERE group_id = ?").run(groupId);
+  const stmt = d.prepare("INSERT OR IGNORE INTO collection_group_members (group_id, collection_id) VALUES (?, ?)");
+  for (const id of collectionIds) stmt.run(groupId, id);
+}
+
+export function createGroup(userId: number, name: string, collectionIds: number[]): number {
+  const d = getDb();
+  d.exec("BEGIN");
+  try {
+    const id = Number(d.prepare("INSERT INTO collection_groups (user_id, name, created_at) VALUES (?, ?, ?)").run(userId, name, Date.now()).lastInsertRowid);
+    setGroupMembers(id, collectionIds);
+    d.exec("COMMIT");
+    return id;
+  } catch (err) {
+    d.exec("ROLLBACK");
+    throw err;
+  }
+}
+
+export function updateGroup(id: number, patch: { name?: string; collectionIds?: number[] }) {
+  const d = getDb();
+  d.exec("BEGIN");
+  try {
+    if (patch.name !== undefined) d.prepare("UPDATE collection_groups SET name = ? WHERE id = ?").run(patch.name, id);
+    if (patch.collectionIds) setGroupMembers(id, patch.collectionIds);
+    d.exec("COMMIT");
+  } catch (err) {
+    d.exec("ROLLBACK");
+    throw err;
+  }
+}
+
+export function deleteGroup(id: number) {
+  getDb().prepare("DELETE FROM collection_groups WHERE id = ?").run(id);
+  getDb().prepare("DELETE FROM search_history WHERE collection_id = ?").run(historySlot(null, id));
 }
 
 // ---------- Export / import ----------
@@ -1103,21 +1184,27 @@ export function saveCachedPlan(collectionId: number | null, query: string, regis
     .run(collectionId ?? 0, query, registrySig, plan, now, now);
 }
 
-/** Adds (or bumps) a search in the user's Recent list. */
-export function recordSearch(userId: number, collectionId: number | null, query: string) {
+/** search_history.collection_id for a scope: the collection, -groupId for a group, 0 for all collections. */
+export function historySlot(collectionId: number | null | undefined, groupId?: number | null): number {
+  if (groupId) return -groupId;
+  return collectionId ?? 0;
+}
+
+/** Adds (or bumps) a search in the user's Recent list. `slot` comes from historySlot(). */
+export function recordSearch(userId: number, slot: number, query: string) {
   getDb()
     .prepare(
       `INSERT INTO search_history (user_id, collection_id, query, used_at, hits) VALUES (?, ?, ?, ?, 0)
        ON CONFLICT(user_id, collection_id, query) DO UPDATE SET used_at = excluded.used_at, hits = hits + 1`,
     )
-    .run(userId, collectionId ?? 0, query, Date.now());
+    .run(userId, slot, query, Date.now());
 }
 
-export function listRecentQueries(userId: number, collectionId: number | null, limit = 10): Array<{ query: string; usedAt: number; hits: number }> {
+export function listRecentQueries(userId: number, slot: number, limit = 10): Array<{ query: string; usedAt: number; hits: number }> {
   return (
     getDb()
       .prepare("SELECT query, used_at, hits FROM search_history WHERE user_id = ? AND collection_id = ? ORDER BY used_at DESC LIMIT ?")
-      .all(userId, collectionId ?? 0, limit) as Row[]
+      .all(userId, slot, limit) as Row[]
   ).map((r) => ({ query: String(r.query), usedAt: Number(r.used_at), hits: Number(r.hits) }));
 }
 

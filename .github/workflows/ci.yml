@@ -54,13 +54,13 @@ jobs:
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: "1"
-      - name: Smoke test (container becomes healthy, health reports this commit)
+      - name: Smoke test (container becomes healthy, health reports ok)
         run: |
           docker run -d --name smoke --read-only --tmpfs /tmp --cap-drop ALL \
             --security-opt no-new-privileges:true -p 127.0.0.1:3100:3100 specharvest:ci
           for i in $(seq 1 30); do
             if [ "$(docker inspect -f '{{.State.Health.Status}}' smoke)" = healthy ]; then
-              curl -fsS http://127.0.0.1:3100/api/health | grep -q '"version":"${{ github.sha }}"' && exit 0
+              curl -fsS http://127.0.0.1:3100/api/health | grep -q '"ok":true' && exit 0
             fi
             sleep 2
           done

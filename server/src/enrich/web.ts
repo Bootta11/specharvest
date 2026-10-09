@@ -164,6 +164,8 @@ export function applyCachedFacts(items: Item[], attrs: MissingAttribute[]): { ap
 
 export interface EnrichInput {
   collectionId: number | null;
+  /** Set when started for a group search — keeps its job apart from an "all collections" one. */
+  groupId?: number | null;
   /** Who asked — owns the job and pays for the lookups. */
   userId: number | null;
   attributes: MissingAttribute[];
@@ -201,7 +203,7 @@ async function reviewWebKeys(jobId: number, attrs: MissingAttribute[]) {
 
 /** Starts a background enrichment job (or returns the running one for the same scope + keys). */
 export function startEnrichment(input: EnrichInput): Job {
-  const scope = `${input.userId ?? "-"}:${input.collectionId ?? "all"}:${input.attributes.map((a) => a.key).sort().join(",")}`;
+  const scope = `${input.userId ?? "-"}:${input.groupId ? `g${input.groupId}` : (input.collectionId ?? "all")}:${input.attributes.map((a) => a.key).sort().join(",")}`;
   const running = activeByScope.get(scope);
   if (running) {
     const job = db.getJob(running);

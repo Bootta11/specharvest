@@ -24,8 +24,21 @@ Auto-updaters (Watchtower and similar) follow the tag you run, so `latest`
 deploys every push to `master` unattended. Pin `x.y.z` or `sha-…` if that's
 not what you want. Images are `linux/amd64` only.
 
-`GET /api/health` returns `"version": "<commit>"`, so you can always tell
+`GET /api/config` returns `"version": "<commit>"`, so you can always tell
 which build is running.
+
+## Health check
+
+`GET /api/health` is public and never cached. It runs `SELECT 1` against the
+database and returns `200` with
+`{"ok":true,"status":"ok","checks":{"database":{"ok":true,"latencyMs":…}},"uptimeSeconds":…,"timestamp":…}`,
+or `503` with `ok:false` when the database is unreachable (error details are
+only logged server-side). `HEAD /api/health` returns the same status with no
+body. The image's `HEALTHCHECK` uses it.
+
+Uptime Kuma: an **HTTP(s)** monitor on `https://<your-host>/api/health` with
+the default accepted codes (`200-299`), or **HTTP(s) - Json Query** with
+expression `$.ok` and expected value `true`.
 
 ## CI setup
 

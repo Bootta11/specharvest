@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import type { Collection, Filter, Item, QueryPlan, RecentSearch, SearchResponse, SpecKey } from "@specharvest/shared";
+import type { Collection, CollectionGroup, Filter, Item, QueryPlan, RecentSearch, SearchResponse, SpecKey } from "@specharvest/shared";
 import { formatSpecValue, humanizeKey, specLabel } from "@specharvest/shared";
-import { api, formatUsd, storageGet, storageSet, useJobStream, type AppConfig } from "../lib/api.ts";
+import { api, formatUsd, parseScope, scopeParams, storageGet, storageSet, useJobStream, type AppConfig, type SearchScope } from "../lib/api.ts";
 import { LookupSummary } from "../components/LookupSummary.tsx";
 import { GlobeIcon, ItemCard, formatPrice } from "../components/ItemCard.tsx";
 import { ItemModal } from "../components/ItemModal.tsx";
@@ -21,8 +21,9 @@ function readView(): ViewMode {
 interface Props {
   config: AppConfig | null;
   collections: Collection[];
-  collectionId: number | null;
-  onSelectCollection: (id: number | null) => void;
+  groups: CollectionGroup[];
+  scope: SearchScope;
+  onSelectScope: (scope: SearchScope) => void;
   onGoIngest: () => void;
 }
 
@@ -65,7 +66,7 @@ function examplesFor(keys: SpecKey[]): string[] {
   return ["cheapest first", ...nums.map((k) => `highest ${humanizeKey(k.key).toLowerCase()}`)];
 }
 
-export function SearchView({ config, collections, collectionId, onSelectCollection, onGoIngest }: Props) {
+export function SearchView({ config, collections, groups, scope, onSelectScope, onGoIngest }: Props) {
   const [query, setQuery] = useState("");
   const [result, setResult] = useState<SearchResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -96,7 +97,7 @@ export function SearchView({ config, collections, collectionId, onSelectCollecti
     return map;
   }, [result]);
 
-  const loadRecent = useCallback(() => api.recentSearches(collectionId).then(setRecent, () => setRecent([])), [collectionId]);
+  const loadRecent = useCallback(() => api.recentSearches(scope).then(setRecent, () => setRecent([])), [scope]);
 
   const run = useCallback(
     async (body: { query?: string; plan?: QueryPlan; enrich?: boolean; includeGone?: boolean }) => {
@@ -104,7 +105,7 @@ export function SearchView({ config, collections, collectionId, onSelectCollecti
       setLoading(true);
       setError(null);
       try {
-        const res = await api.search({ collectionId, includeGone, ...body });
+        const res = await api.search({ ...scopeParams(scope), includeGone, ...body });
         if (mySeq !== seq.current) return;
         setResult(res);
         if (res.enrichJobId) setEnrichJobId(res.enrichJobId);
@@ -115,16 +116,16 @@ export function SearchView({ config, collections, collectionId, onSelectCollecti
         if (mySeq === seq.current) setLoading(false);
       }
     },
-    [collectionId, includeGone, loadRecent],
+    [scope, includeGone, loadRecent],
   );
 
-  // Browse everything when the collection changes.
+  // Browse everything when the collection or group changes.
   useEffect(() => {
     setEnrichJobId(null);
     setQuery("");
     run({});
     loadRecent();
-  }, [collectionId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [scope]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Re-run the current plan (no LLM call) when sold/removed listings are toggled.
   const toggleGone = (on: boolean) => {
@@ -170,7 +171,7 @@ export function SearchView({ config, collections, collectionId, onSelectCollecti
       .map((f) => ({ key: f.key, type: keys.get(f.key)!.type, unit: keys.get(f.key)!.unit, label: humanizeKey(f.key).toLowerCase() }));
     if (attrs.length === 0) return;
     try {
-      const res = await api.enrich({ collectionId, attributes: attrs.slice(0, 5), itemIds: result.unknown.map((i) => i.id) });
+      const res = await api.enrich({ ...scopeParams(scope), attributes: attrs.slice(0, 5), itemIds: result.unknown.map((i) => i.id) });
       if (res.job) setEnrichJobId(res.job.id);
     } catch (err) {
       setError((err as Error).message);
@@ -195,16 +196,27 @@ export function SearchView({ config, collections, collectionId, onSelectCollecti
         <div className="flex flex-col gap-2 sm:flex-row">
           <select
             className="input sm:w-64"
-            value={collectionId ?? 0}
-            onChange={(e) => onSelectCollection(Number(e.target.value) || null)}
-            aria-label="Collection"
+            value={scope}
+            onChange={(e) => onSelectScope(parseScope(e.target.value) ?? "all")}
+            aria-label="Collection or group"
           >
-            <option value={0}>All collections</option>
-            {collections.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name} ({c.itemCount}){!c.canEdit && c.isShared ? ` · shared by ${c.ownerEmail ?? "another user"}` : ""}
-              </option>
-            ))}
+            <option value="all">All collections</option>
+            {groups.length > 0 && (
+              <optgroup label="Groups">
+                {groups.map((g) => (
+                  <option key={g.id} value={`g:${g.id}`}>
+                    {g.name} ({g.collectionIds.length} collections · {g.itemCount})
+                  </option>
+                ))}
+              </optgroup>
+            )}
+            <optgroup label="Collections">
+              {collections.map((c) => (
+                <option key={c.id} value={`c:${c.id}`}>
+                  {c.name} ({c.itemCount}){!c.canEdit && c.isShared ? ` · shared by ${c.ownerEmail ?? "another user"}` : ""}
+                </option>
+              ))}
+            </optgroup>
           </select>
           <input
             className="input sm:flex-1"
