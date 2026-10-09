@@ -137,6 +137,13 @@ export function SpendMenu({ isAdmin = false }: { isAdmin?: boolean }) {
             ))}
           </div>
 
+          {usage.byFunding.own > 0 && (
+            <p className="mt-2 text-xs text-stone-500 tabular-nums">
+              Your keys: <span className="font-medium text-stone-700 dark:text-stone-200">{formatUsd(usage.byFunding.own)}</span>
+              {usage.estimated > 0 && " (partly estimated)"} · Server key: <span className="font-medium text-stone-700 dark:text-stone-200">{formatUsd(usage.byFunding.platform)}</span>
+            </p>
+          )}
+
           {usage.byPurpose.length === 0 ? (
             <p className="mt-4 text-stone-500">No LLM calls yet.</p>
           ) : (
@@ -158,11 +165,11 @@ export function SpendMenu({ isAdmin = false }: { isAdmin?: boolean }) {
               <table className="mt-1 w-full table-fixed">
                 <tbody>
                   {usage.byModel.map((m) => (
-                    <tr key={m.model} className="border-t border-stone-100 dark:border-stone-800">
-                      <td className="truncate py-1.5" title={m.model}>
+                    <tr key={`${m.provider}/${m.model}`} className="border-t border-stone-100 dark:border-stone-800">
+                      <td className="truncate py-1.5" title={`${m.provider}: ${m.model}`}>
                         {m.model}
                         <div className="text-xs text-stone-500 tabular-nums">
-                          {calls(m.calls)} · {fmtTokens(m.promptTokens)} in / {fmtTokens(m.completionTokens)} out
+                          {m.provider} · {calls(m.calls)} · {fmtTokens(m.promptTokens)} in / {fmtTokens(m.completionTokens)} out
                         </div>
                       </td>
                       <td className="w-20 py-1.5 text-right align-top tabular-nums">{formatUsd(m.cost)}</td>

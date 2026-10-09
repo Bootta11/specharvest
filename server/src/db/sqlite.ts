@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import { COLLECTION_EXPORT_FORMAT, COLLECTIONS_EXPORT_FORMAT, type Collection, type CollectionExport, type GroupingMode, type CollectionGroup, type CollectionsExport, type Item, type Job, type JobKind, type LlmPurpose, type LookupStats, type SpecKey, type SpecOrigin, type SpecSource, type SpecType, type SpecValue, type UsageSummary } from "@specharvest/shared";
+import { COLLECTION_EXPORT_FORMAT, COLLECTIONS_EXPORT_FORMAT, type Collection, type CollectionExport, type GroupingMode, type CollectionGroup, type CollectionsExport, type Item, type Job, type JobKind, type LlmFunding, type LlmPurpose, type LookupStats, type SpecKey, type SpecOrigin, type SpecSource, type SpecType, type SpecValue, type UsageSummary } from "@specharvest/shared";
 import { env } from "../config.ts";
 
 let db: DatabaseSync | null = null;
@@ -109,7 +109,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   started_at INTEGER NOT NULL,
   finished_at INTEGER
 );
--- One row per OpenRouter completion. No FKs: spend history outlives deleted collections/jobs.
+-- One row per LLM completion. No FKs: spend history outlives deleted collections/jobs.
 CREATE TABLE IF NOT EXISTS llm_usage (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   created_at INTEGER NOT NULL,
@@ -193,6 +193,18 @@ CREATE TABLE IF NOT EXISTS collection_group_members (
   collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
   PRIMARY KEY (group_id, collection_id)
 );
+-- Users' own LLM API keys, one per provider (llm/keys.ts). key_enc is AES-256-GCM (lib/secrets.ts); the key is never returned.
+CREATE TABLE IF NOT EXISTS llm_keys (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL,
+  key_enc TEXT NOT NULL,
+  key_hint TEXT NOT NULL,
+  base_url TEXT,
+  created_at INTEGER NOT NULL,
+  verified_at INTEGER,
+  last_error TEXT,
+  PRIMARY KEY (user_id, provider)
+);
 `;
 
 export function getDb(): DatabaseSync {
@@ -220,6 +232,14 @@ export function getDb(): DatabaseSync {
   addColumnIfMissing("jobs", "user_id", "INTEGER");
   addColumnIfMissing("llm_usage", "user_id", "INTEGER");
   addColumnIfMissing("push_subscriptions", "user_id", "INTEGER");
+  // Per-user LLM keys: which provider served a call, who paid (own key / server key), and whether the cost is an estimate.
+  // Rows from before were all OpenRouter calls on the server's key.
+  if (!columnExists("llm_usage", "provider")) {
+    addColumnIfMissing("llm_usage", "provider", "TEXT");
+    addColumnIfMissing("llm_usage", "funding", "TEXT NOT NULL DEFAULT 'platform'");
+    addColumnIfMissing("llm_usage", "cost_estimated", "INTEGER NOT NULL DEFAULT 0");
+    db.exec("UPDATE llm_usage SET provider = 'openrouter' WHERE provider IS NULL");
+  }
   db.exec(
     "CREATE INDEX IF NOT EXISTS collections_user ON collections(user_id); CREATE INDEX IF NOT EXISTS jobs_user ON jobs(user_id); CREATE INDEX IF NOT EXISTS llm_usage_user ON llm_usage(user_id);",
   );
@@ -287,9 +307,12 @@ export function readableScope(viewer: Viewer): CollectionScope {
 
 type Row = Record<string, SQLInputValue>;
 
+function columnExists(table: string, column: string): boolean {
+  return (db!.prepare(`PRAGMA table_info(${table})`).all() as Row[]).some((r) => String(r.name) === column);
+}
+
 function addColumnIfMissing(table: string, column: string, ddl: string) {
-  const cols = (db!.prepare(`PRAGMA table_info(${table})`).all() as Row[]).map((r) => String(r.name));
-  if (!cols.includes(column)) db!.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+  if (!columnExists(table, column)) db!.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
 }
 
 const parseJson = <T>(s: unknown, fallback: T): T => {
@@ -1397,11 +1420,16 @@ export function applyKeyMerges(collectionId: number, merges: Array<{ from: strin
 
 export interface LlmUsageInput {
   purpose: LlmPurpose;
+  /** Catalog provider id (llm/providers.ts). */
+  provider: string;
   model: string;
+  /** Own key or the server's key. */
+  funding: LlmFunding;
   promptTokens: number;
   completionTokens: number;
-  /** USD as reported by OpenRouter; null when the response carried no price. */
+  /** USD reported by the provider, or estimated from the price list (costEstimated); null when unknown. */
   cost: number | null;
+  costEstimated?: boolean;
   webSearches: number;
   jobId: number | null;
   collectionId: number | null;
@@ -1412,8 +1440,8 @@ export interface LlmUsageInput {
 export function recordLlmUsage(u: LlmUsageInput) {
   const d = getDb();
   d.prepare(
-    "INSERT INTO llm_usage (created_at, purpose, model, prompt_tokens, completion_tokens, cost, web_searches, job_id, collection_id, user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-  ).run(Date.now(), u.purpose, u.model, u.promptTokens, u.completionTokens, u.cost, u.webSearches, u.jobId, u.collectionId, u.userId ?? null);
+    "INSERT INTO llm_usage (created_at, purpose, provider, model, funding, prompt_tokens, completion_tokens, cost, cost_estimated, web_searches, job_id, collection_id, user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  ).run(Date.now(), u.purpose, u.provider, u.model, u.funding, u.promptTokens, u.completionTokens, u.cost, u.costEstimated ? 1 : 0, u.webSearches, u.jobId, u.collectionId, u.userId ?? null);
   if (u.jobId !== null && u.cost) d.prepare("UPDATE jobs SET llm_cost = llm_cost + ? WHERE id = ?").run(u.cost, u.jobId);
 }
 
@@ -1433,14 +1461,21 @@ export function usageSummary(now = Date.now(), userId: number | null = null): Us
   const byModel = (
     d
       .prepare(
-        `SELECT model, COALESCE(SUM(cost), 0) AS cost, COUNT(*) AS calls, SUM(prompt_tokens) AS pt, SUM(completion_tokens) AS ct FROM llm_usage WHERE ${who} GROUP BY model ORDER BY cost DESC`,
+        `SELECT COALESCE(provider, 'openrouter') AS provider, model, COALESCE(SUM(cost), 0) AS cost, COUNT(*) AS calls, SUM(prompt_tokens) AS pt, SUM(completion_tokens) AS ct
+         FROM llm_usage WHERE ${who} GROUP BY 1, model ORDER BY cost DESC`,
       )
       .all(...p) as Row[]
-  ).map((r) => ({ model: String(r.model), cost: Number(r.cost), calls: Number(r.calls), promptTokens: Number(r.pt), completionTokens: Number(r.ct) }));
+  ).map((r) => ({ provider: String(r.provider), model: String(r.model), cost: Number(r.cost), calls: Number(r.calls), promptTokens: Number(r.pt), completionTokens: Number(r.ct) }));
+  const byFunding: Record<LlmFunding, number> = { own: 0, platform: 0 };
+  for (const r of d.prepare(`SELECT funding, COALESCE(SUM(cost), 0) AS c FROM llm_usage WHERE ${who} GROUP BY funding`).all(...p) as Row[]) {
+    if (r.funding === "own" || r.funding === "platform") byFunding[r.funding] = Number(r.c);
+  }
   return {
     today: since(startOfDay.getTime()),
     last30d: since(now - 30 * 86_400_000),
     allTime: since(0),
+    byFunding,
+    estimated: Number((d.prepare(`SELECT COALESCE(SUM(cost), 0) AS c FROM llm_usage WHERE ${who} AND cost_estimated = 1`).get(...p) as Row).c),
     byPurpose,
     byModel,
     unpricedCalls: Number((d.prepare(`SELECT COUNT(*) AS n FROM llm_usage WHERE ${who} AND cost IS NULL`).get(...p) as Row).n),

@@ -63,7 +63,7 @@ The host needs only `compose.yaml` and a `.env`:
 mkdir specharvest && cd specharvest
 curl -fsSLO https://raw.githubusercontent.com/Bootta11/specharvest/master/compose.yaml
 curl -fsSL -o .env https://raw.githubusercontent.com/Bootta11/specharvest/master/.env.example
-# edit .env: OPENROUTER_API_KEY, PUPPETEER_WS_ENDPOINT, ADMIN_EMAIL, PUBLIC_URL …
+# edit .env: ENCRYPTION_KEY, OPENROUTER_API_KEY, PUPPETEER_WS_ENDPOINT, ADMIN_EMAIL, PUBLIC_URL …
 docker compose pull && docker compose up -d
 docker compose logs app | grep -i password   # first admin's generated password, if ADMIN_PASSWORD was blank
 ```
@@ -107,8 +107,14 @@ time except the commit SHA. The client bundle reads everything from the API.
 
 Secrets can come from files instead of env (Docker/Compose secrets): set
 `OPENROUTER_API_KEY_FILE`, `OPENROUTER_MANAGEMENT_KEY_FILE`, `PUPPETEER_WS_API_KEY_FILE`,
-`PUPPETEER_WS_PASSWORD_FILE`, `PROXY_PASSWORD_FILE`, `VAPID_PRIVATE_KEY_FILE`
-or `ADMIN_PASSWORD_FILE` to a path such as `/run/secrets/openrouter`.
+`PUPPETEER_WS_PASSWORD_FILE`, `PROXY_PASSWORD_FILE`, `VAPID_PRIVATE_KEY_FILE`,
+`ADMIN_PASSWORD_FILE` or `ENCRYPTION_KEY_FILE` to a path such as `/run/secrets/openrouter`.
+
+**`ENCRYPTION_KEY`** encrypts the LLM API keys users add (`openssl rand -base64 32`).
+Set it explicitly and keep a copy outside the data volume. If it's blank, one
+is generated into the volume (`encryption.key`), so a copy of the volume holds
+both the database and the key. Losing or changing it means users have to
+re-enter their keys. See [LLM providers](llm-providers.md#keys-at-rest).
 
 Compose interpolates `$` inside `.env` values. Single-quote any value that
 contains one, e.g. `ADMIN_PASSWORD='pa$$word'`.
@@ -116,8 +122,9 @@ contains one, e.g. `ADMIN_PASSWORD='pa$$word'`.
 ## Data
 
 Everything that needs to survive a restart lives in the `specharvest-data`
-volume at `/app/data`: the SQLite database, the LanceDB vectors and the
-embedding model cache (downloaded on first use, about 25 MB). The rest of the
+volume at `/app/data`: the SQLite database, the LanceDB vectors, the
+embedding model cache (downloaded on first use, about 25 MB) and, when
+`ENCRYPTION_KEY` is not set, the generated `encryption.key`. The rest of the
 container filesystem is read-only.
 
 Backup:

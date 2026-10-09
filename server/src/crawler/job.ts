@@ -5,6 +5,7 @@ import * as db from "../db/sqlite.ts";
 import { upsertVector } from "../db/lance.ts";
 import { embed } from "../embedding.ts";
 import { coerceToType, extractItem, type Extraction } from "../llm/extract.ts";
+import { llmBlocked } from "../llm/client.ts";
 import { proposeKeyMerges } from "../llm/consolidate.ts";
 import { groupForCollection } from "../enrich/group.ts";
 import { withLlmContext } from "../llm/usage.ts";
@@ -77,10 +78,10 @@ async function loadDetail(url: string, pageOpts: { useProxy: boolean }, hints: O
   }
 }
 
-/** Thrown at a checkpoint once the user stopped the crawl. */
+/** Thrown at a checkpoint once the user stopped the crawl — or with a `reason` when it can't go on (LLM key rejected). */
 class StopError extends Error {
-  constructor() {
-    super("Stopped");
+  constructor(readonly reason?: string) {
+    super(reason ?? "Stopped");
   }
 }
 
@@ -99,11 +100,14 @@ function launch(jobId: number, collectionId: number, req: CrawlRequest, resumeSi
   const userId = db.getJob(jobId)?.userId ?? null;
   withLlmContext({ jobId, collectionId, userId }, () => runCrawl(jobId, collectionId, url, req, controller.signal, resumeSince))
     .catch((err) => {
-      if (err instanceof StopError) {
+      // A rejected / out-of-credit LLM key stops the crawl like the user would: resumable once it's fixed.
+      if (err instanceof StopError || llmBlocked(err)) {
+        const reason = err instanceof StopError ? err.reason : err.message;
         const job = db.getJob(jobId)!;
-        const summary = `Stopped — ${job.itemsIndexed} of ${job.itemsFound || "?"} items handled`;
+        const handled = `${job.itemsIndexed} of ${job.itemsFound || "?"} items handled`;
+        const summary = reason ? `Stopped: ${reason} (${handled})` : `Stopped — ${handled}`;
         patchJob(jobId, { status: "stopped", message: summary, error: null, finishedAt: Date.now() });
-        jobLog(jobId, `${summary}. Resume to continue where it left off.`, "warn");
+        jobLog(jobId, reason ? `${summary}. Resume once it's fixed.` : `${summary}. Resume to continue where it left off.`, "warn");
       } else {
         patchJob(jobId, { status: "failed", error: errorMessage(err), finishedAt: Date.now() });
         jobLog(jobId, `Crawl failed: ${errorMessage(err)}`, "error");
@@ -316,14 +320,23 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
     emit(jobId, { type: "item", title: extraction.title, url: itemUrl });
   };
 
+  /** Set when the LLM key stops working: every further item would fail the same way, so the rest is dropped. */
+  let halt = null as Error | null;
+
   const run = (fn: () => Promise<void>, itemUrl: string) => async () => {
-    if (signal.aborted) return;
+    if (signal.aborted || halt) return;
     emitQueue();
     try {
       await fn();
       indexed++;
       patchJob(jobId, { itemsIndexed: indexed });
     } catch (err) {
+      if (llmBlocked(err)) {
+        // Not this item's fault — it's picked up again on resume.
+        halt ??= err;
+        queue.clear();
+        return;
+      }
       failed++;
       patchJob(jobId, { itemsFailed: failed });
       jobLog(jobId, `Failed ${itemUrl}: ${errorMessage(err)}`, "warn");
@@ -371,7 +384,7 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
   signal.addEventListener("abort", onStop, { once: true });
   const [first, ...rest] = toExtract;
   if (first) await extractNew(first)();
-  if (!signal.aborted) {
+  if (!signal.aborted && !halt) {
     for (const t of rest) queue.add(extractNew(t));
     for (const t of toCheck) queue.add(check(t));
   }
@@ -379,6 +392,7 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
   signal.removeEventListener("abort", onStop);
   db.recountSpecKeys(collectionId);
   // Key merging and gone-marking need the whole listing handled — they run when the resumed crawl completes.
+  if (halt) throw new StopError(halt.message);
   throwIfStopped(signal);
   if (extracted + reused > 0) await consolidateKeys(jobId, collectionId);
   if (extracted + reused > 0) await groupProducts(jobId, collectionId);

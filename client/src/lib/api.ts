@@ -14,6 +14,12 @@ import type {
   ItemDetail,
   Job,
   JobEvent,
+  LlmModelChoices,
+  LlmModelOption,
+  LlmSettingsResponse,
+  LlmStatus,
+  LlmTestResult,
+  LlmTier,
   NotificationChannel,
   NotificationSettings,
   ProviderCredits,
@@ -31,10 +37,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 export interface AppConfig {
   proxyConfigured: boolean;
+  /** The signed-in user can run web lookups (own web-capable key or the server key). */
   webSearchEnabled: boolean;
+  /** The signed-in user can crawl and parse searches (own key or the server key). */
   llmConfigured: boolean;
   defaults: { maxPages: number; maxItems: number };
-  models: { main: string; extraction: string; web: string };
+  /** Which provider/model each tier runs on for this user, and why a tier can't run. */
+  llm: LlmStatus;
 }
 
 /** Fired when the session is gone (expired, revoked, user disabled) — the app drops back to the login screen. */
@@ -102,7 +111,14 @@ export const api = {
   createUser: (email: string, role: UserRole) => request<UserCreated>("POST", "/api/users", { email, role }),
   setUserDisabled: (id: number, disabled: boolean) => request<UserSummary>("PATCH", `/api/users/${id}`, { disabled }),
   adminSettings: () => request<AdminSettings>("GET", "/api/settings/admin"),
-  saveAdminSettings: (body: AdminSettings) => request<AdminSettings>("PUT", "/api/settings/admin", body),
+  saveAdminSettings: (body: Partial<Pick<AdminSettings, "signupEnabled" | "serverLlmAccess">>) => request<AdminSettings>("PUT", "/api/settings/admin", body),
+  // LLM provider (own API keys, model picks)
+  llmSettings: () => request<LlmSettingsResponse>("GET", "/api/settings/llm"),
+  saveLlmKey: (provider: string, apiKey: string, baseUrl?: string) => request<LlmSettingsResponse>("PUT", `/api/settings/llm/keys/${encodeURIComponent(provider)}`, { apiKey, baseUrl }),
+  deleteLlmKey: (provider: string) => request<LlmSettingsResponse>("DELETE", `/api/settings/llm/keys/${encodeURIComponent(provider)}`),
+  saveLlmModels: (choices: LlmModelChoices) => request<LlmSettingsResponse>("PUT", "/api/settings/llm/models", choices),
+  llmModelOptions: (provider: string) => request<LlmModelOption[]>("GET", `/api/settings/llm/models/${encodeURIComponent(provider)}`),
+  testLlm: (tier: LlmTier) => request<LlmTestResult>("POST", "/api/settings/llm/test", { tier }),
   recentSearches: (scope: SearchScope) => {
     const { collectionId, groupId } = scopeParams(scope);
     return request<RecentSearch[]>("GET", `/api/searches${collectionId ? `?collectionId=${collectionId}` : groupId ? `?groupId=${groupId}` : ""}`);

@@ -8,6 +8,7 @@ import { SettingsModal } from "./components/SettingsModal.tsx";
 import { UserMenu } from "./components/UserMenu.tsx";
 import { AccountModal } from "./components/AccountModal.tsx";
 import { AdminModal } from "./components/AdminModal.tsx";
+import { LlmSettingsModal } from "./components/LlmSettingsModal.tsx";
 import { LoginView } from "./views/LoginView.tsx";
 import { useAuth, type Auth } from "./lib/auth.ts";
 
@@ -40,7 +41,7 @@ export default function App() {
 }
 
 function Workspace({ user, auth }: { user: UserSummary; auth: Auth }) {
-  const [dialog, setDialog] = useState<"account" | "admin" | null>(null);
+  const [dialog, setDialog] = useState<"account" | "llm" | "admin" | null>(null);
   const [tab, setTab] = useState<Tab>(() => (takeJobParam() || storageGet("tab") === "ingest" ? "ingest" : "search"));
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -75,10 +76,15 @@ function Workspace({ user, auth }: { user: UserSummary; auth: Auth }) {
   );
   const feed = useJobsFeed(onJobFinished);
 
-  useEffect(() => {
+  // Per user: whether crawling, search parsing and web lookups can run (own LLM keys or the server's key).
+  const refreshConfig = useCallback(() => {
     api.config().then(setConfig, (err) => setError((err as Error).message));
+  }, []);
+
+  useEffect(() => {
+    refreshConfig();
     refreshCollections();
-  }, [refreshCollections]);
+  }, [refreshConfig, refreshCollections]);
 
   // Default to the first collection; drop a remembered collection or group that no longer exists.
   useEffect(() => {
@@ -147,7 +153,7 @@ function Workspace({ user, auth }: { user: UserSummary; auth: Auth }) {
               </button>
             ))}
           </nav>
-          <UserMenu user={user} onAccount={() => setDialog("account")} onAdmin={() => setDialog("admin")} onLogout={auth.logout} />
+          <UserMenu user={user} onAccount={() => setDialog("account")} onLlm={() => setDialog("llm")} onAdmin={() => setDialog("admin")} onLogout={auth.logout} />
         </div>
       </header>
 
@@ -161,8 +167,11 @@ function Workspace({ user, auth }: { user: UserSummary; auth: Auth }) {
           </div>
         )}
         {config && !config.llmConfigured && (
-          <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
-            OPENROUTER_API_KEY is not set — crawling and natural-language search are disabled.
+          <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
+            <span className="min-w-0 flex-1 basis-64">No LLM provider set up yet — crawling and natural-language search need one. Add your own API key to get started.</span>
+            <button className="btn-primary btn-sm" onClick={() => setDialog("llm")}>
+              Set up LLM provider
+            </button>
           </div>
         )}
 
@@ -191,6 +200,7 @@ function Workspace({ user, auth }: { user: UserSummary; auth: Auth }) {
       </main>
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
       {dialog === "account" && <AccountModal user={user} onUpdated={auth.setUser} onClose={() => setDialog(null)} />}
+      {dialog === "llm" && <LlmSettingsModal onClose={() => setDialog(null)} onChanged={refreshConfig} />}
       {dialog === "admin" && <AdminModal me={user} onClose={() => setDialog(null)} />}
     </div>
   );

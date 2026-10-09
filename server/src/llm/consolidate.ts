@@ -1,6 +1,5 @@
 import { z } from "zod";
 import type { SpecKey } from "@specharvest/shared";
-import { env } from "../config.ts";
 import { askForJson } from "./client.ts";
 
 const mergeSchema = z.object({
@@ -41,7 +40,7 @@ export async function proposeKeyMerges(keys: SpecKey[]): Promise<KeyMerge[]> {
     .slice(0, 500)
     .map((k) => `${k.key} (${k.type}${k.unit ? `, ${k.unit}` : ""}, ${k.count} items${k.example ? `, e.g. ${JSON.stringify(k.example)}` : ""})`)
     .join("\n");
-  const { data } = await askForJson(mergeSchema, SYSTEM, `Registry:\n${list}`, { purpose: "consolidate", maxTokens: 3000, model: env.OPENROUTER_SMART_MODEL });
+  const { data } = await askForJson(mergeSchema, SYSTEM, `Registry:\n${list}`, { purpose: "consolidate", maxTokens: 3000 });
 
   const byKey = new Map(keys.map((k) => [k.key, k]));
   const froms = new Set<string>();

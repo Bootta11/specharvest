@@ -465,6 +465,10 @@ export interface AuthStatus {
 
 export interface AdminSettings {
   signupEnabled: boolean;
+  /** Who may use the server's LLM key when they have no key of their own. */
+  serverLlmAccess: ServerLlmAccess;
+  /** Read-only: OPENROUTER_API_KEY is set. */
+  serverLlmConfigured: boolean;
 }
 
 export const loginSchema = z.object({ email: z.string().trim().toLowerCase().pipe(z.email()), password: z.string().min(1).max(200) });
@@ -484,10 +488,110 @@ export interface UsageSummary {
   today: number;
   last30d: number;
   allTime: number;
+  /** All-time spend by who paid: the user's own keys or the server's key. */
+  byFunding: Record<LlmFunding, number>;
+  /** Part of allTime estimated from a price list (providers that don't report a price). */
+  estimated: number;
   byPurpose: Array<{ purpose: LlmPurpose; cost: number; calls: number }>;
-  byModel: Array<{ model: string; cost: number; calls: number; promptTokens: number; completionTokens: number }>;
-  /** Calls whose response carried no price (counted as $0 above). */
+  byModel: Array<{ provider: string; model: string; cost: number; calls: number; promptTokens: number; completionTokens: number }>;
+  /** Calls with no known price (counted as $0 above). */
   unpricedCalls: number;
+}
+
+// ---------- LLM providers (per-user keys, see docs/llm-providers.md) ----------
+
+/** Every LLM purpose maps to a tier; each tier gets its own model. */
+export const llmTiers = ["fast", "smart", "web"] as const;
+export type LlmTier = (typeof llmTiers)[number];
+
+/** Who pays for a call: the user's own key, or the server's key (later: the user's credits). */
+export type LlmFunding = "own" | "platform";
+
+export const serverLlmAccessModes = ["everyone", "admins", "nobody"] as const;
+export type ServerLlmAccess = (typeof serverLlmAccessModes)[number];
+
+/** A provider users can add a key for (the server's catalog, as sent to the UI). */
+export interface LlmProviderInfo {
+  id: string;
+  label: string;
+  group: "popular" | "more" | "custom";
+  /** Where to create a key. */
+  keyUrl: string | null;
+  /** Tiers it can serve (Perplexity searches on every call, so web only). */
+  tiers: LlmTier[];
+  /** Can run web lookups (provider-native web search). */
+  webSearch: boolean;
+  /** Default model per tier; missing = the user picks one. */
+  defaults: Partial<Record<LlmTier, string>>;
+  /** Custom OpenAI-compatible URL — admins only. */
+  custom: boolean;
+  /** Reports the exact price of each call (else it's estimated from a price list). */
+  exactCost: boolean;
+}
+
+/** A stored key — the key itself never leaves the server. */
+export interface LlmKeySummary {
+  provider: string;
+  /** Last 4 characters. */
+  keyHint: string;
+  baseUrl: string | null;
+  createdAt: number;
+  verifiedAt: number | null;
+  /** Last failure (rejected key, out of credit, can't be decrypted). */
+  lastError: string | null;
+}
+
+export const llmModelRefSchema = z.object({ provider: z.string().min(1).max(40), model: z.string().trim().min(1).max(200) });
+export type LlmModelRef = z.infer<typeof llmModelRefSchema>;
+
+/** The user's pick per tier; null = automatic. */
+export const llmModelChoicesSchema = z.object({
+  fast: llmModelRefSchema.nullable().default(null),
+  smart: llmModelRefSchema.nullable().default(null),
+  web: llmModelRefSchema.nullable().default(null),
+});
+export type LlmModelChoices = z.infer<typeof llmModelChoicesSchema>;
+
+/** apiKey may be blank only for a custom endpoint that needs none (e.g. a local Ollama). */
+export const saveLlmKeySchema = z.object({
+  apiKey: z.string().trim().max(500),
+  baseUrl: z.string().trim().max(300).optional(),
+});
+
+/** Which model a tier actually uses right now, and who pays. */
+export interface LlmEffective {
+  funding: LlmFunding;
+  provider: string;
+  model: string;
+}
+
+export interface LlmStatus {
+  effective: Record<LlmTier, LlmEffective | null>;
+  /** Why a tier can't run (no key, no web-capable provider, server key not allowed). */
+  unavailable: Partial<Record<LlmTier, string>>;
+}
+
+export interface LlmSettingsResponse extends LlmStatus {
+  keys: LlmKeySummary[];
+  models: LlmModelChoices;
+  server: { configured: boolean; allowed: boolean; access: ServerLlmAccess };
+  providers: LlmProviderInfo[];
+}
+
+/** A model suggestion; prices in USD per 1M tokens (null = unknown). */
+export interface LlmModelOption {
+  id: string;
+  name: string;
+  input: number | null;
+  output: number | null;
+}
+
+export interface LlmTestResult {
+  ok: boolean;
+  provider?: string;
+  model?: string;
+  ms?: number;
+  error?: string;
 }
 
 /** Remaining balance at the LLM provider (admin-only). */

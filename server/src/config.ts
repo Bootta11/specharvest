@@ -75,13 +75,16 @@ const envSchema = z.object({
   ADMIN_PASSWORD: optionalNonEmpty(),
   // Secure flag on the session cookie. Blank = on when PUBLIC_URL is https.
   SESSION_COOKIE_SECURE: optionalNonEmpty(),
+  // Encrypts users' LLM API keys at rest: 32 random bytes, base64 or hex (openssl rand -base64 32).
+  // Blank = generated once into DATA_DIR/encryption.key (see lib/secrets.ts).
+  ENCRYPTION_KEY: optionalNonEmpty(),
 
   // Commit the image was built from (set by the Dockerfile's GIT_SHA build arg).
   APP_GIT_SHA: optionalNonEmpty(),
 });
 
 // Secrets can also come from files (Docker/Compose secrets): OPENROUTER_API_KEY_FILE=/run/secrets/openrouter.
-const FILE_SECRETS = ["OPENROUTER_API_KEY", "OPENROUTER_MANAGEMENT_KEY", "PUPPETEER_WS_API_KEY", "PUPPETEER_WS_PASSWORD", "PROXY_PASSWORD", "VAPID_PRIVATE_KEY", "ADMIN_PASSWORD"];
+const FILE_SECRETS = ["OPENROUTER_API_KEY", "OPENROUTER_MANAGEMENT_KEY", "PUPPETEER_WS_API_KEY", "PUPPETEER_WS_PASSWORD", "PROXY_PASSWORD", "VAPID_PRIVATE_KEY", "ADMIN_PASSWORD", "ENCRYPTION_KEY"];
 for (const key of FILE_SECRETS) {
   const file = process.env[`${key}_FILE`];
   if (file && !process.env[key]) process.env[key] = fs.readFileSync(file, "utf8").trim();

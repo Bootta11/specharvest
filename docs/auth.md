@@ -34,6 +34,7 @@ the notification channels.
 | Search collections shared by others (read only) | ✓ | ✓ |
 | See others' private collections, jobs, spend | — | ✓ (spend via *Everyone* in the `$` menu) |
 | Add users, disable/enable users, toggle sign-up | — | ✓ (*Users & sign-up* in the avatar menu) |
+| Choose who may use the server's LLM key; add a custom (self-hosted) LLM endpoint | — | ✓ (see [LLM providers](llm-providers.md)) |
 
 **Sharing:** the owner clicks *Share* on a collection. Every user can then pick
 it in Search and open its items. They cannot crawl, rename or delete it. A web
@@ -44,7 +45,9 @@ results fill in the shared items for everyone.
 collection someone shared with you creates your own copy.
 
 **Per user:** jobs (and the live jobs feed), *Recent* searches, notification
-channels (🔔), Web Push browsers, LLM spend.
+channels (🔔), Web Push browsers, LLM API keys and model picks
+(*LLM provider*, encrypted at rest), LLM spend. A job runs on the keys of the
+person who started it.
 
 **Shared by everyone:** the web-lookup fact cache (`web_facts`) and the
 parsed-query cache. Neither holds anything personal; caching across users only

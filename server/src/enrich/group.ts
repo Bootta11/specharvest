@@ -1,6 +1,5 @@
 import { z } from "zod";
 import type { Item, MatchSuggestion, ProductGroup, SameProduct } from "@specharvest/shared";
-import { env } from "../config.ts";
 import * as db from "../db/sqlite.ts";
 import { askForJson } from "../llm/client.ts";
 import { createLogger, errorMessage } from "../lib/logger.ts";
@@ -122,7 +121,7 @@ export async function canonicalizeIdentities(
 async function proposeGroups(fresh: string[], known: string[], titleOf: Map<string, string>): Promise<Map<string, string>> {
   const list = fresh.map((id) => `- ${id}${titleOf.get(id) && titleOf.get(id)!.toLowerCase() !== id ? `  (listing title: ${titleOf.get(id)})` : ""}`).join("\n");
   const user = `New:\n${list}\n\nKnown products:\n${known.length ? known.map((k) => `- ${k}`).join("\n") : "(none)"}`;
-  const { data } = await askForJson(groupSchema, SYSTEM, user, { purpose: "group", model: env.OPENROUTER_SMART_MODEL, maxTokens: 4000 });
+  const { data } = await askForJson(groupSchema, SYSTEM, user, { purpose: "group", maxTokens: 4000 });
 
   const freshSet = new Set(fresh);
   const knownSet = new Set(known);

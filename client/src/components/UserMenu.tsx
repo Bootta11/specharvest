@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { UserSummary } from "@specharvest/shared";
 
 /** Header avatar with the account / admin / sign-out menu. */
-export function UserMenu({ user, onAccount, onAdmin, onLogout }: { user: UserSummary; onAccount: () => void; onAdmin: () => void; onLogout: () => void }) {
+export function UserMenu({ user, onAccount, onLlm, onAdmin, onLogout }: { user: UserSummary; onAccount: () => void; onLlm: () => void; onAdmin: () => void; onLogout: () => void }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -46,6 +46,9 @@ export function UserMenu({ user, onAccount, onAdmin, onLogout }: { user: UserSum
           </div>
           <button role="menuitem" className={item} onClick={pick(onAccount)}>
             Account & API keys
+          </button>
+          <button role="menuitem" className={item} onClick={pick(onLlm)}>
+            LLM provider
           </button>
           {user.role === "admin" && (
             <button role="menuitem" className={item} onClick={pick(onAdmin)}>

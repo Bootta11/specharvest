@@ -3,11 +3,11 @@
 ```
 React UI (Vite) ──HTTP/SSE──► Fastify API ──► crawler (puppeteer-core, p-queue)
                                    │                 │
-                                   │                 ├─► LLM (OpenRouter): listing detection, spec extraction, key merging
+                                   │                 ├─► LLM (AI SDK → user's own key or server OpenRouter key): detection, extraction, key merging
                                    │                 └─► embeddings (Transformers.js, local)
                                    ├─► SQLite (node:sqlite)  items · specs JSON · key registry · jobs · web facts
                                    ├─► LanceDB               item vectors (semantic ranking)
-                                   └─► LLM + openrouter:web_search  missing-spec lookups
+                                   └─► LLM + provider web search    missing-spec lookups
 ```
 
 ## Workspaces
@@ -16,7 +16,7 @@ React UI (Vite) ──HTTP/SSE──► Fastify API ──► crawler (puppeteer
 | --- | --- |
 | `shared/` | Types + zod schemas shared by API and UI (query plan, job events, …) |
 | `server/src/crawler/` | `browser.ts` (remote/local Chrome, page slots, proxy, navigation + bot-wall check), `detect.ts` (card + pagination detection), `paginate.ts` (walkers, card text, walk completeness), `fingerprint.ts` (change-detection hashes), `sanitize.ts` (LLM-ready HTML, detail-page text snapshot), `job.ts` (crawl orchestration) |
-| `server/src/llm/` | `client.ts` (OpenRouter via `openai` SDK, JSON extraction/repair/salvage), prompts: `detect.ts`, `extract.ts`, `parse-query.ts`, `consolidate.ts` |
+| `server/src/llm/` | `client.ts` (AI SDK `generateText`, JSON extraction/repair/salvage, provider error classification), `providers.ts` (provider catalog), `resolve.ts` (which key/model serves a call, server-key policy), `keys.ts` (users' encrypted keys, model picks), `pricing.ts` (models.dev prices, cost estimates), `routes.ts` (LLM settings API), `usage.ts` (spend ledger), prompts: `detect.ts`, `extract.ts`, `parse-query.ts`, `consolidate.ts` — see [LLM providers](llm-providers.md) |
 | `server/src/search/` | `filters.ts` (plan → parametrized SQL), `hybrid.ts` (bucketing, ranking, enrichment trigger) |
 | `server/src/enrich/web.ts` | Web lookups, `web_facts` cache, merging found values into items, cross-user in-flight dedupe |
 | `server/src/enrich/predict.ts` | Predicted extra attributes for each paid lookup (collection spec profile + keys asked before) |
@@ -41,8 +41,9 @@ no server build step; `tsc` is used for type checking only.
 - `query_cache` — parsed search plans per (collection, normalized request) + registry signature, shared by all users.
 - `search_history` — each user's "recent searches" per collection.
 - `jobs` — crawl and enrich jobs with counters, message, error, and the user who started them.
-- `llm_usage` — one row per OpenRouter call, billed to a user, job and collection.
-- `settings` — JSON values: per-user notification channels (`notifications:<userId>`), generated VAPID keys, the sign-up toggle, per-collection spec profiles (`attr-profile:<collectionId>`).
+- `llm_usage` — one row per LLM call, billed to a user, job and collection, with its `provider`, `funding` (`own` key / `platform` = server key) and whether the cost is estimated.
+- `llm_keys` — users' own LLM API keys (AES-256-GCM encrypted, last 4 characters shown), one per provider.
+- `settings` — JSON values: per-user notification channels (`notifications:<userId>`), per-user LLM model picks (`llm-models:<userId>`), generated VAPID keys, the sign-up toggle, who may use the server LLM key (`llm.serverAccess`), the models.dev price list (`llm-prices`), per-collection spec profiles (`attr-profile:<collectionId>`).
 - `push_subscriptions` — browsers that enabled Web Push, per user.
 - `users`, `sessions`, `api_keys` — accounts, login sessions and API keys (tokens stored as sha256 only); see [auth](auth.md).
 
@@ -50,6 +51,9 @@ LanceDB (`data/lancedb/item_vectors`) holds `{item_id, collection_id, vector}`
 only; SQLite is the source of truth.
 
 ## Models
+
+Users can bring their own keys and pick models per kind of task — see [LLM providers](llm-providers.md).
+The server key (`OPENROUTER_API_KEY`) uses these:
 
 | Env var | Default | Used for |
 | --- | --- | --- |

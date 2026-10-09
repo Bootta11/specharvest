@@ -6,6 +6,7 @@ import { embed } from "../embedding.ts";
 import { applyCachedFacts, startEnrichment } from "../enrich/web.ts";
 import { normalizeQuery, parseQuery, sanitizePlan } from "../llm/parse-query.ts";
 import { withLlmContext } from "../llm/usage.ts";
+import { llmStatus } from "../llm/resolve.ts";
 import { buildCandidateQuery, COLUMN_KEYS, hasValue, valueOf } from "./filters.ts";
 
 const DEFAULT_LIMIT = 60;
@@ -74,11 +75,12 @@ async function runSearch(req: SearchRequest, viewer: db.Viewer, scope: db.Collec
     const labels = attrs.map((w) => w.label).join(", ");
     // Cached facts (from earlier lookups of the same product) apply instantly.
     const { needLookup } = applyCachedFacts(pool, attrs);
+    // Lookups run on the viewer's own web-capable key or, if allowed, the server's (llm/resolve.ts).
+    const webBlocked = env.WEB_SEARCH_ENABLED ? llmStatus(viewer.id).unavailable.web : "Web lookups are disabled (WEB_SEARCH_ENABLED=false)";
     if (needLookup.length === 0) {
       const stillMissing = pool.filter((i) => attrs.some((a) => !hasValue(i, a.key))).length;
       if (stillMissing) enrichNote = `${stillMissing} items still lack ${labels} (not found on the web)`;
-    } else if (!env.WEB_SEARCH_ENABLED) enrichNote = "Web lookups are disabled (WEB_SEARCH_ENABLED=false)";
-    else if (!env.OPENROUTER_API_KEY) enrichNote = "Web lookups need OPENROUTER_API_KEY";
+    } else if (webBlocked) enrichNote = webBlocked;
     else if (req.enrich !== false) {
       const job = startEnrichment({ collectionId, groupId: req.groupId, userId: viewer.id, attributes: attrs, itemIds: needLookup.map((i) => i.id) });
       enrichJobId = job.id;

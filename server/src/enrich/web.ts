@@ -5,7 +5,7 @@ import { env } from "../config.ts";
 import * as db from "../db/sqlite.ts";
 import { upsertVector } from "../db/lance.ts";
 import { embed } from "../embedding.ts";
-import { askForJson } from "../llm/client.ts";
+import { askForJson, llmBlocked } from "../llm/client.ts";
 import { withLlmContext } from "../llm/usage.ts";
 import { coerceToType } from "../llm/extract.ts";
 import { proposeKeyMerges } from "../llm/consolidate.ts";
@@ -72,19 +72,8 @@ async function lookup(item: Item, attrs: MissingAttribute[], extras: MissingAttr
     ? `\n\nAlso fill these if the pages you found state them for this exact product — don't search specifically for them; null otherwise:\n${attrLines(extras)}`
     : "";
   const user = `Product: ${item.title}\nIdentity: ${lookupIdentity(item)}\nKnown specs: ${contextSpecs(item) || "(none)"}\n\nFind:\n${attrLines(attrs)}${also}`;
-  const res = await askForJson(answerSchema, SYSTEM, user, {
-    purpose: "web-lookup",
-    model: env.OPENROUTER_WEB_MODEL,
-    maxTokens: 1500 + 60 * extras.length,
-    extra: {
-      tools: [
-        {
-          type: "openrouter:web_search",
-          parameters: { engine: env.WEB_SEARCH_ENGINE, max_results: 5, max_uses: env.WEB_SEARCH_MAX_USES, search_context_size: "medium" },
-        },
-      ],
-    },
-  });
+  // The provider's own web search (OpenRouter: WEB_SEARCH_ENGINE / WEB_SEARCH_MAX_USES, see llm/providers.ts).
+  const res = await askForJson(answerSchema, SYSTEM, user, { purpose: "web-lookup", maxTokens: 1500 + 60 * extras.length, webSearch: true });
   const byKey = new Map(res.data.results.map((r) => [r.key, r]));
   const results = [...attrs, ...extras].map((a) => {
     const r = byKey.get(a.key);
@@ -330,9 +319,12 @@ async function runEnrichment(jobId: number, input: EnrichInput) {
   let done = groups.size - toFetch.length;
   let failed = 0;
   let prefetched = 0;
+  /** Set when the LLM key stops working (rejected, out of credit): the remaining lookups would all fail. */
+  let halt = null as Error | null;
   const queue = new PQueue({ concurrency: 3 });
   for (const [identity, g] of capped) {
     queue.add(async () => {
+      if (halt) return;
       let release = () => {};
       const claimed: string[] = [];
       try {
@@ -377,8 +369,13 @@ async function runEnrichment(jobId: number, input: EnrichInput) {
         }
         if (extraFound.length) jobLog(jobId, `${identity}: +${extraFound.length} extra specs cached for later searches (${extraFound.join(", ")})`);
       } catch (err) {
-        failed++;
-        jobLog(jobId, `Lookup failed for ${identity}: ${errorMessage(err)}`, "warn");
+        if (llmBlocked(err)) {
+          halt ??= err;
+          queue.clear();
+        } else {
+          failed++;
+          jobLog(jobId, `Lookup failed for ${identity}: ${errorMessage(err)}`, "warn");
+        }
       } finally {
         for (const k of claimed) inflight.delete(k);
         release();
@@ -393,6 +390,8 @@ async function runEnrichment(jobId: number, input: EnrichInput) {
     await upsertVector(item.id, item.collectionId, await embed(embeddingText(item))).catch((err) => log.warn("re-embed failed", errorMessage(err)));
   }
   for (const cid of new Set(items.map((i) => i.collectionId))) db.recountSpecKeys(cid);
+  // Values found before the key stopped working are kept; the job fails with what to fix.
+  if (halt) throw halt;
 
   patchJob(jobId, {
     status: "done",

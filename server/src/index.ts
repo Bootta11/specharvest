@@ -19,6 +19,9 @@ import { search } from "./search/hybrid.ts";
 import { proposeKeyMerges } from "./llm/consolidate.ts";
 import { withLlmContext } from "./llm/usage.ts";
 import { getProviderCredits } from "./llm/credits.ts";
+import { llmReady, llmStatus, requireLlm } from "./llm/resolve.ts";
+import { registerLlmRoutes } from "./llm/routes.ts";
+import { startPriceRefresh } from "./llm/pricing.ts";
 import { subscribe } from "./sse/hub.ts";
 import { createLogger, errorMessage } from "./lib/logger.ts";
 import { httpError } from "./lib/http-error.ts";
@@ -33,6 +36,7 @@ const log = createLogger("server");
 db.getDb();
 await bootstrapAdmin();
 pruneSessions();
+startPriceRefresh();
 
 // trustProxy: rate limiting keys on the client IP behind the tunnel / reverse proxy.
 const app = Fastify({ logger: false, bodyLimit: 1_000_000, trustProxy: true });
@@ -53,6 +57,7 @@ const idParam = (p: unknown) => {
 const notFound = (reply: FastifyReply) => reply.status(404).send({ error: "Not found" });
 
 registerAuthRoutes(app);
+registerLlmRoutes(app);
 
 // ---------- Health / config ----------
 
@@ -74,14 +79,18 @@ app.get("/api/health", async (_req, reply) => {
     .send({ ok, status: ok ? "ok" : "error", checks, uptimeSeconds: Math.round(process.uptime()), timestamp: new Date().toISOString() });
 });
 
-app.get("/api/config", async () => ({
-  version: env.APP_GIT_SHA ?? "dev",
-  proxyConfigured: proxyConfigured(),
-  webSearchEnabled: env.WEB_SEARCH_ENABLED && !!env.OPENROUTER_API_KEY,
-  llmConfigured: !!env.OPENROUTER_API_KEY,
-  defaults: { maxPages: env.MAX_PAGES, maxItems: env.MAX_ITEMS },
-  models: { main: env.OPENROUTER_MODEL, extraction: env.OPENROUTER_EXTRACTION_MODEL, web: env.OPENROUTER_WEB_MODEL },
-}));
+// Per user: which LLM provider/model each tier runs on for them (own key or server key), see llm/resolve.ts.
+app.get("/api/config", async (req) => {
+  const llm = llmStatus(currentUser(req).id);
+  return {
+    version: env.APP_GIT_SHA ?? "dev",
+    proxyConfigured: proxyConfigured(),
+    webSearchEnabled: env.WEB_SEARCH_ENABLED && !!llm.effective.web,
+    llmConfigured: !!llm.effective.fast,
+    defaults: { maxPages: env.MAX_PAGES, maxItems: env.MAX_ITEMS },
+    llm,
+  };
+});
 
 // ---------- Collections & items ----------
 
@@ -197,7 +206,7 @@ app.get("/api/collections/:id/products", async (req): Promise<CollectionProducts
   const collection = requireCollection(idParam(req.params), user, "read");
   const items = db.listItems(collection.id, 5000);
   if (collection.canEdit) {
-    await withLlmContext({ collectionId: collection.id, userId: user.id }, () => groupForCollection(collection.id, items, { llm: !!env.OPENROUTER_API_KEY }));
+    await withLlmContext({ collectionId: collection.id, userId: user.id }, () => groupForCollection(collection.id, items, { llm: llmReady(user.id, "smart") }));
   }
   return {
     products: productGroups(items),
@@ -241,6 +250,7 @@ app.post("/api/collections/:id/split", async (req) => {
 app.post("/api/collections/:id/consolidate", async (req) => {
   const user = currentUser(req);
   const id = requireCollection(idParam(req.params), user, "write").id;
+  requireLlm(user.id, "smart");
   const merges = await withLlmContext({ collectionId: id, userId: user.id }, () => proposeKeyMerges(db.listSpecKeys(id)));
   const moved = db.applyKeyMerges(id, merges);
   return { merges, moved };
@@ -264,17 +274,18 @@ app.get("/api/items/:id", async (req, reply) => {
 // ---------- Jobs ----------
 
 app.post("/api/crawl", async (req, reply) => {
-  if (!env.OPENROUTER_API_KEY) return reply.status(400).send({ error: "OPENROUTER_API_KEY is not configured" });
+  const user = currentUser(req);
+  requireLlm(user.id, "fast");
   const body = crawlRequestSchema.parse(req.body);
   if (body.useProxy && !proxyConfigured()) return reply.status(400).send({ error: "PROXY_SERVER is not configured" });
-  const user = currentUser(req);
   if (body.collectionId) requireCollection(body.collectionId, user, "write");
   return reply.status(202).send(startCrawl(body, user.id, body.collectionId));
 });
 
 app.post("/api/enrich", async (req, reply) => {
   const body = enrichRequestSchema.parse(req.body);
-  if (!env.WEB_SEARCH_ENABLED || !env.OPENROUTER_API_KEY) return reply.status(400).send({ error: "Web lookups are not enabled" });
+  if (!env.WEB_SEARCH_ENABLED) return reply.status(400).send({ error: "Web lookups are disabled (WEB_SEARCH_ENABLED=false)" });
+  requireLlm(currentUser(req).id, "web");
   // Shared collections can be enriched by readers too — the lookups are billed to them.
   const scope = readScope(req, body.collectionId, body.groupId);
   const readable = new Set(db.listItems(scope, 5000).map((i) => i.id));
@@ -326,7 +337,8 @@ app.post("/api/jobs/:id/resume", async (req, reply) => {
   const job = requireJob(idParam(req.params), currentUser(req));
   if (job.collectionId) requireCollection(job.collectionId, currentUser(req), "write");
   const id = job.id;
-  if (!env.OPENROUTER_API_KEY) return reply.status(400).send({ error: "OPENROUTER_API_KEY is not configured" });
+  // The crawl keeps running on its starter's keys.
+  requireLlm(job.userId ?? currentUser(req).id, "fast");
   try {
     return reply.status(202).send(resumeCrawl(id));
   } catch (err) {

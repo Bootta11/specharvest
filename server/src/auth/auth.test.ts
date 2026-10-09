@@ -130,7 +130,7 @@ describe("ownership & scoping", () => {
     const dave = { id: (await users.createUser("dave@example.com", "password1")).id, role: "user" as const };
     const c = db.createCollection("carol", "https://shop.example/c", "shop.example", carol.id);
     const job = db.createJob("crawl", c, {}, carol.id);
-    db.recordLlmUsage({ purpose: "extract", model: "m", promptTokens: 1, completionTokens: 1, cost: 0.5, webSearches: 0, jobId: job.id, collectionId: c, userId: carol.id });
+    db.recordLlmUsage({ purpose: "extract", provider: "openrouter", model: "m", funding: "platform", promptTokens: 1, completionTokens: 1, cost: 0.5, webSearches: 0, jobId: job.id, collectionId: c, userId: carol.id });
 
     expect(db.listJobs(30, carol).map((j) => j.id)).toContain(job.id);
     expect(db.listJobs(30, dave).map((j) => j.id)).not.toContain(job.id);

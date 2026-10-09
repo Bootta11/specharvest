@@ -1,11 +1,11 @@
 import { useEffect, useState, type FormEvent } from "react";
-import type { UserCreated, UserRole, UserSummary } from "@specharvest/shared";
+import type { AdminSettings, ServerLlmAccess, UserCreated, UserRole, UserSummary } from "@specharvest/shared";
 import { api } from "../lib/api.ts";
 import { Modal, Notice, OneTimeSecret } from "./Modal.tsx";
 
 export function AdminModal({ me, onClose }: { me: UserSummary; onClose: () => void }) {
   const [users, setUsers] = useState<UserSummary[] | null>(null);
-  const [signupEnabled, setSignupEnabled] = useState<boolean | null>(null);
+  const [settings, setSettings] = useState<AdminSettings | null>(null);
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<UserRole>("user");
   const [created, setCreated] = useState<UserCreated | null>(null);
@@ -15,7 +15,7 @@ export function AdminModal({ me, onClose }: { me: UserSummary; onClose: () => vo
   const load = () => api.users().then(setUsers, fail);
   useEffect(() => {
     load();
-    api.adminSettings().then((s) => setSignupEnabled(s.signupEnabled), fail);
+    api.adminSettings().then(setSettings, fail);
   }, []);
 
   const create = async (e: FormEvent) => {
@@ -39,10 +39,10 @@ export function AdminModal({ me, onClose }: { me: UserSummary; onClose: () => vo
     load();
   };
 
-  const toggleSignup = async (on: boolean) => {
+  const saveSettings = async (patch: Parameters<typeof api.saveAdminSettings>[0]) => {
     setError(null);
     try {
-      setSignupEnabled((await api.saveAdminSettings({ signupEnabled: on })).signupEnabled);
+      setSettings(await api.saveAdminSettings(patch));
     } catch (err) {
       fail(err);
     }
@@ -102,15 +102,38 @@ export function AdminModal({ me, onClose }: { me: UserSummary; onClose: () => vo
           <input
             type="checkbox"
             className="mt-0.5 size-4 shrink-0 accent-brand-700"
-            disabled={signupEnabled === null}
-            checked={!!signupEnabled}
-            onChange={(e) => toggleSignup(e.target.checked)}
+            disabled={settings === null}
+            checked={!!settings?.signupEnabled}
+            onChange={(e) => saveSettings({ signupEnabled: e.target.checked })}
           />
           <span className="min-w-0">
             <span className="block text-sm font-medium">Anyone can create an account</span>
             <span className="block text-xs text-stone-500">Shows "Create one" on the sign-in page. New accounts are regular users.</span>
           </span>
         </label>
+      </section>
+
+      <section className="space-y-2">
+        <div>
+          <h3 className="text-sm font-semibold">Server LLM key</h3>
+          <p className="text-xs text-stone-500">
+            {settings === null
+              ? "Loading…"
+              : settings.serverLlmConfigured
+                ? "The server's OpenRouter key (OPENROUTER_API_KEY) runs work for people without a key of their own. Their own keys always come first."
+                : "OPENROUTER_API_KEY is not set — everyone needs their own key (avatar menu → LLM provider)."}
+          </p>
+        </div>
+        {settings?.serverLlmConfigured && (
+          <label className="block max-w-xs">
+            <span className="mb-1 block text-xs font-medium text-stone-600 dark:text-stone-400">Who may use it</span>
+            <select className="input" value={settings.serverLlmAccess} onChange={(e) => saveSettings({ serverLlmAccess: e.target.value as ServerLlmAccess })}>
+              <option value="everyone">Everyone</option>
+              <option value="admins">Admins only</option>
+              <option value="nobody">Nobody — everyone brings a key</option>
+            </select>
+          </label>
+        )}
       </section>
     </Modal>
   );

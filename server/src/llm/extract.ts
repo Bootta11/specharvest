@@ -1,6 +1,5 @@
 import { z } from "zod";
 import type { SpecKey, SpecType, SpecValue } from "@specharvest/shared";
-import { env } from "../config.ts";
 import { askForJson } from "./client.ts";
 import type { DetailSnapshot } from "../crawler/sanitize.ts";
 
@@ -125,7 +124,7 @@ export async function extractItem(snapshot: DetailSnapshot, registry: SpecKey[])
     .join("\n");
   const user = `Spec key registry (reuse these keys):\n${registryText(registry)}\n\nPage URL: ${snapshot.url}\n\nStructured hints from page metadata:\n${prefill || "(none)"}\n\nCandidate image URLs:\n${snapshot.images.slice(0, 5).join("\n") || "(none)"}\n\nPage text:\n${snapshot.text}`;
 
-  const { data } = await askForJson(extractionSchema, SYSTEM, user, { purpose: "extract", model: env.OPENROUTER_EXTRACTION_MODEL, maxTokens: 12000 });
+  const { data } = await askForJson(extractionSchema, SYSTEM, user, { purpose: "extract", maxTokens: 12000 });
 
   const byKey = new Map(registry.map((k) => [k.key, k]));
   const specs = new Map<string, ExtractedSpec>();

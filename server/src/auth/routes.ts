@@ -1,8 +1,10 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { createUserSchema, loginSchema, signupSchema, updateAccountSchema, type AdminSettings, type AuthStatus, type UserCreated } from "@specharvest/shared";
+import { createUserSchema, loginSchema, serverLlmAccessModes, signupSchema, updateAccountSchema, type AdminSettings, type AuthStatus, type UserCreated } from "@specharvest/shared";
+import { env } from "../config.ts";
 import * as db from "../db/sqlite.ts";
 import { httpError } from "../lib/http-error.ts";
+import { serverLlmAccess, setServerLlmAccess } from "../llm/resolve.ts";
 import { createApiKey, listApiKeys, revokeApiKey } from "./api-keys.ts";
 import { hashToken, temporaryPassword } from "./crypto.ts";
 import { currentUser, requireAdmin, SESSION_COOKIE, sessionCookieOptions } from "./plugin.ts";
@@ -11,6 +13,13 @@ import { createUser, getUser, listUsers, setUserDisabled, toSummary, updateOwnAc
 
 const SIGNUP_KEY = "auth.signupEnabled";
 const signupEnabled = () => db.getSetting<boolean>(SIGNUP_KEY) === true;
+
+const adminSettings = (): AdminSettings => ({
+  signupEnabled: signupEnabled(),
+  serverLlmAccess: serverLlmAccess(),
+  serverLlmConfigured: !!env.OPENROUTER_API_KEY,
+});
+const adminSettingsSchema = z.object({ signupEnabled: z.boolean().optional(), serverLlmAccess: z.enum(serverLlmAccessModes).optional() });
 
 const idParam = (p: unknown) => z.coerce.number().int().positive().parse((p as { id?: string }).id);
 
@@ -94,13 +103,15 @@ export function registerAuthRoutes(app: FastifyInstance) {
 
   app.get("/api/settings/admin", async (req): Promise<AdminSettings> => {
     requireAdmin(req);
-    return { signupEnabled: signupEnabled() };
+    return adminSettings();
   });
 
   app.put("/api/settings/admin", async (req): Promise<AdminSettings> => {
     requireAdmin(req);
-    const body = z.object({ signupEnabled: z.boolean() }).parse(req.body);
-    db.setSetting(SIGNUP_KEY, body.signupEnabled);
-    return { signupEnabled: signupEnabled() };
+    const body = adminSettingsSchema.parse(req.body);
+    if (body.signupEnabled !== undefined) db.setSetting(SIGNUP_KEY, body.signupEnabled);
+    // Who may use the server's LLM key when they have no key of their own (llm/resolve.ts).
+    if (body.serverLlmAccess !== undefined) setServerLlmAccess(body.serverLlmAccess);
+    return adminSettings();
   });
 }
