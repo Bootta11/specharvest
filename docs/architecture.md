@@ -17,7 +17,7 @@ React UI (Vite) ──HTTP/SSE──► Fastify API ──► crawler (puppeteer
 | `shared/` | Types + zod schemas shared by API and UI (query plan, job events, …) |
 | `server/src/crawler/` | `browser.ts` (remote/local Chrome, page slots, proxy, navigation + bot-wall check), `detect.ts` (card + pagination detection), `paginate.ts` (walkers, card text, walk completeness), `fingerprint.ts` (change-detection hashes), `sanitize.ts` (LLM-ready HTML, detail-page text snapshot), `job.ts` (crawl orchestration) |
 | `server/src/llm/` | `client.ts` (AI SDK `generateText`, JSON extraction/repair/salvage, provider error classification), `providers.ts` (provider catalog), `resolve.ts` (which key/model serves a call, server-key policy), `keys.ts` (users' encrypted keys, model picks), `pricing.ts` (models.dev prices, cost estimates), `routes.ts` (LLM settings API), `usage.ts` (spend ledger), prompts: `detect.ts`, `extract.ts`, `parse-query.ts`, `consolidate.ts` — see [LLM providers](llm-providers.md) |
-| `server/src/search/` | `filters.ts` (plan → parametrized SQL), `hybrid.ts` (bucketing, ranking, enrichment trigger) |
+| `server/src/search/` | `filters.ts` (plan → parametrized SQL, listing-field columns), `facets.ts` (value counts per field for the filter panel), `hybrid.ts` (bucketing, ranking, enrichment trigger) |
 | `server/src/enrich/web.ts` | Web lookups, `web_facts` cache, merging found values into items, cross-user in-flight dedupe |
 | `server/src/enrich/predict.ts` | Predicted extra attributes for each paid lookup (collection spec profile + keys asked before) |
 | `server/src/db/` | `sqlite.ts` (schema + queries), `lance.ts` (vectors) |
@@ -25,7 +25,7 @@ React UI (Vite) ──HTTP/SSE──► Fastify API ──► crawler (puppeteer
 | `server/src/auth/` | `plugin.ts` (cookie / `X-Api-Key` → `req.user` hook), `routes.ts`, `users.ts`, `sessions.ts`, `api-keys.ts`, `crypto.ts` (scrypt, tokens), `ownership.ts` (read/write checks), `bootstrap.ts` — see [auth](auth.md) |
 | `server/src/scripts/seed-admin.ts` | `npm run seed:admin` — creates the first admin |
 | `server/src/sse/hub.ts` | Per-job SSE channels with replay for late subscribers; per-subscriber filters (each user's jobs feed) |
-| `client/src/` | `views/LoginView.tsx`, `views/IngestView.tsx`, `views/SearchView.tsx`, item card/modal, job progress, `components/{UserMenu,AccountModal,AdminModal}.tsx`, `lib/auth.ts` |
+| `client/src/` | `views/LoginView.tsx`, `views/IngestView.tsx`, `views/SearchView.tsx`, `components/FilterPanel.tsx` (search filters on every field), item card/modal, job progress, `components/{UserMenu,AccountModal,AdminModal}.tsx`, `lib/auth.ts` |
 
 The server runs TypeScript directly through `tsx` (dev and Docker), so there is
 no server build step; `tsc` is used for type checking only.

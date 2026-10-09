@@ -119,6 +119,33 @@ re-enter their keys. See [LLM providers](llm-providers.md#keys-at-rest).
 Compose interpolates `$` inside `.env` values. Single-quote any value that
 contains one, e.g. `ADMIN_PASSWORD='pa$$word'`.
 
+## Security settings
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `TRUST_PROXY` | `loopback,linklocal,uniquelocal` | Which peers may set `X-Forwarded-For`/`-Proto`/`-Host`: IPs, CIDRs or those names, or `true`/`false`. The default trusts a reverse proxy or tunnel on the host or a private Docker network. A client connecting directly can't fake its IP (login rate limits key on it). Hop counts aren't supported. |
+| `ALLOW_PRIVATE_TARGETS` | `false` | Let crawls (and everyone's notifications) reach private/LAN addresses. Only for a single-user setup that crawls intranet sites. |
+| `OUTBOUND_ALLOWED_HOSTS` | `apprise` | Hosts every user's notifications may reach although they're private, e.g. the bundled Apprise container. Blank = none. |
+| `MAX_PAGES_CAP` / `MAX_ITEMS_CAP` | `50` / `1000` | Most a non-admin may ask one crawl for (admins: 200 / 5000) |
+| `MAX_ACTIVE_JOBS_PER_USER` | `3` | Crawls + web lookups one non-admin may run at once (0 = no limit) |
+| `IMPORT_MAX_MB` | `50` | Largest collection file an import accepts |
+
+The daily limit on the server's LLM key is set in the app (*Users & sign-up*).
+
+**Outbound requests.** The app refuses to crawl loopback, private, link-local
+(cloud metadata) and other non-public addresses. That covers the start URL and
+every request the crawled pages make, including redirects. Notification
+webhooks from non-admins get the same check at connect time, so DNS tricks
+don't get around it, and redirects aren't followed. Chrome resolves names
+itself, though, so a hostile site could still try DNS rebinding against the
+browser. For full isolation, give the browser container a network without a
+route to your LAN or the Docker host: a dedicated Docker network plus host
+firewall rules, or an egress proxy for the browser.
+
+**Headers.** The server sets a Content-Security-Policy, `X-Frame-Options`,
+`nosniff`, `Referrer-Policy` and, when `PUBLIC_URL` is https, HSTS. Have your
+reverse proxy pass them through rather than replace them.
+
 ## Data
 
 Everything that needs to survive a restart lives in the `specharvest-data`

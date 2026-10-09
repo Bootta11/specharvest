@@ -32,8 +32,9 @@ import type {
   UserRole,
   UserSummary,
 } from "@specharvest/shared";
-import { isActiveJob } from "@specharvest/shared";
+import { isActiveJob, isHttpUrl } from "@specharvest/shared";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { apiUrl, authHeaders, isNative, setSessionToken } from "./platform.ts";
 
 export interface AppConfig {
   proxyConfigured: boolean;
@@ -42,6 +43,8 @@ export interface AppConfig {
   /** The signed-in user can crawl and parse searches (own key or the server key). */
   llmConfigured: boolean;
   defaults: { maxPages: number; maxItems: number };
+  /** Most one crawl may ask for (lower for non-admins). */
+  limits: { maxPages: number; maxItems: number };
   /** Which provider/model each tier runs on for this user, and why a tier can't run. */
   llm: LlmStatus;
 }
@@ -49,18 +52,61 @@ export interface AppConfig {
 /** Fired when the session is gone (expired, revoked, user disabled) — the app drops back to the login screen. */
 export const UNAUTHORIZED_EVENT = "specharvest:unauthorized";
 
+/** A failed API call: the server's message, its status and — for 429 — how many seconds to wait. */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly retryAfter: number | null,
+  ) {
+    super(message);
+  }
+}
+
 async function request<T>(method: string, url: string, body?: unknown): Promise<T> {
-  const res = await fetch(url, {
+  const res = await fetch(apiUrl(url), {
     method,
-    headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
+    headers: { ...authHeaders(), ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   const text = await res.text();
   const data = text ? JSON.parse(text) : null;
   // A 401 from the credential endpoints is just a wrong password, not a lost session.
   if (res.status === 401 && !url.startsWith("/api/auth/")) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
-  if (!res.ok) throw new Error(data?.error ?? `${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    const retryAfter = Number(res.headers.get("retry-after"));
+    throw new ApiError(data?.error ?? `${res.status} ${res.statusText}`, res.status, Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : null);
+  }
   return data as T;
+}
+
+/** The web gets the user (cookie set by the server); the app also gets its bearer token, kept on the device. */
+type SignInResponse = UserSummary | { user: UserSummary; token: string };
+
+async function signedIn(res: Promise<SignInResponse>): Promise<UserSummary> {
+  const data = await res;
+  if (!("token" in data)) return data;
+  setSessionToken(data.token);
+  return data.user;
+}
+
+/**
+ * Downloads an export: a plain link on the web (the cookie authenticates it); in the app, fetched with the token
+ * and handed to the share sheet (native/files.ts), since a WebView can't save a link's download.
+ */
+export async function downloadExport(path: string, fallbackName: string) {
+  if (!isNative) {
+    const a = document.createElement("a");
+    a.href = path;
+    a.download = "";
+    a.click();
+    return;
+  }
+  const res = await fetch(apiUrl(path), { headers: authHeaders() });
+  if (!res.ok) throw new Error(`Export failed (${res.status})`);
+  const name = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") ?? "")?.[1] ?? fallbackName;
+  const { shareTextFile } = await import("./native.ts");
+  await shareTextFile(name, await res.text());
 }
 
 export const api = {
@@ -71,7 +117,7 @@ export const api = {
   shareCollection: (id: number, isShared: boolean) => request<Collection>("PATCH", `/api/collections/${id}`, { isShared }),
   setCollectionGrouping: (id: number, grouping: GroupingMode) => request<Collection>("PATCH", `/api/collections/${id}`, { grouping }),
   deleteCollection: (id: number) => request<{ ok: true }>("DELETE", `/api/collections/${id}`),
-  /** Same-origin link — the session cookie authenticates the download. */
+  /** Export paths for downloadExport() (cookie on the web, bearer token in the app). */
   exportCollectionUrl: (id: number) => `/api/collections/${id}/export`,
   exportAllCollectionsUrl: "/api/collections/export",
   /** A single-collection export returns that collection; an "Export all" file returns the list. */
@@ -99,9 +145,15 @@ export const api = {
   // Auth & account
   authStatus: () => request<AuthStatus>("GET", "/api/auth/status"),
   me: () => request<UserSummary>("GET", "/api/auth/me"),
-  login: (email: string, password: string) => request<UserSummary>("POST", "/api/auth/login", { email, password }),
-  signup: (email: string, password: string) => request<UserSummary>("POST", "/api/auth/signup", { email, password }),
-  logout: () => request<null>("POST", "/api/auth/logout"),
+  login: (email: string, password: string) => signedIn(request<SignInResponse>("POST", "/api/auth/login", { email, password })),
+  signup: (email: string, password: string) => signedIn(request<SignInResponse>("POST", "/api/auth/signup", { email, password })),
+  logout: async () => {
+    try {
+      await request<null>("POST", "/api/auth/logout");
+    } finally {
+      setSessionToken(null);
+    }
+  },
   updateAccount: (body: { currentPassword: string; email?: string; newPassword?: string }) => request<UserSummary>("PATCH", "/api/auth/me", body),
   apiKeys: () => request<ApiKeySummary[]>("GET", "/api/api-keys"),
   createApiKey: (label: string) => request<ApiKeyCreated>("POST", "/api/api-keys", { label }),
@@ -111,7 +163,8 @@ export const api = {
   createUser: (email: string, role: UserRole) => request<UserCreated>("POST", "/api/users", { email, role }),
   setUserDisabled: (id: number, disabled: boolean) => request<UserSummary>("PATCH", `/api/users/${id}`, { disabled }),
   adminSettings: () => request<AdminSettings>("GET", "/api/settings/admin"),
-  saveAdminSettings: (body: Partial<Pick<AdminSettings, "signupEnabled" | "serverLlmAccess">>) => request<AdminSettings>("PUT", "/api/settings/admin", body),
+  saveAdminSettings: (body: Partial<Pick<AdminSettings, "signupEnabled" | "serverLlmAccess" | "serverLlmDailyLimitUsd">>) =>
+    request<AdminSettings>("PUT", "/api/settings/admin", body),
   // LLM provider (own API keys, model picks)
   llmSettings: () => request<LlmSettingsResponse>("GET", "/api/settings/llm"),
   saveLlmKey: (provider: string, apiKey: string, baseUrl?: string) => request<LlmSettingsResponse>("PUT", `/api/settings/llm/keys/${encodeURIComponent(provider)}`, { apiKey, baseUrl }),
@@ -144,12 +197,108 @@ export function scopeParams(scope: SearchScope): { collectionId: number | null; 
   return { collectionId: scope.startsWith("c:") ? id : null, groupId: scope.startsWith("g:") ? id : null };
 }
 
+/** A scraped or looked-up link/image, only if it's an absolute http(s) URL (older rows may hold anything). */
+export const safeUrl = (url: string | null | undefined): string | undefined => (isHttpUrl(url) ? url : undefined);
+
 /** USD with enough precision for sub-cent LLM calls: $0, $0.0042, $1.24. */
 export function formatUsd(n: number): string {
   if (!n) return "$0";
   if (n < 0.0001) return "<$0.0001";
   if (n < 0.01) return `$${n.toFixed(4)}`;
   return `$${n.toFixed(2)}`;
+}
+
+// ---------- Server-sent events ----------
+
+/** Fired by the app when it returns to the foreground (native.ts): streams reconnect at once. */
+export const RESUME_EVENT = "specharvest:resume";
+
+type StreamListeners = Record<string, (data: string) => void>;
+
+/**
+ * Subscribes to an SSE endpoint. The web uses EventSource (cookie auth). The app can't add headers to an
+ * EventSource, so it reads the stream with fetch + the bearer token, resending Last-Event-ID and reconnecting
+ * with backoff — and right away when the app comes back to the foreground (Android drops idle connections).
+ */
+export function openEventStream(path: string, listeners: StreamListeners): () => void {
+  if (!isNative) {
+    const es = new EventSource(apiUrl(path));
+    for (const [type, fn] of Object.entries(listeners)) es.addEventListener(type, (e) => fn((e as MessageEvent).data));
+    return () => es.close();
+  }
+
+  let closed = false;
+  let attempt: AbortController | null = null;
+  let lastId: string | undefined;
+  let delay = 1000;
+  let wake: (() => void) | null = null;
+
+  const dispatch = (block: string) => {
+    let type = "message";
+    const data: string[] = [];
+    for (const line of block.split("\n")) {
+      if (!line || line.startsWith(":")) continue;
+      const i = line.indexOf(":");
+      const field = i < 0 ? line : line.slice(0, i);
+      const value = i < 0 ? "" : line.slice(i + 1).replace(/^ /, "");
+      if (field === "event") type = value;
+      else if (field === "data") data.push(value);
+      else if (field === "id") lastId = value;
+    }
+    if (data.length) listeners[type]?.(data.join("\n"));
+  };
+
+  const run = async () => {
+    while (!closed) {
+      attempt = new AbortController();
+      try {
+        const res = await fetch(apiUrl(path), {
+          headers: { ...authHeaders(), Accept: "text/event-stream", ...(lastId ? { "Last-Event-ID": lastId } : {}) },
+          signal: attempt.signal,
+        });
+        if (res.status === 401) {
+          window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+          return;
+        }
+        if (!res.ok || !res.body) throw new Error(`stream ${res.status}`);
+        delay = 1000;
+        const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+        let buf = "";
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf = (buf + value).replace(/\r\n?/g, "\n");
+          for (let i = buf.indexOf("\n\n"); i >= 0; i = buf.indexOf("\n\n")) {
+            dispatch(buf.slice(0, i));
+            buf = buf.slice(i + 2);
+          }
+        }
+      } catch {
+        /* dropped, aborted or offline — retry below */
+      }
+      if (closed) return;
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, delay);
+        wake = () => (clearTimeout(t), resolve());
+      });
+      wake = null;
+      delay = Math.min(delay * 2, 30_000);
+    }
+  };
+
+  const onResume = () => {
+    delay = 1000;
+    attempt?.abort();
+    wake?.();
+  };
+  window.addEventListener(RESUME_EVENT, onResume);
+  void run();
+  return () => {
+    closed = true;
+    window.removeEventListener(RESUME_EVENT, onResume);
+    attempt?.abort();
+    wake?.();
+  };
 }
 
 export interface JobStream {
@@ -168,15 +317,15 @@ export function useJobStream(jobId: number | null, nonce = 0): JobStream {
   useEffect(() => {
     setState({ job: null, logs: [], recentItems: [], queue: null });
     if (!jobId) return;
-    const es = new EventSource(`/api/jobs/${jobId}/events`);
+    let close = () => {};
     // A resumed job's replayed history contains its earlier stopped snapshot — close only if nothing newer follows.
     let closeTimer: ReturnType<typeof setTimeout> | undefined;
-    const onEvent = (e: MessageEvent) => {
+    const onEvent = (data: string) => {
       if (idRef.current !== jobId) return;
-      const ev = JSON.parse(e.data) as JobEvent;
+      const ev = JSON.parse(data) as JobEvent;
       if (ev.type === "job") {
         clearTimeout(closeTimer);
-        if (!isActiveJob(ev.job)) closeTimer = setTimeout(() => es.close(), 1500);
+        if (!isActiveJob(ev.job)) closeTimer = setTimeout(() => close(), 1500);
       }
       setState((s) => {
         switch (ev.type) {
@@ -193,10 +342,10 @@ export function useJobStream(jobId: number | null, nonce = 0): JobStream {
         }
       });
     };
-    for (const t of ["job", "log", "item", "queue"]) es.addEventListener(t, onEvent as EventListener);
+    close = openEventStream(`/api/jobs/${jobId}/events`, { job: onEvent, log: onEvent, item: onEvent, queue: onEvent });
     return () => {
       clearTimeout(closeTimer);
-      es.close();
+      close();
     };
   }, [jobId, nonce]);
 
@@ -232,17 +381,18 @@ export function useJobsFeed(onFinish: (job: Job) => void): JobsFeed {
   }, []);
 
   useEffect(() => {
-    const es = new EventSource("/api/jobs/events");
-    es.addEventListener("job", (e) => apply([(JSON.parse((e as MessageEvent).data) as { job: Job }).job]));
-    es.addEventListener("jobs", (e) => {
-      const snapshot = (JSON.parse((e as MessageEvent).data) as { jobs: Job[] }).jobs;
-      const stillActive = new Set(snapshot.map((j) => j.id));
-      const vanished = [...jobsRef.current.values()].filter((j) => isActiveJob(j) && !stillActive.has(j.id));
-      apply(snapshot);
-      // Jobs we saw running that finished while disconnected: fetch their final state.
-      if (vanished.length) api.jobs().then((all) => apply(all.filter((j) => vanished.some((v) => v.id === j.id))), () => {});
+    return openEventStream("/api/jobs/events", {
+      job: (data) => apply([(JSON.parse(data) as { job: Job }).job]),
+      // Sent on every (re)connect — also when the app comes back to the foreground.
+      jobs: (data) => {
+        const snapshot = (JSON.parse(data) as { jobs: Job[] }).jobs;
+        const stillActive = new Set(snapshot.map((j) => j.id));
+        const vanished = [...jobsRef.current.values()].filter((j) => isActiveJob(j) && !stillActive.has(j.id));
+        apply(snapshot);
+        // Jobs we saw running that finished while disconnected: fetch their final state.
+        if (vanished.length) api.jobs().then((all) => apply(all.filter((j) => vanished.some((v) => v.id === j.id))), () => {});
+      },
     });
-    return () => es.close();
   }, [apply]);
 
   const active = [...jobs.values()].filter(isActiveJob).sort((a, b) => a.id - b.id);

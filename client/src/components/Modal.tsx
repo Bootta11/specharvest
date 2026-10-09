@@ -1,7 +1,24 @@
 import { useEffect, type ReactNode } from "react";
 
-/** Bottom sheet on phones, centred dialog from `sm` up. Esc / backdrop click closes. */
-export function Modal({ title, onClose, children, wide = false }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
+/**
+ * Bottom sheet on phones, centred dialog from `sm` up. Esc / backdrop click closes. `footer` stays visible under the
+ * scrolling body; `bodyClassName` replaces the body's own scrolling and padding (for content that scrolls itself).
+ */
+export function Modal({
+  title,
+  onClose,
+  children,
+  wide = false,
+  footer,
+  bodyClassName = "space-y-6 overflow-y-auto p-4",
+}: {
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+  wide?: boolean;
+  footer?: ReactNode;
+  bodyClassName?: string;
+}) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
@@ -24,7 +41,8 @@ export function Modal({ title, onClose, children, wide = false }: { title: strin
             ✕
           </button>
         </div>
-        <div className="space-y-6 overflow-y-auto p-4">{children}</div>
+        <div className={bodyClassName}>{children}</div>
+        {footer && <div className="flex shrink-0 items-center gap-2 border-t border-stone-200 p-3 dark:border-stone-800">{footer}</div>}
       </div>
     </div>
   );

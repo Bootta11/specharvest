@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Item, ItemDetail, SpecKey } from "@specharvest/shared";
 import { humanizeKey, specLabel } from "@specharvest/shared";
-import { api } from "../lib/api.ts";
+import { api, safeUrl } from "../lib/api.ts";
 import { formatPrice, GlobeIcon, GoneBadge, SpecRow } from "./ItemCard.tsx";
 
 interface Props {
@@ -71,10 +71,10 @@ export function ItemModal({ item, keys, highlightKeys, onClose }: Props) {
 
         <div className="overflow-y-auto p-4">
           <div className="grid gap-4 sm:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
-            {item.mainImage && <img src={item.mainImage} alt="" referrerPolicy="no-referrer" className="w-full rounded-lg object-cover" />}
+            {safeUrl(item.mainImage) && <img src={safeUrl(item.mainImage)} alt="" referrerPolicy="no-referrer" className="w-full rounded-lg object-cover" />}
             <div>
               {item.description && <p className="text-sm text-stone-700 dark:text-stone-300">{item.description}</p>}
-              <a href={item.url} target="_blank" rel="noreferrer" className="btn-primary btn-sm mt-3">
+              <a href={safeUrl(item.url)} target="_blank" rel="noreferrer" className="btn-primary btn-sm mt-3">
                 Open original listing ↗
               </a>
               {webCount > 0 && (
@@ -145,7 +145,7 @@ function SameProductSection({ same, ownIdentity }: { same: NonNullable<ItemDetai
       <ul className="mt-2 divide-y divide-stone-100 text-sm dark:divide-stone-800">
         {same.listings.map((l) => (
           <li key={l.id} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 py-1.5">
-            <a href={l.url} target="_blank" rel="noreferrer" className="min-w-0 flex-1 truncate text-brand-700 hover:underline dark:text-brand-500" title={l.title}>
+            <a href={safeUrl(l.url)} target="_blank" rel="noreferrer" className="min-w-0 flex-1 truncate text-brand-700 hover:underline dark:text-brand-500" title={l.title}>
               {l.title} ↗
             </a>
             <GoneBadge item={l} />

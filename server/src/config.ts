@@ -17,6 +17,22 @@ const bool = (def: boolean) =>
     .optional()
     .transform((v) => (v === undefined || v === "" ? def : !/^(0|false|no|off)$/i.test(v)));
 
+/** A whole number; blank means the default, like unset. */
+const int = (def: number, min = 0) => z.preprocess((v) => (v === "" ? undefined : v), z.coerce.number().int().min(min).default(def));
+
+/**
+ * Fastify trustProxy: which peers may set X-Forwarded-For/-Proto/-Host. Default: proxies on loopback or a
+ * private network (reverse proxy on the host, a Traefik/cloudflared container). `true` would trust a client's
+ * own X-Forwarded-For when the port is reachable directly — rate limits could then be dodged.
+ */
+const trustProxy = (v: string | undefined): boolean | string => {
+  const s = v?.trim();
+  if (!s) return "loopback,linklocal,uniquelocal";
+  if (/^(true|yes|on)$/i.test(s)) return true;
+  if (/^(false|no|off)$/i.test(s)) return false;
+  return s;
+};
+
 const envSchema = z.object({
   PORT: z.coerce.number().default(3100),
   DATA_DIR: z.string().default("./data"),
@@ -61,6 +77,34 @@ const envSchema = z.object({
   SCRAPE_MAX_CONCURRENT_PAGES: z.coerce.number().int().min(1).default(2),
   MAX_PAGES: z.coerce.number().int().min(1).default(10),
   MAX_ITEMS: z.coerce.number().int().min(1).default(200),
+  // Most a non-admin may ask one crawl for (admins: 200 pages / 5000 items).
+  MAX_PAGES_CAP: int(50, 1),
+  MAX_ITEMS_CAP: int(1000, 1),
+  // Crawls + web lookups one non-admin may have queued or running at once (0 = no limit).
+  MAX_ACTIVE_JOBS_PER_USER: int(3),
+  // Largest collection file /api/collections/import accepts.
+  IMPORT_MAX_MB: int(50, 1),
+
+  // See trustProxy() above.
+  TRUST_PROXY: z
+    .string()
+    .optional()
+    // Fastify ignores hop counts (it can't check the peer then) — name the proxies instead.
+    .refine((v) => !v || !/^\s*\d+\s*$/.test(v), "TRUST_PROXY takes proxy addresses (IPs, CIDRs, loopback/linklocal/uniquelocal) or true/false, not a hop count")
+    .transform(trustProxy),
+  // Let crawls (and everyone's notifications) reach private/LAN addresses — only for a single-user LAN setup.
+  ALLOW_PRIVATE_TARGETS: bool(false),
+  // Hosts every user's notifications may reach although they're private (e.g. the bundled Apprise container).
+  // Unset = "apprise"; blank = none.
+  OUTBOUND_ALLOWED_HOSTS: z
+    .string()
+    .optional()
+    .transform((v) =>
+      (v ?? "apprise")
+        .split(/[\s,]+/)
+        .map((h) => h.trim().toLowerCase())
+        .filter(Boolean),
+    ),
 
   // Base URL used for links in notifications (e.g. https://specharvest.example). Blank = no link.
   PUBLIC_URL: optionalNonEmpty(),
@@ -78,6 +122,9 @@ const envSchema = z.object({
   // Encrypts users' LLM API keys at rest: 32 random bytes, base64 or hex (openssl rand -base64 32).
   // Blank = generated once into DATA_DIR/encryption.key (see lib/secrets.ts).
   ENCRYPTION_KEY: optionalNonEmpty(),
+  // Extra origins allowed to call the API with a bearer token (comma-separated). The Android app
+  // (https://localhost) is always allowed — see docs/mobile-app.md.
+  APP_ORIGINS: optionalNonEmpty(),
 
   // Commit the image was built from (set by the Dockerfile's GIT_SHA build arg).
   APP_GIT_SHA: optionalNonEmpty(),
@@ -104,6 +151,8 @@ export const env = {
   PUBLIC_URL: parsed.PUBLIC_URL?.replace(/\/+$/, ""),
   SESSION_COOKIE_SECURE:
     parsed.SESSION_COOKIE_SECURE === undefined ? !!parsed.PUBLIC_URL?.startsWith("https://") : !/^(0|false|no|off)$/i.test(parsed.SESSION_COOKIE_SECURE),
+  // Capacitor serves the Android app from https://localhost.
+  APP_ORIGINS: ["https://localhost", "http://localhost", ...(parsed.APP_ORIGINS ?? "").split(",").map((o) => o.trim().replace(/\/+$/, "")).filter(Boolean)],
 };
 
 export function requireEnv<K extends keyof typeof env>(key: K): NonNullable<(typeof env)[K]> {

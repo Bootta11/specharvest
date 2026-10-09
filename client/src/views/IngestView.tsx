@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { isActiveJob, type Collection, type CollectionGroup, type CrawlMode, type Job } from "@specharvest/shared";
-import { api, formatUsd, storageGet, storageSet, useJobStream, type AppConfig, type JobsFeed, type SearchScope } from "../lib/api.ts";
+import { api, downloadExport, formatUsd, storageGet, storageSet, useJobStream, type AppConfig, type JobsFeed, type SearchScope } from "../lib/api.ts";
 import { JobProgress, StatusBadge, jobPercent } from "../components/JobProgress.tsx";
 import { ProductsModal } from "../components/ProductsModal.tsx";
 import { GroupModal } from "../components/GroupModal.tsx";
@@ -201,7 +201,7 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
                 className="input"
                 type="number"
                 min={1}
-                max={200}
+                max={config?.limits.maxPages ?? 200}
                 placeholder={String(config?.defaults.maxPages ?? 10)}
                 value={maxPages}
                 onChange={(e) => setMaxPages(e.target.value ? Number(e.target.value) : "")}
@@ -213,7 +213,7 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
                 className="input"
                 type="number"
                 min={1}
-                max={5000}
+                max={config?.limits.maxItems ?? 5000}
                 placeholder={String(config?.defaults.maxItems ?? 200)}
                 value={maxItems}
                 onChange={(e) => setMaxItems(e.target.value ? Number(e.target.value) : "")}
@@ -310,15 +310,14 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-stone-200 px-4 py-3 dark:border-stone-800">
             <h2 className="font-semibold">Collections</h2>
             <span className="text-sm text-stone-500">{collections.reduce((n, c) => n + c.itemCount, 0)} items</span>
-            <a
-              className={`btn-ghost btn-sm ml-auto ${collections.length === 0 ? "pointer-events-none opacity-50" : ""}`}
-              href={api.exportAllCollectionsUrl}
-              download
-              aria-disabled={collections.length === 0}
+            <button
+              className="btn-ghost btn-sm ml-auto"
+              disabled={collections.length === 0}
+              onClick={() => downloadExport(api.exportAllCollectionsUrl, "specharvest-all.json").catch((err) => setError((err as Error).message))}
               title="Download every collection you can see as one .json file"
             >
               Export all
-            </a>
+            </button>
             <button className="btn-ghost btn-sm" disabled={importing} onClick={() => importInput.current?.click()} title="Add collections from an exported .json file (one or Export all)">
               {importing ? "Importing…" : "Import"}
             </button>
@@ -367,9 +366,13 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
                     <button className="btn-ghost btn-sm" onClick={() => setProductsOf(c)}>
                       Products
                     </button>
-                    <a className="btn-ghost btn-sm" href={api.exportCollectionUrl(c.id)} download title="Download as .json — items, specs and web lookup results">
+                    <button
+                      className="btn-ghost btn-sm"
+                      onClick={() => downloadExport(api.exportCollectionUrl(c.id), "collection.json").catch((err) => setError((err as Error).message))}
+                      title="Download as .json — items, specs and web lookup results"
+                    >
                       Export
-                    </a>
+                    </button>
                     {c.canEdit && (
                       <>
                         <button

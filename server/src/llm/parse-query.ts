@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { queryPlanSchema, type QueryPlan, type SpecKey } from "@specharvest/shared";
+import { isListingField, LISTING_FIELDS, queryPlanSchema, type Filter, type QueryPlan, type SpecKey } from "@specharvest/shared";
 import * as db from "../db/sqlite.ts";
 import { createLogger } from "../lib/logger.ts";
 import { askForJson } from "./client.ts";
@@ -18,6 +18,7 @@ Return ONLY one JSON object:
 
 Rules:
 - Hard constraints (numbers, yes/no features, exact categories) become filters on registry keys. "price" is always available (number, in the listing currency).
+- The listing fields title, description and product (normalized brand/model/variant/year) are always available too. Use them only with "contains", and only for literal words the user wants in the listing that no registry key covers (e.g. a model name missing from the registry). "currency" takes one of its listed values.
 - Use registry keys exactly. For string keys use one of the listed sample values when it matches (map synonyms/other languages: "dizel" -> "diesel", "automatik" -> "automatic").
 - Booleans: "has X" / "with X" -> {"op":"eq","value":true}; "without X" -> {"op":"eq","value":false}.
 - Superlatives ("biggest boot", "lowest mileage", "cheapest", "most powerful") -> sort, not a filter.
@@ -34,14 +35,21 @@ function registryForPrompt(scope: db.CollectionScope, keys: SpecKey[]): string {
   const samples = db.stringValueSamples(scope);
   const ranges = db.numericRanges(scope);
   const price = db.priceStats(scope);
-  const lines = keys.slice(0, 300).map((k) => {
+  const currencies = db.currencies(scope);
+  const lines = keys.filter((k) => !isListingField(k.key)).slice(0, 300).map((k) => {
     let extra = "";
     if (k.type === "string" && samples.get(k.key)?.length) extra = ` values: ${samples.get(k.key)!.map((v) => JSON.stringify(v)).join(", ")}`;
     if (k.type === "number" && ranges.get(k.key)) extra = ` range: ${ranges.get(k.key)!.min}–${ranges.get(k.key)!.max}`;
     return `- ${k.key} (${k.type}${k.unit ? `, ${k.unit}` : ""}, ${k.count} items)${extra}`;
   });
-  if (price) lines.unshift(`- price (number, ${price.currency ?? "listing currency"}) range: ${price.min}–${price.max}`);
-  return lines.join("\n") || "(no attributes indexed yet)";
+  const listing = [
+    ...(price ? [`- price (number, ${price.currency ?? "listing currency"}) range: ${price.min}–${price.max}`] : []),
+    `- title (string, the listing's title — "contains" only)`,
+    `- description (string, the listing's text — "contains" only)`,
+    `- product (string, normalized brand/model/variant/year — "contains" only)`,
+    ...(currencies.length ? [`- currency (string) values: ${currencies.map((c) => JSON.stringify(c)).join(", ")}`] : []),
+  ];
+  return [...listing, ...lines].join("\n");
 }
 
 const log = createLogger("parse-query");
@@ -91,20 +99,34 @@ export async function parseQuery(query: string, scope: db.CollectionScope, keys:
   return plan;
 }
 
+/** A list only means something with `in`: eq + list → in, in + one value → eq; any other op with a list is dropped. */
+function normalizeList(f: Filter): Filter | null {
+  const list = Array.isArray(f.value) ? [...new Set(f.value)] : null;
+  if (f.op === "in") {
+    if (!list) return f.value === null || f.value === undefined ? null : { ...f, op: "eq" };
+    return list.length === 1 ? { ...f, op: "eq", value: list[0] } : { ...f, value: list };
+  }
+  if (!list) return f;
+  if (f.op === "eq") return list.length === 1 ? { ...f, value: list[0] } : { ...f, op: "in", value: list };
+  return null;
+}
+
 /**
  * Normalizes keys and keeps missingAttributes consistent with the registry. `synonyms` (key_aliases) maps a
  * key to every name of the same attribute, canonical first: an unknown key becomes the registry's name for it,
  * else the canonical one — so web facts cached under any synonym are found.
  */
 export function sanitizePlan(plan: Omit<QueryPlan, "show"> & { show?: string[] }, keys: SpecKey[], synonyms: (key: string) => string[] = (k) => [k]): QueryPlan {
-  const known = new Set(["price", "title", ...keys.map((k) => k.key)]);
+  const known = new Set<string>([...LISTING_FIELDS, ...keys.map((k) => k.key)]);
   const resolve = (k: string) => {
     if (!k || known.has(k)) return k;
     const names = synonyms(k);
     return names.find((n) => known.has(n)) ?? names[0] ?? k;
   };
-  const fix = (k: string) => (k === "price" || k === "title" ? k : resolve(normalizeKey(k)));
-  const filters = plan.filters.map((f) => ({ ...f, key: fix(f.key) })).filter((f) => f.key);
+  const fix = (k: string) => (isListingField(k) ? k : resolve(normalizeKey(k)));
+  const filters = plan.filters
+    .map((f) => normalizeList({ ...f, key: fix(f.key) }))
+    .filter((f): f is Filter => !!f?.key);
   const sort = plan.sort ? { ...plan.sort, key: fix(plan.sort.key) } : null;
   const used = new Set([...filters.map((f) => f.key), ...(sort ? [sort.key] : [])]);
   const show = [...new Set((plan.show ?? []).map(fix))].filter((k) => k && !used.has(k));
@@ -117,7 +139,8 @@ export function sanitizePlan(plan: Omit<QueryPlan, "show"> & { show?: string[] }
   for (const k of [...used, ...show]) {
     if (!known.has(k) && !missing.has(k)) {
       const f = filters.find((x) => x.key === k);
-      const type = typeof f?.value === "boolean" ? "boolean" : typeof f?.value === "string" && f.op !== "contains" ? "string" : "number";
+      const sample = Array.isArray(f?.value) ? f.value[0] : f?.value;
+      const type = typeof sample === "boolean" ? "boolean" : typeof sample === "string" && f?.op !== "contains" ? "string" : "number";
       missing.set(k, { key: k, type, unit: null, label: k.replace(/_/g, " ") });
     }
   }

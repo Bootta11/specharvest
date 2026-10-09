@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Collection, CollectionProducts, GroupingMode, MatchSuggestion } from "@specharvest/shared";
-import { api } from "../lib/api.ts";
+import { api, safeUrl } from "../lib/api.ts";
 import { formatPrice, GoneBadge } from "./ItemCard.tsx";
 import { Modal, Notice } from "./Modal.tsx";
 
@@ -131,7 +131,7 @@ export function ProductsModal({ collection, onClose, onGrouped }: { collection: 
                     <ul className="mt-1 space-y-0.5 pl-3 text-sm">
                       {p.listings.map((l) => (
                         <li key={l.id} className="flex flex-wrap items-baseline gap-x-2">
-                          <a href={l.url} target="_blank" rel="noreferrer" className="min-w-0 flex-1 truncate text-brand-700 hover:underline dark:text-brand-500" title={l.title}>
+                          <a href={safeUrl(l.url)} target="_blank" rel="noreferrer" className="min-w-0 flex-1 truncate text-brand-700 hover:underline dark:text-brand-500" title={l.title}>
                             {l.title} ↗
                           </a>
                           <GoneBadge item={l} />

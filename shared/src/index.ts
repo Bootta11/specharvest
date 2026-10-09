@@ -106,13 +106,27 @@ export interface ItemDetail extends Item {
 
 // ---------- Query plan ----------
 
-export const filterOps = ["eq", "neq", "gt", "gte", "lt", "lte", "contains", "exists"] as const;
+/**
+ * Item fields that aren't specs but are filtered (and sorted) like spec keys: `product` is the normalized
+ * brand/model/variant/year (`identity`), `collection` the collection id. A spec key of the same name is shadowed.
+ */
+export const LISTING_FIELDS = ["price", "title", "description", "product", "currency", "collection"] as const;
+export type ListingField = (typeof LISTING_FIELDS)[number];
+export const isListingField = (key: string): key is ListingField => (LISTING_FIELDS as readonly string[]).includes(key);
+/**
+ * Listing fields where a listing without the value never matches: nothing fills them in later (web lookups only add
+ * specs). Price instead keeps such listings ("price on request") under "can't be judged yet".
+ */
+export const isStrictField = (key: string) => isListingField(key) && key !== "price";
+
+/** `in` takes a list: any of the values matches (several ticked values of one field). */
+export const filterOps = ["eq", "neq", "gt", "gte", "lt", "lte", "contains", "exists", "in"] as const;
 export type FilterOp = (typeof filterOps)[number];
 
 export const filterSchema = z.object({
   key: z.string().min(1),
   op: z.enum(filterOps),
-  value: z.union([z.number(), z.boolean(), z.string(), z.null()]).optional(),
+  value: z.union([z.number(), z.boolean(), z.string(), z.null(), z.array(z.union([z.string(), z.number()])).min(1).max(500)]).optional(),
 });
 export type Filter = z.infer<typeof filterSchema>;
 
@@ -125,7 +139,7 @@ export const missingAttributeSchema = z.object({
 export type MissingAttribute = z.infer<typeof missingAttributeSchema>;
 
 export const queryPlanSchema = z.object({
-  filters: z.array(filterSchema).default([]),
+  filters: z.array(filterSchema).max(100).default([]),
   sort: z
     .object({ key: z.string().min(1), dir: z.enum(["asc", "desc"]) })
     .nullable()
@@ -164,8 +178,30 @@ export const searchRequestSchema = z.object({
   enrich: z.boolean().optional(),
   /** Include listings marked gone (sold/removed). */
   includeGone: z.boolean().optional(),
+  /** Extra conditions (e.g. from the filter panel), ANDed with the parsed `query` or the given `plan`; a plan condition on the same key wins. */
+  filters: z.array(filterSchema).max(100).optional(),
+  /** Also return `facets` (value counts per field) for a filter panel. */
+  facets: z.boolean().optional(),
 });
 export type SearchRequest = z.infer<typeof searchRequestSchema>;
+
+/**
+ * The values of one field among the items that pass every *other* active filter, so a field's own options stay
+ * visible while it is filtered. `count` = how many of those items have a value for it.
+ */
+export type Facet = {
+  key: string;
+  count: number;
+  /** Items counted for this field that have no (usable) value. */
+  missing: number;
+} & (
+  | { kind: "range"; min: number | null; max: number | null; unit: string | null }
+  /** Most common first; `more` = distinct values left out past the cap (reachable with `contains`). */
+  | { kind: "values"; values: Array<{ value: string | number; count: number }>; more: number }
+  | { kind: "boolean"; yes: number; no: number }
+  /** Free text (title, description, product): searched with `contains`. */
+  | { kind: "text" }
+);
 
 export interface SearchResponse {
   plan: QueryPlan;
@@ -180,6 +216,10 @@ export interface SearchResponse {
   enrichNote: string | null;
   /** USD spent parsing this query (0 when the plan came from cache). */
   llmCost: number;
+  /** Listing fields first, then every spec key present in the scope — only when the request asked for `facets`. */
+  facets?: Facet[];
+  /** Web lookups this search would have started but didn't (it sent `enrich: false`): search again with `enrich: true` to start them. */
+  enrichOffer: { attributes: MissingAttribute[]; products: number; listings: number } | null;
 }
 
 // ---------- Jobs ----------
@@ -252,14 +292,31 @@ export type JobEvent =
 export const crawlModes = ["quick", "deep", "full"] as const;
 export type CrawlMode = (typeof crawlModes)[number];
 
+/** Hard ceilings of one crawl (admins); other users are capped lower by MAX_PAGES_CAP / MAX_ITEMS_CAP. */
+export const CRAWL_MAX_PAGES = 200;
+export const CRAWL_MAX_ITEMS = 5000;
+
+/** An absolute http(s) URL — what links, images and sources may be (never javascript:, data:, file:, …). */
+export function isHttpUrl(value: string | null | undefined): value is string {
+  if (!value) return false;
+  try {
+    const { protocol } = new URL(value);
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+const httpUrlSchema = z.url({ protocol: /^https?$/ }).max(2048);
+
 export const crawlRequestSchema = z.object({
-  url: z.string().url(),
+  url: httpUrlSchema,
   /** Re-crawl this existing collection (needs edit rights) instead of matching by URL. */
   collectionId: z.number().int().positive().optional(),
   /** Collection name; when omitted, it's derived from the listing page's title. */
   name: z.string().trim().max(200).optional(),
-  maxPages: z.number().int().min(1).max(200).optional(),
-  maxItems: z.number().int().min(1).max(5000).optional(),
+  maxPages: z.number().int().min(1).max(CRAWL_MAX_PAGES).optional(),
+  maxItems: z.number().int().min(1).max(CRAWL_MAX_ITEMS).optional(),
   /** Route page loads through PROXY_SERVER. */
   useProxy: z.boolean().optional(),
   /**
@@ -287,10 +344,32 @@ export type EnrichRequest = z.infer<typeof enrichRequestSchema>;
 
 export const COLLECTION_EXPORT_FORMAT = "specharvest.collection";
 
-const specValueSchema = z.union([z.number(), z.boolean(), z.string()]);
+// Size limits are far above anything a crawl produces; they only keep a hand-made file from bloating the DB.
+const specKeyName = z.string().min(1).max(100);
+const specValueSchema = z.union([z.number(), z.boolean(), z.string().max(5000)]);
 const specOriginSchema = z.enum(["page", "web"]);
-const nullableString = z.string().nullable().default(null);
+const nullableString = (max: number) => z.string().max(max).nullable().default(null);
 const nullableNumber = z.number().nullable().default(null);
+/** Links and images: anything that isn't an absolute http(s) URL becomes null (older files may hold relative ones). */
+const nullableHttpUrl = z
+  .string()
+  .nullable()
+  .default(null)
+  .transform((v) => (isHttpUrl(v) && v.length <= 2048 ? v : null));
+
+/** Listing structure as saved by a crawl (selectors run in the page; the URL pattern is re-checked server-side). */
+export const listingDetectionSchema = z.object({
+  listItemSelector: z.string().max(500),
+  paginationType: z.enum(["pages", "loadMore", "infiniteScroll", "urlPage"]),
+  nextSelector: z.string().max(500).nullable().optional(),
+  loadMoreSelector: z.string().max(500).nullable().optional(),
+  pageParam: z
+    .string()
+    .regex(/^[\w.-]{1,40}$/)
+    .nullable()
+    .optional(),
+  itemUrlPattern: z.string().max(1000).nullable().optional(),
+});
 
 /**
  * One collection as a portable file: items with their specs and spec sources (web lookups
@@ -303,21 +382,22 @@ export const collectionExportSchema = z.object({
   exportedAt: z.number(),
   collection: z.object({
     name: z.string().trim().min(1).max(200),
-    startUrl: z.string().min(1),
-    host: z.string(),
+    startUrl: httpUrlSchema,
+    host: z.string().max(300),
     createdAt: z.number(),
     // Absent in files from before grouping modes existed.
     grouping: z.enum(groupingModes).default("strict"),
-    detection: z.record(z.string(), z.unknown()).nullable().default(null),
+    // A detection that doesn't fit is dropped (the next crawl detects again) rather than failing the import.
+    detection: listingDetectionSchema.nullable().default(null).catch(null),
   }),
   specKeys: z
     .array(
       z.object({
-        key: z.string().min(1),
+        key: specKeyName,
         type: z.enum(["number", "boolean", "string"]),
-        unit: nullableString,
-        label: z.string(),
-        example: nullableString,
+        unit: nullableString(40),
+        label: z.string().max(300),
+        example: nullableString(500),
         origin: specOriginSchema,
       }),
     )
@@ -325,19 +405,19 @@ export const collectionExportSchema = z.object({
   items: z
     .array(
       z.object({
-        url: z.string().min(1),
-        title: z.string(),
+        url: httpUrlSchema,
+        title: z.string().max(2000),
         price: nullableNumber,
-        currency: nullableString,
-        mainImage: nullableString,
-        description: nullableString,
-        identity: nullableString,
-        specs: z.record(z.string(), specValueSchema),
-        sources: z.record(z.string(), z.object({ origin: specOriginSchema, sourceUrl: nullableString, confidence: nullableNumber })).default({}),
-        rawText: nullableString,
-        contentText: nullableString,
-        contentHash: nullableString,
-        cardHash: nullableString,
+        currency: nullableString(20),
+        mainImage: nullableHttpUrl,
+        description: nullableString(20_000),
+        identity: nullableString(500),
+        specs: z.record(specKeyName, specValueSchema).refine((s) => Object.keys(s).length <= 500, "At most 500 specs per item"),
+        sources: z.record(specKeyName, z.object({ origin: specOriginSchema, sourceUrl: nullableHttpUrl, confidence: nullableNumber })).default({}),
+        rawText: nullableString(100_000),
+        contentText: nullableString(500_000),
+        contentHash: nullableString(200),
+        cardHash: nullableString(200),
         indexedAt: z.number(),
         lastSeenAt: nullableNumber,
         checkedAt: nullableNumber,
@@ -345,15 +425,15 @@ export const collectionExportSchema = z.object({
       }),
     )
     .max(20_000),
-  aliases: z.array(z.object({ identity: z.string().min(1), canonical: z.string().min(1) })).default([]),
+  aliases: z.array(z.object({ identity: z.string().min(1).max(500), canonical: z.string().min(1).max(500) })).default([]),
   webFacts: z
     .array(
       z.object({
-        identity: z.string().min(1),
-        key: z.string().min(1),
+        identity: z.string().min(1).max(500),
+        key: specKeyName,
         value: specValueSchema.nullable(),
-        unit: nullableString,
-        sourceUrl: nullableString,
+        unit: nullableString(40),
+        sourceUrl: nullableHttpUrl,
         confidence: nullableNumber,
         found: z.boolean(),
         fetchedAt: z.number(),
@@ -467,6 +547,8 @@ export interface AdminSettings {
   signupEnabled: boolean;
   /** Who may use the server's LLM key when they have no key of their own. */
   serverLlmAccess: ServerLlmAccess;
+  /** USD each non-admin may spend on the server's key per day; 0 = no limit. */
+  serverLlmDailyLimitUsd: number;
   /** Read-only: OPENROUTER_API_KEY is set. */
   serverLlmConfigured: boolean;
 }
@@ -574,7 +656,15 @@ export interface LlmStatus {
 export interface LlmSettingsResponse extends LlmStatus {
   keys: LlmKeySummary[];
   models: LlmModelChoices;
-  server: { configured: boolean; allowed: boolean; access: ServerLlmAccess };
+  server: {
+    configured: boolean;
+    allowed: boolean;
+    access: ServerLlmAccess;
+    /** USD this user may spend on the server key today (0 = no limit, e.g. admins). */
+    dailyLimitUsd: number;
+    /** USD this user spent on the server key today. */
+    spentTodayUsd: number;
+  };
   providers: LlmProviderInfo[];
 }
 
@@ -611,6 +701,8 @@ export interface ProviderCredits {
 /** Stands in for stored secrets in GET responses; sending it back keeps the stored value. */
 export const SECRET_MASK = "********";
 
+const settingText = (def: string, max = 2000) => z.string().trim().max(max).default(def);
+
 export const notificationSettingsSchema = z.object({
   events: z
     .object({
@@ -620,18 +712,18 @@ export const notificationSettingsSchema = z.object({
     })
     .default({ crawlDone: true, crawlFailed: true, enrichDone: false }),
   ntfy: z
-    .object({ enabled: z.boolean().default(false), server: z.string().trim().default("https://ntfy.sh"), topic: z.string().trim().default(""), token: z.string().trim().default("") })
+    .object({ enabled: z.boolean().default(false), server: settingText("https://ntfy.sh"), topic: settingText("", 200), token: settingText("", 500) })
     .default({ enabled: false, server: "https://ntfy.sh", topic: "", token: "" }),
   telegram: z
-    .object({ enabled: z.boolean().default(false), botToken: z.string().trim().default(""), chatId: z.string().trim().default("") })
+    .object({ enabled: z.boolean().default(false), botToken: settingText("", 500), chatId: settingText("", 100) })
     .default({ enabled: false, botToken: "", chatId: "" }),
   /** Discord webhook; Slack incoming-webhook URLs work too. */
-  discord: z.object({ enabled: z.boolean().default(false), webhookUrl: z.string().trim().default("") }).default({ enabled: false, webhookUrl: "" }),
+  discord: z.object({ enabled: z.boolean().default(false), webhookUrl: settingText("") }).default({ enabled: false, webhookUrl: "" }),
   /** Generic JSON POST. */
-  webhook: z.object({ enabled: z.boolean().default(false), url: z.string().trim().default("") }).default({ enabled: false, url: "" }),
+  webhook: z.object({ enabled: z.boolean().default(false), url: settingText("") }).default({ enabled: false, url: "" }),
   /** Apprise API (stateless /notify) — one URL per line/space for 130+ services. */
   apprise: z
-    .object({ enabled: z.boolean().default(false), apiUrl: z.string().trim().default("http://apprise:8000"), urls: z.string().trim().default("") })
+    .object({ enabled: z.boolean().default(false), apiUrl: settingText("http://apprise:8000"), urls: settingText("", 10_000) })
     .default({ enabled: false, apiUrl: "http://apprise:8000", urls: "" }),
 });
 export type NotificationSettings = z.infer<typeof notificationSettingsSchema>;

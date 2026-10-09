@@ -1,6 +1,7 @@
-import puppeteer, { type Browser, type BrowserContext, type HTTPResponse, type Page } from "puppeteer-core";
+import puppeteer, { type Browser, type BrowserContext, type HTTPRequest, type HTTPResponse, type Page } from "puppeteer-core";
 import { env } from "../config.ts";
 import { createLogger } from "../lib/logger.ts";
+import { assertPublicUrl, isPublicHost, strictPolicy, type TargetPolicy } from "../lib/net-guard.ts";
 
 const log = createLogger("browser");
 
@@ -105,6 +106,41 @@ async function openPage(browser: Browser, opts: PageOptions): Promise<{ page: Pa
   return { page: await context.newPage(), context };
 }
 
+const HEAVY_RESOURCES = new Set(["image", "media", "font"]);
+/** Schemes a page may load without a network check (inline content). */
+const LOCAL_SCHEMES = new Set(["data:", "blob:", "about:"]);
+
+/**
+ * Every request the page makes (navigations, redirects, subresources, XHR): http(s) to a public host only —
+ * a crawled page must not get the browser to read the server's network (its text is stored and shown).
+ * Hosts are resolved once per page. Chrome resolves names itself, so this can't catch DNS rebinding;
+ * network-level isolation of the browser is the full fix (docs/deployment.md).
+ */
+function requestFilter(policy: TargetPolicy, blockHeavy: boolean) {
+  const hosts = new Map<string, Promise<boolean>>();
+  const allowed = async (req: HTTPRequest): Promise<boolean> => {
+    if (blockHeavy && HEAVY_RESOURCES.has(req.resourceType())) return false;
+    let url: URL;
+    try {
+      url = new URL(req.url());
+    } catch {
+      return false;
+    }
+    if (LOCAL_SCHEMES.has(url.protocol)) return true;
+    if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+    if (policy.allowPrivate) return true;
+    let ok = hosts.get(url.hostname);
+    if (!ok) hosts.set(url.hostname, (ok = isPublicHost(url.hostname, policy)));
+    return ok;
+  };
+  return (req: HTTPRequest) => {
+    void allowed(req)
+      .catch(() => false)
+      .then((ok) => (ok ? req.continue() : req.abort(blockHeavy && HEAVY_RESOURCES.has(req.resourceType()) ? "failed" : "accessdenied")))
+      .catch(() => {});
+  };
+}
+
 export async function withPage<T>(fn: (page: Page) => Promise<T>, opts: PageOptions = {}): Promise<T> {
   await acquireSlot();
   try {
@@ -117,13 +153,12 @@ export async function withPage<T>(fn: (page: Page) => Promise<T>, opts: PageOpti
       await page.setUserAgent(DESKTOP_USER_AGENT);
       await page.setViewport(DESKTOP_VIEWPORT);
       await page.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9,bs;q=0.8" });
-      if (opts.blockHeavyResources) {
+      const policy = strictPolicy();
+      if (!policy.allowPrivate || opts.blockHeavyResources) {
+        // A service worker's own requests aren't intercepted — make the page go to the network instead.
+        await page.setBypassServiceWorker(true);
         await page.setRequestInterception(true);
-        page.on("request", (req) => {
-          const t = req.resourceType();
-          if (t === "image" || t === "media" || t === "font") req.abort().catch(() => {});
-          else req.continue().catch(() => {});
-        });
+        page.on("request", requestFilter(policy, !!opts.blockHeavyResources));
       }
       return await fn(page);
     } finally {
@@ -194,6 +229,8 @@ async function flattenShadowDom(page: Page) {
  * HTTP error status, since such pages render "successfully" but are useless.
  */
 export async function gotoAndSettle(page: Page, url: string, opts: { scroll?: boolean } = {}): Promise<number | null> {
+  // A clear "private address" error instead of net::ERR_ACCESS_DENIED from the request filter — and never retried (BlockedTargetError).
+  await assertPublicUrl(url, strictPolicy());
   let lastError: unknown;
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {

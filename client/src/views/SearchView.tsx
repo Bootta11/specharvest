@@ -1,14 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type { Collection, CollectionGroup, Filter, Item, QueryPlan, RecentSearch, SearchResponse, SpecKey } from "@specharvest/shared";
-import { formatSpecValue, humanizeKey, specLabel } from "@specharvest/shared";
-import { api, formatUsd, parseScope, scopeParams, storageGet, storageSet, useJobStream, type AppConfig, type SearchScope } from "../lib/api.ts";
+import { formatSpecValue, humanizeKey, isListingField, specLabel } from "@specharvest/shared";
+import { api, ApiError, formatUsd, parseScope, scopeParams, storageGet, storageSet, useJobStream, type AppConfig, type SearchScope } from "../lib/api.ts";
 import { LookupSummary } from "../components/LookupSummary.tsx";
 import { GlobeIcon, ItemCard, formatPrice } from "../components/ItemCard.tsx";
 import { ItemModal } from "../components/ItemModal.tsx";
 import { CompareTable } from "../components/CompareTable.tsx";
+import { FilterIcon, FilterPanel } from "../components/FilterPanel.tsx";
+import { Modal } from "../components/Modal.tsx";
 
 type ViewMode = "list" | "cards";
 const VIEW_STORAGE = "specharvest.resultsView";
+const FILTERS_STORAGE = "specharvest.filtersOpen";
+/** Panel changes are batched this long before searching (one request for quick clicks). */
+const FILTER_DEBOUNCE_MS = 350;
+/** Tailwind `lg`: the filter panel is a sidebar from here up, a bottom sheet below. */
+const DESKTOP_QUERY = "(min-width: 64rem)";
 
 function readView(): ViewMode {
   try {
@@ -16,6 +23,17 @@ function readView(): ViewMode {
   } catch {
     return "list";
   }
+}
+
+function useDesktop(): boolean {
+  const [desktop, setDesktop] = useState(() => window.matchMedia(DESKTOP_QUERY).matches);
+  useEffect(() => {
+    const mq = window.matchMedia(DESKTOP_QUERY);
+    const onChange = () => setDesktop(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  return desktop;
 }
 
 interface Props {
@@ -27,12 +45,15 @@ interface Props {
   onGoIngest: () => void;
 }
 
-const OP_LABEL: Record<Filter["op"], string> = { eq: "=", neq: "≠", gt: ">", gte: "≥", lt: "<", lte: "≤", contains: "contains", exists: "has" };
+const OP_LABEL: Record<Filter["op"], string> = { eq: "=", neq: "≠", gt: ">", gte: "≥", lt: "<", lte: "≤", contains: "contains", exists: "has", in: "in" };
 
-function filterLabel(f: Filter, keys: Map<string, SpecKey>): string {
+function filterLabel(f: Filter, keys: Map<string, SpecKey>, collectionName: (id: number) => string): string {
   const name = specLabel(f.key);
   if (f.op === "exists") return `has ${name.toLowerCase()}`;
+  const show = (v: string | number) => (f.key === "collection" ? collectionName(Number(v)) : String(v));
+  if (Array.isArray(f.value)) return `${name}: ${f.value.slice(0, 3).map(show).join(", ")}${f.value.length > 3 ? ` +${f.value.length - 3}` : ""}`;
   if (typeof f.value === "boolean") return f.value === (f.op === "eq") ? name : `no ${name.toLowerCase()}`;
+  if (f.key === "collection" && typeof f.value === "number") return `${name} ${OP_LABEL[f.op]} ${show(f.value)}`;
   const unit = keys.get(f.key)?.unit;
   const value = f.key === "price" && typeof f.value === "number" ? f.value.toLocaleString("en-US") : formatSpecValue(f.value ?? null, unit);
   return `${name} ${OP_LABEL[f.op]} ${value}`;
@@ -87,6 +108,26 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
   };
   const enrich = useJobStream(enrichJobId);
   const seq = useRef(0);
+  /** Keys set in the filter panel: their conditions stay when a new request is typed. */
+  const [manualKeys, setManualKeys] = useState<Set<string>>(() => new Set());
+  const [filtersOpen, setFiltersOpenState] = useState(() => storageGet(FILTERS_STORAGE) !== "0");
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const desktop = useDesktop();
+  const filterTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  /** A search answered "too many searches" is sent again by itself after the wait the server asked for. */
+  const retryTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const [retryIn, setRetryIn] = useState<number | null>(null);
+  useEffect(
+    () => () => {
+      clearTimeout(filterTimer.current);
+      clearTimeout(retryTimer.current);
+    },
+    [],
+  );
+  // The sheet is the small-screen form of the sidebar.
+  useEffect(() => {
+    if (desktop) setSheetOpen(false);
+  }, [desktop]);
 
   // Registry keys, plus not-yet-indexed keys from the plan (so web-only values get their unit).
   const keys = useMemo(() => {
@@ -100,18 +141,29 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
   const loadRecent = useCallback(() => api.recentSearches(scope).then(setRecent, () => setRecent([])), [scope]);
 
   const run = useCallback(
-    async (body: { query?: string; plan?: QueryPlan; enrich?: boolean; includeGone?: boolean }) => {
+    async function search(body: { query?: string; plan?: QueryPlan; filters?: Filter[]; enrich?: boolean; includeGone?: boolean }) {
+      // Anything run now supersedes a filter change or retry still waiting to be sent.
+      clearTimeout(filterTimer.current);
+      clearTimeout(retryTimer.current);
+      setRetryIn(null);
       const mySeq = ++seq.current;
       setLoading(true);
       setError(null);
+      // Only a typed request (or a button saying so) may start paid web lookups; other re-runs get an offer instead.
+      const enrich = body.enrich ?? !!body.query?.trim();
       try {
-        const res = await api.search({ ...scopeParams(scope), includeGone, ...body });
+        const res = await api.search({ ...scopeParams(scope), includeGone, facets: true, ...body, enrich });
         if (mySeq !== seq.current) return;
         setResult(res);
         if (res.enrichJobId) setEnrichJobId(res.enrichJobId);
         if (body.query) loadRecent();
       } catch (err) {
-        if (mySeq === seq.current) setError((err as Error).message);
+        if (mySeq !== seq.current) return;
+        if (err instanceof ApiError && err.status === 429) {
+          const wait = err.retryAfter ?? 5;
+          setRetryIn(wait);
+          retryTimer.current = setTimeout(() => search(body), wait * 1000);
+        } else setError((err as Error).message);
       } finally {
         if (mySeq === seq.current) setLoading(false);
       }
@@ -123,6 +175,7 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
   useEffect(() => {
     setEnrichJobId(null);
     setQuery("");
+    setManualKeys(new Set());
     run({});
     loadRecent();
   }, [scope]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -134,10 +187,13 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
     run(result?.plan ? { plan: result.plan, enrich: false, includeGone: on } : { includeGone: on });
   };
 
+  // The panel's conditions, sent along with a typed request (its own condition on the same field wins).
+  const manualFilters = () => (result?.plan.filters ?? []).filter((f) => manualKeys.has(f.key));
+
   const runQuery = (q: string) => {
     setQuery(q);
     setEnrichJobId(null);
-    run({ query: q });
+    run({ query: q, filters: manualFilters() });
   };
 
   // When a web lookup finishes, re-run the same plan (without starting another lookup).
@@ -149,14 +205,56 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
   const submit = (e?: FormEvent) => {
     e?.preventDefault();
     setEnrichJobId(null);
-    run(query.trim() ? { query: query.trim() } : {});
+    run(query.trim() ? { query: query.trim(), filters: manualFilters() } : { filters: manualFilters() });
   };
 
-  const editPlan = (next: QueryPlan) => run({ plan: next });
+  const editPlan = (next: QueryPlan) => {
+    setManualKeys((prev) => new Set([...prev].filter((k) => next.filters.some((f) => f.key === k))));
+    run({ plan: next });
+  };
+
+  /** A filter-panel change: replaces every condition on `key`, shows at once, searches after a short pause (no LLM call, no web lookup). */
+  const applyFilters = (key: string, next: Filter[]) => {
+    if (!result) return;
+    const nextPlan = { ...result.plan, filters: [...result.plan.filters.filter((f) => f.key !== key), ...next] };
+    setManualKeys((prev) => {
+      const keys = new Set(prev);
+      if (next.length) keys.add(key);
+      else keys.delete(key);
+      return keys;
+    });
+    setResult({ ...result, plan: nextPlan });
+    // A search already on its way answers the old filters — drop its response.
+    seq.current++;
+    setLoading(true);
+    clearTimeout(filterTimer.current);
+    filterTimer.current = setTimeout(() => run({ plan: nextPlan, enrich: false }), FILTER_DEBOUNCE_MS);
+  };
+
+  const clearFilters = () => {
+    if (!result) return;
+    const nextPlan = { ...result.plan, filters: [] };
+    setManualKeys(new Set());
+    setResult({ ...result, plan: nextPlan });
+    run({ plan: nextPlan, enrich: false });
+  };
+
+  const setFiltersOpen = (open: boolean) => {
+    setFiltersOpenState(open);
+    storageSet(FILTERS_STORAGE, open ? "1" : "0");
+  };
+
   const plan = result?.plan;
+  const facets = result?.facets ?? [];
+  const filteredFields = new Set(plan?.filters.map((f) => f.key)).size;
+  const sidebar = desktop && filtersOpen && facets.length > 0;
+  const collectionName = (id: number) => collections.find((c) => c.id === id)?.name ?? `Collection ${id}`;
   // Fields the user asked about: sorted-by first, then filters, explicit "show" keys and web-looked-up ones.
+  // Listing fields other than price already show on every card and row.
   const highlightKeys = plan
-    ? [...new Set([...(plan.sort ? [plan.sort.key] : []), ...plan.filters.map((f) => f.key), ...plan.show, ...plan.missingAttributes.map((m) => m.key)])].filter((k) => k !== "title")
+    ? [...new Set([...(plan.sort ? [plan.sort.key] : []), ...plan.filters.map((f) => f.key), ...plan.show, ...plan.missingAttributes.map((m) => m.key)])].filter(
+        (k) => k === "price" || !isListingField(k),
+      )
     : [];
   const missingKeys = new Set(plan?.missingAttributes.map((m) => m.key) ?? []);
   const enriching = enrichJobId !== null && enrich.job && (enrich.job.status === "running" || enrich.job.status === "queued");
@@ -164,14 +262,23 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
   const hasFields = highlightKeys.some((k) => k !== "price");
   const mode: ViewMode = hasFields ? view : "cards";
 
+  // What "can't be judged yet" items lack that a web lookup can fill in: specs only (not price or other listing
+  // fields), and not what the banner already offers to look up.
+  const offered = new Set(result?.enrichOffer?.attributes.map((a) => a.key));
+  const unknownAttrs = [...new Set(plan?.filters.map((f) => f.key))]
+    .filter((k) => keys.has(k) && !isListingField(k) && !offered.has(k) && result?.unknown.some((i) => i.specs[k] === undefined))
+    .map((k) => ({ key: k, type: keys.get(k)!.type, unit: keys.get(k)!.unit, label: humanizeKey(k).toLowerCase() }))
+    .slice(0, 5);
+  const missingIn = (item: Item) => [
+    ...(item.price === null && plan?.filters.some((f) => f.key === "price") ? ["price"] : []),
+    ...new Set(plan?.filters.filter((f) => item.specs[f.key] === undefined && !isListingField(f.key)).map((f) => humanizeKey(f.key).toLowerCase())),
+  ];
+
   const lookUpUnknown = async () => {
-    if (!result || !plan) return;
-    const attrs = plan.filters
-      .filter((f) => keys.has(f.key))
-      .map((f) => ({ key: f.key, type: keys.get(f.key)!.type, unit: keys.get(f.key)!.unit, label: humanizeKey(f.key).toLowerCase() }));
-    if (attrs.length === 0) return;
+    if (!result || unknownAttrs.length === 0) return;
+    const itemIds = result.unknown.filter((i) => unknownAttrs.some((a) => i.specs[a.key] === undefined)).map((i) => i.id);
     try {
-      const res = await api.enrich({ ...scopeParams(scope), attributes: attrs.slice(0, 5), itemIds: result.unknown.map((i) => i.id) });
+      const res = await api.enrich({ ...scopeParams(scope), attributes: unknownAttrs, itemIds });
       if (res.job) setEnrichJobId(res.job.id);
     } catch (err) {
       setError((err as Error).message);
@@ -225,9 +332,25 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
             onChange={(e) => setQuery(e.target.value)}
             aria-label="Search"
           />
-          <button className="btn-primary" disabled={loading}>
-            {loading ? "Searching…" : "Search"}
-          </button>
+          <div className="flex gap-2">
+            {facets.length > 0 && (
+              <button
+                type="button"
+                className="btn-ghost flex-1 sm:flex-none"
+                onClick={() => (desktop ? setFiltersOpen(!filtersOpen) : setSheetOpen(true))}
+                aria-expanded={desktop ? sidebar : sheetOpen}
+                aria-controls={desktop ? "search-filters" : undefined}
+                title={desktop ? (sidebar ? "Hide filters" : "Show filters") : "Filter by any field"}
+              >
+                <FilterIcon />
+                Filters
+                {filteredFields > 0 && <span className="rounded-full bg-brand-700 px-1.5 text-xs leading-5 text-white">{filteredFields}</span>}
+              </button>
+            )}
+            <button className="btn-primary flex-1 sm:flex-none" disabled={loading}>
+              {loading ? "Searching…" : "Search"}
+            </button>
+          </div>
         </div>
         {!plan || (plan.filters.length === 0 && !plan.sort && !plan.semanticText && plan.missingAttributes.length === 0 && plan.show.length === 0) ? (
           <div className="space-y-2">
@@ -271,7 +394,7 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
                 onRemove={() => editPlan({ ...plan, filters: plan.filters.filter((_, j) => j !== i) })}
               >
                 {missingKeys.has(f.key) && <GlobeIcon className="mr-1 inline size-3.5" />}
-                {filterLabel(f, keys)}
+                {filterLabel(f, keys, collectionName)}
               </Chip>
             ))}
             {plan.sort && (
@@ -313,120 +436,174 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
         )}
       </form>
 
-      {error && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">{error}</div>}
-
-      {(enriching || (result?.enrichNote && !enrichJobId)) && (
-        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900 dark:border-sky-900 dark:bg-sky-950 dark:text-sky-200">
-          <GlobeIcon className={`size-4 ${enriching ? "animate-spin [animation-duration:3s]" : ""}`} />
-          <div className="min-w-0 flex-1">
-            {enriching ? (
-              <>
-                {enrich.job!.lookup ? `Looking up ${enrich.job!.lookup.attributes.join(", ")} on the web` : (result?.enrichNote ?? "Looking up missing specs on the web")}
-                {enrich.job!.lookup
-                  ? ` — ${Math.max(0, enrich.job!.itemsIndexed - enrich.job!.lookup.cached)} of ${enrich.job!.lookup.toLookUp} products looked up`
-                  : ` — ${enrich.job!.itemsIndexed}/${enrich.job!.itemsFound} products`}
-                {enrich.job!.webSearches ? `, ${enrich.job!.webSearches} searches` : ""}
-                {enrich.job!.llmCost ? ` · ${formatUsd(enrich.job!.llmCost)}` : ""}
-                {enrich.job!.lookup && <LookupSummary stats={enrich.job!.lookup} className="mt-2" />}
-              </>
-            ) : (
-              result?.enrichNote
-            )}
-          </div>
-        </div>
-      )}
-      {enrichDone && enrich.job && (
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-stone-500">
-          <span className="min-w-0">
-            <GlobeIcon className="mr-1 inline size-3.5 text-sky-600" />
-            Web lookup finished: {enrich.job.message ?? enrich.job.error}
-            {enrich.job.llmCost > 0 && ` · ${formatUsd(enrich.job.llmCost)}`}
-          </span>
-          {enrich.job.itemsRemaining > 0 && result?.plan && (
-            // Products just looked up are cached now, so the server starts on the next batch.
-            <button type="button" className="btn-ghost btn-sm" onClick={() => run({ plan: result.plan, enrich: true })}>
-              <GlobeIcon /> Look up {enrich.job.itemsRemaining} more product{enrich.job.itemsRemaining === 1 ? "" : "s"}
-            </button>
-          )}
-          {enrich.job.lookup && <LookupSummary stats={enrich.job.lookup} className="w-full" />}
-        </div>
-      )}
-
-      {result && (
-        <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-stone-600 dark:text-stone-400">
-          <span>
-            <strong className="text-stone-900 dark:text-stone-100">{result.total}</strong> match{result.total === 1 ? "" : "es"}
-            {result.unknown.length > 0 && <> · {result.unknown.length} can’t be judged yet</>}
-          </span>
-          <span className="flex flex-wrap items-center gap-3">
-            <label className="inline-flex items-center gap-1.5 text-xs" title="Listings missing from the latest complete crawl">
-              <input type="checkbox" className="size-3.5 accent-brand-700" checked={includeGone} onChange={(e) => toggleGone(e.target.checked)} />
-              Show sold/removed
-            </label>
-            {loading && <span className="animate-pulse">updating…</span>}
-            {hasFields && (
-              <span className="inline-flex rounded-lg border border-stone-200 p-0.5 text-xs dark:border-stone-700" role="group" aria-label="Results view">
-                {(["list", "cards"] as const).map((v) => (
-                  <button
-                    key={v}
-                    type="button"
-                    onClick={() => setView(v)}
-                    aria-pressed={mode === v}
-                    className={`rounded-md px-2.5 py-1 font-medium ${mode === v ? "bg-brand-600 text-white" : "text-stone-600 hover:text-stone-900 dark:text-stone-400 dark:hover:text-stone-100"}`}
-                  >
-                    {v === "list" ? "List" : "Cards"}
-                  </button>
-                ))}
-              </span>
-            )}
-          </span>
-        </div>
-      )}
-
-      {result && result.items.length > 0 && mode === "list" ? (
-        <CompareTable items={result.items} keys={keys} fieldKeys={highlightKeys} sort={plan?.sort ?? null} pendingKeys={pendingKeys} onOpen={setOpen} />
-      ) : (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-          {result?.items.map((item) => (
-            <ItemCard key={item.id} item={item} keys={keys} highlightKeys={highlightKeys} onOpen={() => setOpen(item)} />
-          ))}
-        </div>
-      )}
-
-      {result && result.items.length === 0 && !loading && (
-        <div className="card p-6 text-center text-sm text-stone-500">No items match. Remove a filter chip to widen the search.</div>
-      )}
-
-      {result && result.unknown.length > 0 && (
-        <div className="card">
-          <div className="flex flex-wrap items-center gap-2 px-4 py-3">
-            <button className="mr-auto text-left text-sm font-medium" onClick={() => setShowUnknown((v) => !v)} aria-expanded={showUnknown}>
-              {showUnknown ? "▾" : "▸"} {result.unknown.length} items missing a filtered spec
-            </button>
-            {config?.webSearchEnabled && !enriching && (
-              <button className="btn-ghost btn-sm" onClick={lookUpUnknown}>
-                <GlobeIcon /> Look up on the web
+      <div className={sidebar ? "grid grid-cols-[18rem_minmax(0,1fr)] items-start gap-4" : ""}>
+        {sidebar && (
+          <aside id="search-filters" aria-label="Filters" className="card sticky top-[4.5rem] flex max-h-[calc(100dvh-5.5rem)] flex-col overflow-hidden">
+            <div className="flex shrink-0 items-center gap-2 border-b border-stone-200 px-3 py-2 dark:border-stone-800">
+              <h2 className="font-semibold">Filters</h2>
+              <button type="button" className="btn-ghost btn-sm ml-auto" disabled={filteredFields === 0} onClick={clearFilters}>
+                Clear all
               </button>
-            )}
-          </div>
-          {showUnknown && (
-            <ul className="divide-y divide-stone-200 border-t border-stone-200 text-sm dark:divide-stone-800 dark:border-stone-800">
-              {result.unknown.map((item) => (
-                <li key={item.id}>
-                  <button className="flex w-full items-center gap-3 px-4 py-2 text-left hover:bg-stone-50 dark:hover:bg-stone-800/50" onClick={() => setOpen(item)}>
-                    <span className="min-w-0 flex-1 truncate">{item.title}</span>
-                    <span className="shrink-0 text-stone-500">{formatPrice(item.price, item.currency)}</span>
-                    <span className="hidden shrink-0 text-xs text-stone-400 sm:inline">
-                      missing {plan?.filters.filter((f) => item.specs[f.key] === undefined && f.key !== "price").map((f) => humanizeKey(f.key).toLowerCase()).join(", ")}
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      )}
+            </div>
+            <FilterPanel key={scope} facets={facets} keys={keys} filters={plan?.filters ?? []} collections={collections} onChange={applyFilters} />
+          </aside>
+        )}
+        <div className="min-w-0 space-y-4">
+          {error && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">{error}</div>}
 
+          {(enriching || (result?.enrichNote && !enrichJobId)) && (
+            <div className="flex flex-wrap items-center gap-3 rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900 dark:border-sky-900 dark:bg-sky-950 dark:text-sky-200">
+              <GlobeIcon className={`size-4 ${enriching ? "animate-spin [animation-duration:3s]" : ""}`} />
+              <div className="min-w-0 flex-1">
+                {enriching ? (
+                  <>
+                    {enrich.job!.lookup ? `Looking up ${enrich.job!.lookup.attributes.join(", ")} on the web` : (result?.enrichNote ?? "Looking up missing specs on the web")}
+                    {enrich.job!.lookup
+                      ? ` — ${Math.max(0, enrich.job!.itemsIndexed - enrich.job!.lookup.cached)} of ${enrich.job!.lookup.toLookUp} products looked up`
+                      : ` — ${enrich.job!.itemsIndexed}/${enrich.job!.itemsFound} products`}
+                    {enrich.job!.webSearches ? `, ${enrich.job!.webSearches} searches` : ""}
+                    {enrich.job!.llmCost ? ` · ${formatUsd(enrich.job!.llmCost)}` : ""}
+                    {enrich.job!.lookup && <LookupSummary stats={enrich.job!.lookup} className="mt-2" />}
+                  </>
+                ) : (
+                  result?.enrichNote
+                )}
+              </div>
+            </div>
+          )}
+          {retryIn !== null && !loading && (
+            <div className="rounded-lg border border-stone-200 bg-white px-4 py-3 text-sm text-stone-600 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-300" role="status">
+              Too many searches in a minute — updating by itself in {retryIn} s.
+            </div>
+          )}
+          {result?.enrichOffer && !enriching && (
+            <div className="flex flex-wrap items-center gap-3 rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900 dark:border-sky-900 dark:bg-sky-950 dark:text-sky-200">
+              <GlobeIcon className="size-4" />
+              <span className="min-w-0 flex-1">
+                {/* Registry keys read as fields ("Boot capacity"); keys new to the plan keep the parser's wording. */}
+                {humanizeKey(result.enrichOffer.attributes.map((a) => (plan?.missingAttributes.some((m) => m.key === a.key) ? a.label : specLabel(a.key).toLowerCase())).join(", "))}{" "}
+                {result.enrichOffer.attributes.length === 1 ? "isn’t" : "aren’t"} stated for{" "}
+                {result.enrichOffer.listings} listing{result.enrichOffer.listings === 1 ? "" : "s"}
+              </span>
+              <button type="button" className="btn-ghost btn-sm" onClick={() => run({ plan: result.plan, enrich: true })}>
+                <GlobeIcon /> Look up {result.enrichOffer.products} product{result.enrichOffer.products === 1 ? "" : "s"} on the web
+              </button>
+            </div>
+          )}
+          {enrichDone && enrich.job && (
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-stone-500">
+              <span className="min-w-0">
+                <GlobeIcon className="mr-1 inline size-3.5 text-sky-600" />
+                Web lookup finished: {enrich.job.message ?? enrich.job.error}
+                {enrich.job.llmCost > 0 && ` · ${formatUsd(enrich.job.llmCost)}`}
+              </span>
+              {enrich.job.itemsRemaining > 0 && result?.plan && !result.enrichOffer && (
+                // Products just looked up are cached now, so the server starts on the next batch.
+                <button type="button" className="btn-ghost btn-sm" onClick={() => run({ plan: result.plan, enrich: true })}>
+                  <GlobeIcon /> Look up {enrich.job.itemsRemaining} more product{enrich.job.itemsRemaining === 1 ? "" : "s"}
+                </button>
+              )}
+              {enrich.job.lookup && <LookupSummary stats={enrich.job.lookup} className="w-full" />}
+            </div>
+          )}
+
+          {result && (
+            <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-stone-600 dark:text-stone-400">
+              <span>
+                <strong className="text-stone-900 dark:text-stone-100">{result.total}</strong> match{result.total === 1 ? "" : "es"}
+                {result.unknown.length > 0 && <> · {result.unknown.length} can’t be judged yet</>}
+              </span>
+              <span className="flex flex-wrap items-center gap-3">
+                <label className="inline-flex items-center gap-1.5 text-xs" title="Listings missing from the latest complete crawl">
+                  <input type="checkbox" className="size-3.5 accent-brand-700" checked={includeGone} onChange={(e) => toggleGone(e.target.checked)} />
+                  Show sold/removed
+                </label>
+                {loading && <span className="animate-pulse">updating…</span>}
+                {hasFields && (
+                  <span className="inline-flex rounded-lg border border-stone-200 p-0.5 text-xs dark:border-stone-700" role="group" aria-label="Results view">
+                    {(["list", "cards"] as const).map((v) => (
+                      <button
+                        key={v}
+                        type="button"
+                        onClick={() => setView(v)}
+                        aria-pressed={mode === v}
+                        className={`rounded-md px-2.5 py-1 font-medium ${mode === v ? "bg-brand-600 text-white" : "text-stone-600 hover:text-stone-900 dark:text-stone-400 dark:hover:text-stone-100"}`}
+                      >
+                        {v === "list" ? "List" : "Cards"}
+                      </button>
+                    ))}
+                  </span>
+                )}
+              </span>
+            </div>
+          )}
+
+          {result && result.items.length > 0 && mode === "list" ? (
+            <CompareTable items={result.items} keys={keys} fieldKeys={highlightKeys} sort={plan?.sort ?? null} pendingKeys={pendingKeys} onOpen={setOpen} />
+          ) : (
+            <div className={`grid grid-cols-1 gap-4 sm:grid-cols-2 ${sidebar ? "xl:grid-cols-3" : "lg:grid-cols-3 xl:grid-cols-4"}`}>
+              {result?.items.map((item) => (
+                <ItemCard key={item.id} item={item} keys={keys} highlightKeys={highlightKeys} onOpen={() => setOpen(item)} />
+              ))}
+            </div>
+          )}
+
+          {result && result.items.length === 0 && !loading && (
+            <div className="card p-6 text-center text-sm text-stone-500">No items match. Remove a filter to widen the search.</div>
+          )}
+
+          {result && result.unknown.length > 0 && (
+            <div className="card">
+              <div className="flex flex-wrap items-center gap-2 px-4 py-3">
+                <button className="mr-auto text-left text-sm font-medium" onClick={() => setShowUnknown((v) => !v)} aria-expanded={showUnknown}>
+                  {showUnknown ? "▾" : "▸"} {result.unknown.length} items missing a filtered value
+                </button>
+                {config?.webSearchEnabled && !enriching && unknownAttrs.length > 0 && (
+                  <button className="btn-ghost btn-sm" onClick={lookUpUnknown}>
+                    <GlobeIcon /> Look up on the web
+                  </button>
+                )}
+              </div>
+              {showUnknown && (
+                <ul className="divide-y divide-stone-200 border-t border-stone-200 text-sm dark:divide-stone-800 dark:border-stone-800">
+                  {result.unknown.map((item) => (
+                    <li key={item.id}>
+                      <button className="flex w-full items-center gap-3 px-4 py-2 text-left hover:bg-stone-50 dark:hover:bg-stone-800/50" onClick={() => setOpen(item)}>
+                        <span className="min-w-0 flex-1 truncate">{item.title}</span>
+                        <span className="shrink-0 text-stone-500">{formatPrice(item.price, item.currency)}</span>
+                        <span className="hidden shrink-0 text-xs text-stone-400 sm:inline">
+                          missing {missingIn(item).join(", ")}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+
+        </div>
+      </div>
+
+      {sheetOpen && (
+        <Modal
+          title="Filters"
+          onClose={() => setSheetOpen(false)}
+          bodyClassName="flex min-h-0 flex-1 flex-col"
+          footer={
+            <>
+              <button type="button" className="btn-ghost" disabled={filteredFields === 0} onClick={clearFilters}>
+                Clear all
+              </button>
+              <button type="button" className="btn-primary flex-1" onClick={() => setSheetOpen(false)}>
+                {loading ? "Updating…" : `Show ${result?.total ?? 0} result${result?.total === 1 ? "" : "s"}`}
+              </button>
+            </>
+          }
+        >
+          <FilterPanel key={scope} facets={facets} keys={keys} filters={plan?.filters ?? []} collections={collections} onChange={applyFilters} />
+        </Modal>
+      )}
       {open && <ItemModal item={open} keys={keys} highlightKeys={highlightKeys} onClose={() => setOpen(null)} />}
     </div>
   );

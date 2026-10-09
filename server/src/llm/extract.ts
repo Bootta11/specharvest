@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { SpecKey, SpecType, SpecValue } from "@specharvest/shared";
+import { isHttpUrl, type SpecKey, type SpecType, type SpecValue } from "@specharvest/shared";
 import { askForJson } from "./client.ts";
 import type { DetailSnapshot } from "../crawler/sanitize.ts";
 
@@ -143,7 +143,7 @@ export async function extractItem(snapshot: DetailSnapshot, registry: SpecKey[])
     title: data.title.trim() || snapshot.prefill.title || "Untitled",
     price: data.price ?? snapshot.prefill.price,
     currency: data.currency ?? snapshot.prefill.currency,
-    mainImage: data.main_image && /^https?:/.test(data.main_image) ? data.main_image : snapshot.prefill.image,
+    mainImage: [data.main_image, snapshot.prefill.image].find(isHttpUrl) ?? null,
     description: data.description ?? snapshot.prefill.description,
     identity: data.identity?.trim().toLowerCase().replace(/\s+/g, " ") || null,
     specs: [...specs.values()],

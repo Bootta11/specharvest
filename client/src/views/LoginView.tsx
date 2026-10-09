@@ -2,6 +2,75 @@ import { useEffect, useState, type FormEvent } from "react";
 import { api } from "../lib/api.ts";
 import type { Auth } from "../lib/auth.ts";
 import { Field, Notice } from "../components/Modal.tsx";
+import { DEFAULT_SERVER, isNative, normalizeServerUrl, serverUrl, setServerUrl } from "../lib/platform.ts";
+
+/** The Android app's server choice: specharvest.bootta.dev, or a custom (e.g. self-hosted) one. */
+function ServerPicker({ onChanged }: { onChanged: () => void }) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const current = serverUrl();
+
+  const save = async (url: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const origin = normalizeServerUrl(url);
+      const res = await fetch(`${origin}/api/health`, { signal: AbortSignal.timeout(10_000) });
+      const health = (await res.json().catch(() => null)) as { ok?: boolean } | null;
+      if (!res.ok || !health?.ok) throw new Error(`${origin} doesn't look like a SpecHarvest server`);
+      setServerUrl(origin);
+      setEditing(false);
+      onChanged();
+    } catch (err) {
+      setError(err instanceof TypeError ? "Can't reach that server — check the address and your connection" : (err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!editing) {
+    return (
+      <div className="card flex items-center gap-3 px-4 py-3 text-sm">
+        <div className="min-w-0 flex-1">
+          <div className="text-xs text-stone-500">Server</div>
+          <div className="truncate font-medium">{current.replace(/^https:\/\//, "")}</div>
+        </div>
+        <button type="button" className="btn-ghost btn-sm" onClick={() => (setValue(current === DEFAULT_SERVER ? "" : current), setEditing(true))}>
+          {current === DEFAULT_SERVER ? "Use a custom server…" : "Change"}
+        </button>
+      </div>
+    );
+  }
+  return (
+    <form
+      className="card space-y-3 p-4"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void save(value);
+      }}
+    >
+      {error && <Notice kind="error">{error}</Notice>}
+      <Field label="Server address" hint="Your own SpecHarvest over HTTPS, e.g. specharvest.example.com">
+        <input className="input" inputMode="url" autoCapitalize="none" autoCorrect="off" required autoFocus value={value} onChange={(e) => setValue(e.target.value)} />
+      </Field>
+      <div className="flex flex-wrap justify-end gap-2">
+        {current !== DEFAULT_SERVER && (
+          <button type="button" className="btn-ghost btn-sm mr-auto" disabled={busy} onClick={() => void save(DEFAULT_SERVER)}>
+            Use specharvest.bootta.dev
+          </button>
+        )}
+        <button type="button" className="btn-ghost btn-sm" onClick={() => setEditing(false)}>
+          Cancel
+        </button>
+        <button className="btn-primary btn-sm" disabled={busy}>
+          {busy ? "Checking…" : "Use this server"}
+        </button>
+      </div>
+    </form>
+  );
+}
 
 export function LoginView({ auth }: { auth: Auth }) {
   const [mode, setMode] = useState<"login" | "signup">("login");
@@ -10,10 +79,12 @@ export function LoginView({ auth }: { auth: Auth }) {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Bumped when the app switches servers, to re-read that server's sign-up setting.
+  const [server, setServer] = useState(0);
 
   useEffect(() => {
-    api.authStatus().then((s) => setSignupEnabled(s.signupEnabled), () => {});
-  }, []);
+    api.authStatus().then((s) => setSignupEnabled(s.signupEnabled), () => setSignupEnabled(false));
+  }, [server]);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -38,6 +109,11 @@ export function LoginView({ auth }: { auth: Auth }) {
           <img src="/favicon.svg" alt="" className="size-9" />
           <span className="text-xl font-semibold tracking-tight">SpecHarvest</span>
         </div>
+        {isNative && (
+          <div className="mb-3">
+            <ServerPicker onChanged={() => (setServer((n) => n + 1), setError(null))} />
+          </div>
+        )}
         <form onSubmit={submit} className="card space-y-4 p-5 sm:p-6">
           <h1 className="text-lg font-semibold">{signup ? "Create an account" : "Sign in"}</h1>
           {error && <Notice kind="error">{error}</Notice>}

@@ -65,6 +65,12 @@ key when they have no key of their own: **Everyone** (default, as before
 per-user keys existed), **Admins only**, or **Nobody**. People's own keys always
 come first. Without `OPENROUTER_API_KEY` everyone needs a key of their own.
 
+**Daily limit per user** (default **$1**, same place): what one regular user may
+spend on the server key per day (since midnight, server time). Past it, their
+work needs their own key until tomorrow. A running crawl stops as resumable,
+and *Settings → LLM provider* says why and shows today's spend. Admins have no
+limit, and their own keys are never limited. 0 turns the limit off.
+
 ## Keys at rest
 
 - Keys are stored in `llm_keys`, encrypted with AES-256-GCM (`server/src/lib/secrets.ts`).

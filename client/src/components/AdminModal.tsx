@@ -10,6 +10,8 @@ export function AdminModal({ me, onClose }: { me: UserSummary; onClose: () => vo
   const [role, setRole] = useState<UserRole>("user");
   const [created, setCreated] = useState<UserCreated | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** The daily limit as typed, saved on blur/Enter. */
+  const [limitDraft, setLimitDraft] = useState("");
 
   const fail = (err: unknown) => setError((err as Error).message);
   const load = () => api.users().then(setUsers, fail);
@@ -46,6 +48,18 @@ export function AdminModal({ me, onClose }: { me: UserSummary; onClose: () => vo
     } catch (err) {
       fail(err);
     }
+  };
+
+  const savedLimit = settings?.serverLlmDailyLimitUsd;
+  useEffect(() => {
+    if (savedLimit !== undefined) setLimitDraft(String(savedLimit));
+  }, [savedLimit]);
+
+  const commitLimit = () => {
+    if (savedLimit === undefined) return;
+    const usd = Number(limitDraft);
+    if (limitDraft.trim() === "" || !Number.isFinite(usd) || usd < 0 || usd > 1000) return setLimitDraft(String(savedLimit));
+    if (usd !== savedLimit) saveSettings({ serverLlmDailyLimitUsd: usd });
   };
 
   return (
@@ -132,6 +146,31 @@ export function AdminModal({ me, onClose }: { me: UserSummary; onClose: () => vo
               <option value="admins">Admins only</option>
               <option value="nobody">Nobody — everyone brings a key</option>
             </select>
+          </label>
+        )}
+        {settings?.serverLlmConfigured && settings.serverLlmAccess === "everyone" && (
+          <label className="block max-w-xs">
+            <span className="mb-1 block text-xs font-medium text-stone-600 dark:text-stone-400">Daily limit per user (USD)</span>
+            <input
+              className="input"
+              type="number"
+              inputMode="decimal"
+              min={0}
+              max={1000}
+              step="any"
+              value={limitDraft}
+              onChange={(e) => setLimitDraft(e.target.value)}
+              onBlur={commitLimit}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  commitLimit();
+                }
+              }}
+            />
+            <span className="mt-1 block text-xs text-stone-500">
+              What one user may spend on the server key per day; their crawls pause (resumable) when it's used up. Admins have no limit. 0 = no limit.
+            </span>
           </label>
         )}
       </section>

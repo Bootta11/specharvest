@@ -74,7 +74,10 @@ CI tests, scans and publishes the image on every push to `master`. See
    a request in any language (repeat searches are cached and shown as
    *Recent*), e.g.
    `automatic diesel with the lowest mileage and over 100 kW`. The parsed plan
-   appears as chips; remove one to widen the search.
+   appears as chips; remove one to widen the search. *Filters* (a sidebar on
+   wide screens, a sheet on phones) narrows by any field of the items —
+   ranges, values, yes/no features, words in the title — without an AI call
+   ([details](docs/search.md#filter-panel)).
 3. Ask for something listings don't state (`biggest boot`, `fastest 0-100`) and
    a web lookup runs in the background. Requested fields appear side by side in
    the **List** view (e.g. boot space 540 L, 420 L, 350 L…), and every value
@@ -106,8 +109,13 @@ variable with comments. The essentials:
 | `PUBLIC_URL`, `VAPID_*` | Links in notifications; Web Push keys (auto-generated if blank) |
 | `ADMIN_EMAIL`, `ADMIN_PASSWORD` | First admin, created on boot when no user exists |
 | `SESSION_COOKIE_SECURE` | Session cookie `Secure` flag (default: on when `PUBLIC_URL` is https) |
+| `TRUST_PROXY` | Which proxies may set the client IP (default: loopback and private networks) — see [security settings](docs/deployment.md#security-settings) |
+| `ALLOW_PRIVATE_TARGETS` | Let crawls reach private/LAN addresses (default off); also `OUTBOUND_ALLOWED_HOSTS`, `MAX_*_CAP`, `MAX_ACTIVE_JOBS_PER_USER` |
 
 ## Docs
+
+Browse them as a local site with search: `npm run docs` → http://specharvest-docs.localhost:3190
+(built with [docmd](https://docmd.io); config in `docmd/`).
 
 - [Architecture](docs/architecture.md) — modules, data model, request flow
 - [Crawling](docs/crawling.md) — listing detection, pagination, extraction, site gotchas
@@ -117,3 +125,4 @@ variable with comments. The essentials:
 - [LLM providers](docs/llm-providers.md) — your own API keys, supported providers, server key access, cost, credits roadmap
 - [Deployment](docs/deployment.md) — CI → GHCR image, tags, Compose host setup, secrets, backups
 - [Notifications](docs/notifications.md) — running jobs, browser/Web Push, ntfy, Telegram, Discord/Slack, webhook, Apprise
+- [Android app](docs/mobile-app.md) — build and install the APK, server choice, sign-in, notifications

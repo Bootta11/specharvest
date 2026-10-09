@@ -2,11 +2,38 @@ import webpush from "web-push";
 import { env } from "../config.ts";
 import * as db from "../db/sqlite.ts";
 import { createLogger, errorMessage } from "../lib/logger.ts";
+import { assertPublicUrl, guardedHttpsAgent, strictPolicy } from "../lib/net-guard.ts";
+import { decryptSecret, encryptSecret, isEncryptedSecret } from "../lib/secrets.ts";
 import type { NotifyMessage } from "./channels.ts";
 
 const log = createLogger("push");
 
-let keys: { publicKey: string; privateKey: string } | null = null;
+type VapidKeys = { publicKey: string; privateKey: string };
+let keys: VapidKeys | null = null;
+
+const VAPID_SETTING = "vapid";
+const VAPID_AAD = "vapid";
+
+/** Stores generated keys with the private one encrypted (lib/secrets.ts). */
+function storeKeys(k: VapidKeys) {
+  db.setSetting(VAPID_SETTING, { publicKey: k.publicKey, privateKey: encryptSecret(k.privateKey, VAPID_AAD) });
+}
+
+/** The stored keys; ones saved before encryption get encrypted now. Null when missing or undecryptable. */
+function storedKeys(): VapidKeys | null {
+  const stored = db.getSetting<VapidKeys>(VAPID_SETTING);
+  if (!stored) return null;
+  if (!isEncryptedSecret(stored.privateKey)) {
+    storeKeys(stored);
+    return stored;
+  }
+  try {
+    return { publicKey: stored.publicKey, privateKey: decryptSecret(stored.privateKey, VAPID_AAD) };
+  } catch (err) {
+    log.warn("Stored Web Push keys can't be decrypted (was ENCRYPTION_KEY changed?) — generating new ones; browsers need to turn push on again", errorMessage(err));
+    return null;
+  }
+}
 
 /** VAPID keys from env, else generated once and kept in the settings table. */
 export function vapidKeys() {
@@ -14,10 +41,10 @@ export function vapidKeys() {
   if (env.VAPID_PUBLIC_KEY && env.VAPID_PRIVATE_KEY) {
     keys = { publicKey: env.VAPID_PUBLIC_KEY, privateKey: env.VAPID_PRIVATE_KEY };
   } else {
-    keys = db.getSetting<{ publicKey: string; privateKey: string }>("vapid");
+    keys = storedKeys();
     if (!keys) {
       keys = webpush.generateVAPIDKeys();
-      db.setSetting("vapid", keys);
+      storeKeys(keys);
       log.info("Generated Web Push VAPID keys");
     }
   }
@@ -38,10 +65,13 @@ export async function sendPush(m: NotifyMessage, userId: number): Promise<number
   });
   let sent = 0;
   const errors: string[] = [];
+  // Endpoints come from browsers (i.e. users): real push services are public, nothing else is reached.
+  const policy = strictPolicy();
   await Promise.all(
     subs.map(async (sub) => {
       try {
-        await webpush.sendNotification(sub, payload, { TTL: 24 * 3600 });
+        await assertPublicUrl(sub.endpoint, policy);
+        await webpush.sendNotification(sub, payload, { TTL: 24 * 3600, agent: guardedHttpsAgent(policy) });
         sent++;
       } catch (err) {
         const status = (err as { statusCode?: number }).statusCode;

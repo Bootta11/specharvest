@@ -10,7 +10,7 @@ import { getProvider, modelCanSearch, PROVIDERS, servesTier, type ProviderClient
  * Picks the provider, model and payer for each LLM call. Per tier, first match wins:
  *  1. the model the user picked for the tier, if they still have that provider's key (web: the model can search);
  *  2. automatic: the first of the user's keys (catalog order) that serves the tier, with its default model;
- *  3. the server's OpenRouter key, if the admin lets this user use it;
+ *  3. the server's OpenRouter key, if the admin lets this user use it and they're under today's limit;
  *  4. otherwise LlmUnavailableError with what to do.
  * A failing own key is never silently swapped for the server key.
  */
@@ -52,7 +52,32 @@ export function setServerLlmAccess(mode: ServerLlmAccess) {
   db.setSetting(ACCESS_KEY, mode);
 }
 
-interface Who {
+const DAILY_LIMIT_KEY = "llm.serverDailyLimitUsd";
+export const DEFAULT_SERVER_DAILY_LIMIT_USD = 1;
+
+/** USD each non-admin may spend on the server key per day (Users & sign-up); 0 = no limit. */
+export function serverDailyLimitUsd(): number {
+  const v = db.getSetting<number>(DAILY_LIMIT_KEY);
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : DEFAULT_SERVER_DAILY_LIMIT_USD;
+}
+
+export function setServerDailyLimitUsd(usd: number) {
+  db.setSetting(DAILY_LIMIT_KEY, Math.round(usd * 100) / 100);
+}
+
+/** The daily limit that applies to this user (0 = none: admins, or no limit set). */
+export function dailyLimitFor(user: Who | null): number {
+  return !user || user.role === "admin" ? 0 : serverDailyLimitUsd();
+}
+
+/** What the user spent on the server key since midnight (server time). */
+export function serverSpendToday(userId: number, now = Date.now()): number {
+  return db.platformSpendSince(userId, db.startOfDay(now));
+}
+
+const usd = (n: number) => `$${n.toFixed(2)}`;
+
+export interface Who {
   id: number;
   role: UserRole;
 }
@@ -126,7 +151,14 @@ function planTier(user: Who | null, tier: LlmTier): Plan {
       return { ok: true, funding: "own", provider: p, modelId, key };
     }
   }
-  if (serverAllowed(user)) return { ok: true, funding: "platform", provider: getProvider("openrouter")! };
+  if (serverAllowed(user)) {
+    // One user can't run up the shared bill: past today's allowance their work stops (resumable) until tomorrow.
+    const limit = dailyLimitFor(user);
+    if (limit > 0 && serverSpendToday(user!.id) >= limit) {
+      return { ok: false, reason: `You've used today's ${usd(limit)} on the server's LLM key — add your own key in ${SETTINGS_PATH}, or try again tomorrow.` };
+    }
+    return { ok: true, funding: "platform", provider: getProvider("openrouter")! };
+  }
   return { ok: false, reason: unavailableReason(tier, hasKeys) };
 }
 

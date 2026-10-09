@@ -7,6 +7,8 @@ services:
     pull_policy: ${PULL_POLICY:-missing}
     init: true
     restart: unless-stopped
+    # Room for a clean shutdown (the server gives up after 10 s on its own).
+    stop_grace_period: 20s
     env_file:
       - path: .env
         required: false
@@ -33,7 +35,8 @@ services:
   # Optional bridge to 130+ notification services: docker compose --profile apprise up -d
   # then Settings → Apprise → API URL http://apprise:8000
   apprise:
-    image: caronc/apprise:latest
+    # Pinned so a new Apprise release can't change a running setup unnoticed; Dependabot proposes bumps.
+    image: caronc/apprise:2.0.1
     restart: unless-stopped
     profiles: [apprise]
     volumes:

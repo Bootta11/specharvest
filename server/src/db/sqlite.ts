@@ -3,6 +3,7 @@ import path from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { COLLECTION_EXPORT_FORMAT, COLLECTIONS_EXPORT_FORMAT, type Collection, type CollectionExport, type GroupingMode, type CollectionGroup, type CollectionsExport, type Item, type Job, type JobKind, type LlmFunding, type LlmPurpose, type LookupStats, type SpecKey, type SpecOrigin, type SpecSource, type SpecType, type SpecValue, type UsageSummary } from "@specharvest/shared";
 import { env } from "../config.ts";
+import { withSafeUrlPattern } from "../crawler/url-pattern.ts";
 
 let db: DatabaseSync | null = null;
 
@@ -212,6 +213,9 @@ export function getDb(): DatabaseSync {
   fs.mkdirSync(env.DATA_DIR, { recursive: true });
   db = new DatabaseSync(path.join(env.DATA_DIR, "specharvest.db"));
   db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
+  // Search compares text case-insensitively (search/filters.ts): SQLite's lower() only folds ASCII ("Š" stays "Š"),
+  // while search terms are lowercased in JS — so use JS on both sides.
+  db.function("ulower", { deterministic: true }, (v) => (typeof v === "string" ? v.toLowerCase() : v == null ? null : String(v)));
   db.exec(SCHEMA);
   // Columns added after the first release (CREATE TABLE IF NOT EXISTS doesn't add them).
   addColumnIfMissing("items", "card_hash", "TEXT");
@@ -232,6 +236,10 @@ export function getDb(): DatabaseSync {
   addColumnIfMissing("jobs", "user_id", "INTEGER");
   addColumnIfMissing("llm_usage", "user_id", "INTEGER");
   addColumnIfMissing("push_subscriptions", "user_id", "INTEGER");
+  // Rows that came from an import file (another instance's data, never checked here): other users' crawls and
+  // lookups don't reuse them until this server extracts the item / detects the listing itself.
+  addColumnIfMissing("items", "imported", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing("collections", "detection_imported", "INTEGER NOT NULL DEFAULT 0");
   // Per-user LLM keys: which provider served a call, who paid (own key / server key), and whether the cost is an estimate.
   // Rows from before were all OpenRouter calls on the server's key.
   if (!columnExists("llm_usage", "provider")) {
@@ -241,7 +249,7 @@ export function getDb(): DatabaseSync {
     db.exec("UPDATE llm_usage SET provider = 'openrouter' WHERE provider IS NULL");
   }
   db.exec(
-    "CREATE INDEX IF NOT EXISTS collections_user ON collections(user_id); CREATE INDEX IF NOT EXISTS jobs_user ON jobs(user_id); CREATE INDEX IF NOT EXISTS llm_usage_user ON llm_usage(user_id);",
+    "CREATE INDEX IF NOT EXISTS collections_user ON collections(user_id); CREATE INDEX IF NOT EXISTS jobs_user ON jobs(user_id); CREATE INDEX IF NOT EXISTS llm_usage_user ON llm_usage(user_id); CREATE INDEX IF NOT EXISTS llm_usage_user_created ON llm_usage(user_id, created_at);",
   );
   // Cross-collection reuse: the same ad in another collection, the same request's plan for another collection.
   db.exec("CREATE INDEX IF NOT EXISTS items_url ON items(url); CREATE INDEX IF NOT EXISTS query_cache_query ON query_cache(query, registry_sig);");
@@ -373,18 +381,19 @@ export function listCollections(viewer?: Viewer): Collection[] {
 export function getCollection(id: number, viewer?: Viewer): (Collection & { detection: CollectionDetection | null }) | null {
   const r = getDb().prepare(`${COLLECTION_SELECT} WHERE c.id = ?`).get(id) as Row | undefined;
   if (!r) return null;
-  return { ...toCollection(r, viewer), detection: parseJson<CollectionDetection | null>(r.detection, null) };
+  return { ...toCollection(r, viewer), detection: withSafeUrlPattern(parseJson<CollectionDetection | null>(r.detection, null)) };
 }
 
 /**
  * Listing structure already detected for another collection on the same host (any owner), newest first.
  * Selectors are site structure, not user data; the caller validates them on the live page before use.
+ * Only structures this server detected itself — never one that came from an import file.
  */
 export function findDetectionForHost(host: string, excludeCollectionId: number): CollectionDetection | null {
   const r = getDb()
-    .prepare("SELECT detection FROM collections WHERE host = ? AND id != ? AND detection IS NOT NULL ORDER BY created_at DESC LIMIT 1")
+    .prepare("SELECT detection FROM collections WHERE host = ? AND id != ? AND detection IS NOT NULL AND detection_imported = 0 ORDER BY created_at DESC LIMIT 1")
     .get(host, excludeCollectionId) as Row | undefined;
-  return r ? parseJson<CollectionDetection | null>(r.detection, null) : null;
+  return r ? withSafeUrlPattern(parseJson<CollectionDetection | null>(r.detection, null)) : null;
 }
 
 /** The user's own collection for a start URL — re-crawling someone else's (shared) URL makes a new one. */
@@ -409,7 +418,7 @@ export function setCollectionGrouping(id: number, mode: GroupingMode) {
 }
 
 export function saveDetection(id: number, detection: CollectionDetection | null) {
-  getDb().prepare("UPDATE collections SET detection = ? WHERE id = ?").run(detection ? JSON.stringify(detection) : null, id);
+  getDb().prepare("UPDATE collections SET detection = ?, detection_imported = 0 WHERE id = ?").run(detection ? JSON.stringify(detection) : null, id);
 }
 
 export function renameCollection(id: number, name: string) {
@@ -523,7 +532,7 @@ export function exportCollection(id: number): CollectionExport {
     format: COLLECTION_EXPORT_FORMAT,
     version: 1,
     exportedAt: Date.now(),
-    collection: { name: c.name, startUrl: c.startUrl, host: c.host, createdAt: c.createdAt, grouping: c.grouping, detection: c.detection as Record<string, unknown> | null },
+    collection: { name: c.name, startUrl: c.startUrl, host: c.host, createdAt: c.createdAt, grouping: c.grouping, detection: c.detection },
     specKeys: (d.prepare("SELECT * FROM spec_keys WHERE collection_id = ? ORDER BY key").all(id) as Row[]).map((r) => {
       const { count: _, ...k } = toSpecKey(r);
       return k;
@@ -577,20 +586,21 @@ export interface ImportedCollection {
 }
 
 /**
- * Creates a new private collection for `userId` from an export, in one transaction.
- * Grouping and lookup cache rows already present here win (INSERT OR IGNORE).
+ * Creates a new private collection for `importer` from an export, in one transaction.
+ * The file's product-grouping and lookup cache rows are shared by every user, so only an admin's import
+ * adds them (rows already present here win, INSERT OR IGNORE); a user's items keep their own values either way.
  * Returns the new ids — the caller embeds the items for vector search.
  */
-export function importCollection(data: CollectionExport, userId: number): ImportedCollection {
-  return importCollections([data], userId)[0];
+export function importCollection(data: CollectionExport, importer: Viewer): ImportedCollection {
+  return importCollections([data], importer)[0];
 }
 
-/** Several exports ("Export all" file) as new collections of `userId` — all or nothing. */
-export function importCollections(list: CollectionExport[], userId: number): ImportedCollection[] {
+/** Several exports ("Export all" file) as new collections of `importer` — all or nothing. */
+export function importCollections(list: CollectionExport[], importer: Viewer): ImportedCollection[] {
   const d = getDb();
   d.exec("BEGIN");
   try {
-    const imported = list.map((data) => insertImportedCollection(data, userId));
+    const imported = list.map((data) => insertImportedCollection(data, importer));
     d.exec("COMMIT");
     return imported;
   } catch (err) {
@@ -599,40 +609,48 @@ export function importCollections(list: CollectionExport[], userId: number): Imp
   }
 }
 
-function insertImportedCollection(data: CollectionExport, userId: number): ImportedCollection {
+function insertImportedCollection(data: CollectionExport, importer: Viewer): ImportedCollection {
   const d = getDb();
+  const userId = importer.id;
+  const now = Date.now();
+  // A file's timestamps can't be from the future (they'd outrank every real row in "newest first" lookups).
+  const past = <T extends number | null>(t: T): T => (t === null ? t : (Math.min(t, now) as T));
   const taken = new Set((d.prepare("SELECT name FROM collections WHERE user_id = ?").all(userId) as Row[]).map((r) => String(r.name)));
   const name = taken.has(data.collection.name) ? `${data.collection.name} (imported)` : data.collection.name;
   const collectionId = createCollection(name, data.collection.startUrl, data.collection.host, userId);
-  d.prepare("UPDATE collections SET created_at = ?, grouping = ?, detection = ? WHERE id = ?").run(
-    data.collection.createdAt,
+  const detection = withSafeUrlPattern(data.collection.detection);
+  d.prepare("UPDATE collections SET created_at = ?, grouping = ?, detection = ?, detection_imported = ? WHERE id = ?").run(
+    past(data.collection.createdAt),
     data.collection.grouping,
-    data.collection.detection ? JSON.stringify(data.collection.detection) : null,
+    detection ? JSON.stringify(detection) : null,
+    detection ? 1 : 0,
     collectionId,
   );
   const keyStmt = d.prepare("INSERT OR IGNORE INTO spec_keys (collection_id, key, type, unit, label, example, count, origin) VALUES (?, ?, ?, ?, ?, ?, 0, ?)");
   for (const k of data.specKeys) keyStmt.run(collectionId, k.key, k.type, k.unit, k.label, k.example, k.origin);
   const itemStmt = d.prepare(
     `INSERT OR IGNORE INTO items (collection_id, url, title, price, currency, main_image, description, identity, specs, raw_text, indexed_at,
-       card_hash, content_hash, content_text, last_seen_at, checked_at, gone_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       card_hash, content_hash, content_text, last_seen_at, checked_at, gone_at, imported) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
   );
   const sourceStmt = d.prepare("INSERT OR REPLACE INTO spec_sources (item_id, key, origin, source_url, confidence, fetched_at) VALUES (?, ?, ?, ?, ?, ?)");
   const itemIds: number[] = [];
   for (const it of data.items) {
     const res = itemStmt.run(
       collectionId, it.url, it.title, it.price, it.currency, it.mainImage, it.description, it.identity, JSON.stringify(it.specs), it.rawText,
-      it.indexedAt, it.cardHash, it.contentHash, it.contentText, it.lastSeenAt, it.checkedAt, it.goneAt,
+      past(it.indexedAt), it.cardHash, it.contentHash, it.contentText, past(it.lastSeenAt), past(it.checkedAt), past(it.goneAt),
     );
     if (!res.changes) continue; // duplicate URL in the file
     const itemId = Number(res.lastInsertRowid);
     itemIds.push(itemId);
-    for (const [key, s] of Object.entries(it.sources)) sourceStmt.run(itemId, key, s.origin, s.sourceUrl, s.confidence, it.indexedAt);
+    for (const [key, s] of Object.entries(it.sources)) sourceStmt.run(itemId, key, s.origin, s.sourceUrl, s.confidence, past(it.indexedAt));
   }
-  const now = Date.now();
-  const aliasStmt = d.prepare("INSERT OR IGNORE INTO identity_aliases (identity, canonical, created_at) VALUES (?, ?, ?)");
-  for (const a of data.aliases) aliasStmt.run(a.identity, a.canonical, now);
-  const factStmt = d.prepare("INSERT OR IGNORE INTO web_facts (identity, key, value, unit, source_url, confidence, found, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
-  for (const f of data.webFacts) factStmt.run(f.identity, f.key, JSON.stringify(f.value), f.unit, f.sourceUrl, f.confidence, f.found ? 1 : 0, f.fetchedAt);
+  // Grouping and the web lookup cache are global: a regular user's file must not decide them for everyone.
+  if (importer.role === "admin") {
+    const aliasStmt = d.prepare("INSERT OR IGNORE INTO identity_aliases (identity, canonical, created_at) VALUES (?, ?, ?)");
+    for (const a of data.aliases) aliasStmt.run(a.identity, a.canonical, now);
+    const factStmt = d.prepare("INSERT OR IGNORE INTO web_facts (identity, key, value, unit, source_url, confidence, found, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+    for (const f of data.webFacts) factStmt.run(f.identity, f.key, JSON.stringify(f.value), f.unit, f.sourceUrl, f.confidence, f.found ? 1 : 0, past(f.fetchedAt));
+  }
   recountSpecKeys(collectionId);
   return { collectionId, itemIds };
 }
@@ -672,7 +690,8 @@ export function upsertItem(input: ItemInput): number {
     }
     d.prepare(
       `UPDATE items SET title=?, price=?, currency=?, main_image=?, description=?, identity=?, specs=?, raw_text=?, indexed_at=?,
-         card_hash=COALESCE(?, card_hash), content_hash=COALESCE(?, content_hash), content_text=COALESCE(?, content_text), last_seen_at=?, checked_at=?, gone_at=NULL WHERE id=?`,
+         card_hash=COALESCE(?, card_hash), content_hash=COALESCE(?, content_hash), content_text=COALESCE(?, content_text), last_seen_at=?, checked_at=?, gone_at=NULL,
+         imported=0 WHERE id=?`,
     ).run(input.title, input.price, input.currency, input.mainImage, input.description, input.identity, JSON.stringify(specs), input.rawText, now, input.cardHash ?? null, input.contentHash ?? null, input.contentText ?? null, now, now, id);
     return id;
   }
@@ -761,11 +780,14 @@ export interface ReusableExtraction {
 /**
  * The same ad (URL) with the same page content, already extracted in another collection — any owner's.
  * Copying it skips the LLM call. Nothing identifying the donor collection or its owner is returned.
+ * Imported items never donate: their values weren't extracted here.
  */
 export function findReusableExtraction(url: string, contentHash: string, excludeCollectionId: number): ReusableExtraction | null {
   const d = getDb();
   const r = d
-    .prepare("SELECT id, collection_id, title, price, currency, main_image, description, identity, specs FROM items WHERE url = ? AND content_hash = ? AND collection_id != ? ORDER BY indexed_at DESC LIMIT 1")
+    .prepare(
+      "SELECT id, collection_id, title, price, currency, main_image, description, identity, specs FROM items WHERE url = ? AND content_hash = ? AND collection_id != ? AND imported = 0 ORDER BY indexed_at DESC LIMIT 1",
+    )
     .get(url, contentHash, excludeCollectionId) as Row | undefined;
   if (!r) return null;
   const webKeys = new Set((d.prepare("SELECT key FROM spec_sources WHERE item_id = ? AND origin = 'web'").all(Number(r.id)) as Row[]).map((x) => String(x.key)));
@@ -863,6 +885,33 @@ export function listItems(scope: CollectionScope, limit = 100, offset = 0, inclu
 /** Runs a candidate query built by search/filters.ts. */
 export function queryItemIds(sql: string, params: SQLInputValue[]): number[] {
   return (getDb().prepare(sql).all(...params) as Row[]).map((r) => Number(r.id));
+}
+
+/** One item as the facet counter sees it (search/facets.ts): what it has, and which filters it passes. */
+export interface FacetRow {
+  collectionId: number;
+  price: number | null;
+  currency: string | null;
+  hasTitle: boolean;
+  hasDescription: boolean;
+  hasProduct: boolean;
+  specs: Record<string, SpecValue>;
+  /** Per active filter (column f0…fN): the row passes it or lacks its key. */
+  passes: boolean[];
+}
+
+/** Runs a facet query built by search/filters.ts (buildFacetQuery). */
+export function queryFacetRows(sql: string, params: SQLInputValue[], filterCount: number): FacetRow[] {
+  return (getDb().prepare(sql).all(...params) as Row[]).map((r) => ({
+    collectionId: Number(r.collection_id),
+    price: r.price == null ? null : Number(r.price),
+    currency: r.currency == null || r.currency === "" ? null : String(r.currency),
+    hasTitle: Number(r.has_title) === 1,
+    hasDescription: Number(r.has_description) === 1,
+    hasProduct: Number(r.has_product) === 1,
+    specs: parseJson<Record<string, SpecValue>>(r.specs, {}),
+    passes: Array.from({ length: filterCount }, (_, i) => Number(r[`f${i}`]) === 1),
+  }));
 }
 
 export function setItemSpec(itemId: number, key: string, value: SpecValue, source: { origin: SpecOrigin; sourceUrl: string | null; confidence: number | null }) {
@@ -1066,7 +1115,7 @@ export function listItemsByIdentities(identities: string[], scope: CollectionSco
 
 /**
  * A value for `key` that a listing of one of these product identities states
- * on its own page (not filled from the web), with that listing's URL.
+ * on its own page (not filled from the web), with that listing's URL. Imported listings don't count.
  */
 export function findPageValue(identities: string[], key: string): { value: SpecValue; url: string } | null {
   if (identities.length === 0) return null;
@@ -1075,6 +1124,7 @@ export function findPageValue(identities: string[], key: string): { value: SpecV
       `SELECT i.url, json_extract(i.specs, p.path) AS v, json_type(i.specs, p.path) AS t
        FROM items i, (SELECT '$.' || json_quote(?) AS path) p
        WHERE i.identity IN (${identities.map(() => "?").join(",")})
+         AND i.imported = 0
          AND json_type(i.specs, p.path) NOT IN ('null', 'object', 'array')
          -- 0 / "" on a page is almost always an extraction slip — don't spread it to siblings.
          AND NOT (json_type(i.specs, p.path) IN ('integer', 'real') AND json_extract(i.specs, p.path) = 0)
@@ -1328,6 +1378,11 @@ export function listActiveJobs(viewer?: Viewer): Job[] {
   return (getDb().prepare(`SELECT * FROM jobs WHERE status IN ('queued','running') AND ${f.sql} ORDER BY id`).all(...f.params) as Row[]).map(toJob);
 }
 
+/** Queued or running jobs started by one user. */
+export function countActiveJobs(userId: number): number {
+  return Number((getDb().prepare("SELECT COUNT(*) AS n FROM jobs WHERE user_id = ? AND status IN ('queued','running')").get(userId) as Row).n);
+}
+
 export function activeJobForCollection(collectionId: number, kind: JobKind): Job | null {
   const r = getDb()
     .prepare("SELECT * FROM jobs WHERE collection_id = ? AND kind = ? AND status IN ('queued','running') ORDER BY id DESC LIMIT 1")
@@ -1373,6 +1428,16 @@ export function priceStats(scope: CollectionScope): { min: number; max: number; 
     .get(...(cond?.params ?? [])) as Row | undefined;
   if (!r || r.mn == null) return null;
   return { min: Number(r.mn), max: Number(r.mx), currency: r.cur == null ? null : String(r.cur) };
+}
+
+/** Listing currencies in a scope, most common first. */
+export function currencies(scope: CollectionScope, limit = 10): string[] {
+  const cond = scopeCondition(scope);
+  return (
+    getDb()
+      .prepare(`SELECT currency, COUNT(*) n FROM items WHERE COALESCE(currency, '') <> '' ${cond ? `AND ${cond.sql}` : ""} GROUP BY currency ORDER BY n DESC LIMIT ?`)
+      .all(...(cond?.params ?? []), limit) as Row[]
+  ).map((r) => String(r.currency));
 }
 
 /**
@@ -1445,11 +1510,23 @@ export function recordLlmUsage(u: LlmUsageInput) {
   if (u.jobId !== null && u.cost) d.prepare("UPDATE jobs SET llm_cost = llm_cost + ? WHERE id = ?").run(u.cost, u.jobId);
 }
 
+/** Midnight (server time) of the day `now` falls on — "today" for spend totals and the server key's daily limit. */
+export function startOfDay(now = Date.now()): number {
+  const d = new Date(now);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+/** USD one user spent on the server's key (funding 'platform') since `since`. */
+export function platformSpendSince(userId: number, since: number): number {
+  return Number(
+    (getDb().prepare("SELECT COALESCE(SUM(cost), 0) AS c FROM llm_usage WHERE user_id = ? AND created_at >= ? AND funding = 'platform'").get(userId, since) as Row).c,
+  );
+}
+
 /** Spend of one user, or everyone's when userId is null. */
 export function usageSummary(now = Date.now(), userId: number | null = null): UsageSummary {
   const d = getDb();
-  const startOfDay = new Date(now);
-  startOfDay.setHours(0, 0, 0, 0);
   const who = userId === null ? "1" : "user_id = ?";
   const p = userId === null ? [] : [userId];
   const since = (ts: number) => Number((d.prepare(`SELECT COALESCE(SUM(cost), 0) AS c FROM llm_usage WHERE ${who} AND created_at >= ?`).get(...p, ts) as Row).c);
@@ -1471,7 +1548,7 @@ export function usageSummary(now = Date.now(), userId: number | null = null): Us
     if (r.funding === "own" || r.funding === "platform") byFunding[r.funding] = Number(r.c);
   }
   return {
-    today: since(startOfDay.getTime()),
+    today: since(startOfDay(now)),
     last30d: since(now - 30 * 86_400_000),
     allTime: since(0),
     byFunding,

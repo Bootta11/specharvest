@@ -1,13 +1,13 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { createUserSchema, loginSchema, serverLlmAccessModes, signupSchema, updateAccountSchema, type AdminSettings, type AuthStatus, type UserCreated } from "@specharvest/shared";
+import { createUserSchema, loginSchema, serverLlmAccessModes, signupSchema, updateAccountSchema, type AdminSettings, type AuthStatus, type UserCreated, type UserSummary } from "@specharvest/shared";
 import { env } from "../config.ts";
 import * as db from "../db/sqlite.ts";
 import { httpError } from "../lib/http-error.ts";
-import { serverLlmAccess, setServerLlmAccess } from "../llm/resolve.ts";
+import { serverDailyLimitUsd, serverLlmAccess, setServerDailyLimitUsd, setServerLlmAccess } from "../llm/resolve.ts";
 import { createApiKey, listApiKeys, revokeApiKey } from "./api-keys.ts";
 import { hashToken, temporaryPassword } from "./crypto.ts";
-import { currentUser, requireAdmin, SESSION_COOKIE, sessionCookieOptions } from "./plugin.ts";
+import { currentUser, isAppClient, requireAdmin, SESSION_COOKIE, sessionCookieOptions } from "./plugin.ts";
 import { createSession, revokeSession } from "./sessions.ts";
 import { createUser, getUser, listUsers, setUserDisabled, toSummary, updateOwnAccount, verifyLogin } from "./users.ts";
 
@@ -17,14 +17,30 @@ const signupEnabled = () => db.getSetting<boolean>(SIGNUP_KEY) === true;
 const adminSettings = (): AdminSettings => ({
   signupEnabled: signupEnabled(),
   serverLlmAccess: serverLlmAccess(),
+  serverLlmDailyLimitUsd: serverDailyLimitUsd(),
   serverLlmConfigured: !!env.OPENROUTER_API_KEY,
 });
-const adminSettingsSchema = z.object({ signupEnabled: z.boolean().optional(), serverLlmAccess: z.enum(serverLlmAccessModes).optional() });
+const adminSettingsSchema = z.object({
+  signupEnabled: z.boolean().optional(),
+  serverLlmAccess: z.enum(serverLlmAccessModes).optional(),
+  serverLlmDailyLimitUsd: z.number().min(0).max(1000).optional(),
+});
 
 const idParam = (p: unknown) => z.coerce.number().int().positive().parse((p as { id?: string }).id);
 
 /** Brute-force guard for the credential endpoints (per IP). */
 const credentialLimit = { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } };
+
+/**
+ * Starts a session: the browser gets the httpOnly cookie; the Android app (X-SpecHarvest-Client: app) gets the
+ * token in the body and sends it back as `Authorization: Bearer` — no cookie crosses origins.
+ */
+function signIn(req: FastifyRequest, reply: FastifyReply, user: UserSummary) {
+  const { rawToken } = createSession(user.id);
+  if (isAppClient(req)) return { user, token: rawToken };
+  reply.setCookie(SESSION_COOKIE, rawToken, sessionCookieOptions());
+  return user;
+}
 
 export function registerAuthRoutes(app: FastifyInstance) {
   // ---------- Public ----------
@@ -35,20 +51,18 @@ export function registerAuthRoutes(app: FastifyInstance) {
     const body = loginSchema.parse(req.body);
     const user = await verifyLogin(body.email, body.password);
     if (!user) return reply.status(401).send({ error: "Invalid email or password" });
-    reply.setCookie(SESSION_COOKIE, createSession(user.id).rawToken, sessionCookieOptions());
-    return toSummary(user);
+    return signIn(req, reply, toSummary(user));
   });
 
   app.post("/api/auth/signup", credentialLimit, async (req, reply) => {
     if (!signupEnabled()) return reply.status(403).send({ error: "Sign-up is disabled — ask an admin for an account" });
     const body = signupSchema.parse(req.body);
     const user = await createUser(body.email, body.password, "user");
-    reply.setCookie(SESSION_COOKIE, createSession(user.id).rawToken, sessionCookieOptions());
-    return user;
+    return signIn(req, reply, user);
   });
 
   app.post("/api/auth/logout", async (req, reply) => {
-    const token = req.cookies[SESSION_COOKIE];
+    const token = req.cookies[SESSION_COOKIE] ?? /^Bearer\s+(\S+)$/i.exec(req.headers.authorization ?? "")?.[1];
     if (token) revokeSession(token);
     reply.clearCookie(SESSION_COOKIE, { path: "/" });
     return reply.status(204).send();
@@ -58,7 +72,8 @@ export function registerAuthRoutes(app: FastifyInstance) {
 
   app.get("/api/auth/me", async (req) => toSummary(getUser(currentUser(req).id)!));
 
-  app.patch("/api/auth/me", async (req) => {
+  // Checks the current password, so it's rate limited like login.
+  app.patch("/api/auth/me", credentialLimit, async (req) => {
     const body = updateAccountSchema.parse(req.body);
     if (!body.email && !body.newPassword) throw httpError(400, "Nothing to change");
     return updateOwnAccount(currentUser(req).id, body, req.sessionToken ? hashToken(req.sessionToken) : undefined);
@@ -110,8 +125,9 @@ export function registerAuthRoutes(app: FastifyInstance) {
     requireAdmin(req);
     const body = adminSettingsSchema.parse(req.body);
     if (body.signupEnabled !== undefined) db.setSetting(SIGNUP_KEY, body.signupEnabled);
-    // Who may use the server's LLM key when they have no key of their own (llm/resolve.ts).
+    // Who may use the server's LLM key when they have no key of their own, and how much a day (llm/resolve.ts).
     if (body.serverLlmAccess !== undefined) setServerLlmAccess(body.serverLlmAccess);
+    if (body.serverLlmDailyLimitUsd !== undefined) setServerDailyLimitUsd(body.serverLlmDailyLimitUsd);
     return adminSettings();
   });
 }

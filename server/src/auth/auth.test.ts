@@ -160,3 +160,99 @@ describe("ownership & scoping", () => {
     expect(db.getSetting(`notifications:${root.id}`)).toMatchObject({ ntfy: { topic: "old" } });
   });
 });
+
+describe("HTTP hardening", async () => {
+  const { default: Fastify } = await import("fastify");
+  const { registerAuth, SESSION_COOKIE } = await import("./plugin.ts");
+  const { registerSecurityHeaders } = await import("../lib/security-headers.ts");
+  const { errorHandler, httpError } = await import("../lib/http-error.ts");
+
+  const app = Fastify({ trustProxy: "loopback,linklocal,uniquelocal" });
+  await registerAuth(app);
+  registerSecurityHeaders(app);
+  app.setErrorHandler(errorHandler);
+  app.post("/api/thing", async () => ({ ok: true }));
+  app.post("/api/auth/login", async () => ({ ok: true }));
+  app.get("/api/boom", async () => {
+    throw new Error("SQLITE_ERROR near /data/specharvest.db");
+  });
+  app.get("/api/conflict", async () => {
+    throw httpError(409, "Already running");
+  });
+  app.get("/api/health", async (req) => ({ ip: req.ip }));
+  await app.ready();
+
+  const u = await users.createUser("web@example.com", "password1");
+  const cookie = `${SESSION_COOKIE}=${sessions.createSession(u.id).rawToken}`;
+  const key = apiKeys.createApiKey(u.id, "script").key;
+  const post = (url: string, headers: Record<string, string>) => app.inject({ method: "POST", url, headers: { host: "app.example", ...headers }, payload: {} });
+
+  it("refuses cookie-authenticated writes from another site", async () => {
+    expect((await post("/api/thing", { cookie, "sec-fetch-site": "cross-site" })).statusCode).toBe(403);
+    expect((await post("/api/thing", { cookie, "sec-fetch-site": "same-site" })).statusCode).toBe(403);
+    expect((await post("/api/thing", { cookie, origin: "https://evil.example" })).statusCode).toBe(403);
+    // Sign-in is guarded too (login CSRF), with or without a session.
+    expect((await post("/api/auth/login", { "sec-fetch-site": "cross-site" })).statusCode).toBe(403);
+  });
+
+  it("lets the app itself, scripts and API keys through", async () => {
+    expect((await post("/api/thing", { cookie, "sec-fetch-site": "same-origin" })).statusCode).toBe(200);
+    expect((await post("/api/thing", { cookie, origin: "http://app.example" })).statusCode).toBe(200);
+    expect((await post("/api/thing", { cookie })).statusCode).toBe(200);
+    expect((await post("/api/thing", { "x-api-key": key, "sec-fetch-site": "cross-site" })).statusCode).toBe(200);
+  });
+
+  it("sets security headers and keeps API responses out of caches", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/health" });
+    expect(res.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
+    expect(res.headers["content-security-policy"]).toContain("script-src 'self'");
+    expect(res.headers).toMatchObject({ "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "x-frame-options": "DENY", "cache-control": "no-store" });
+  });
+
+  it("hides internal errors but keeps deliberate ones", async () => {
+    const boom = await app.inject({ method: "GET", url: "/api/boom", headers: { cookie } });
+    expect(boom.statusCode).toBe(500);
+    expect(boom.json()).toEqual({ error: "Internal error" });
+    const conflict = await app.inject({ method: "GET", url: "/api/conflict", headers: { cookie } });
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.json()).toEqual({ error: "Already running" });
+  });
+
+  it("takes the client IP from trusted proxies only", async () => {
+    // Behind a local proxy: the address it appended counts, whatever the client claimed before it.
+    const viaProxy = await app.inject({ method: "GET", url: "/api/health", remoteAddress: "127.0.0.1", headers: { "x-forwarded-for": "1.2.3.4, 198.51.100.7" } });
+    expect(viaProxy.json().ip).toBe("198.51.100.7");
+    // Straight from the internet: X-Forwarded-For is ignored.
+    const direct = await app.inject({ method: "GET", url: "/api/health", remoteAddress: "203.0.113.9", headers: { "x-forwarded-for": "1.2.3.4" } });
+    expect(direct.json().ip).toBe("203.0.113.9");
+  });
+});
+
+describe("search rate limits", async () => {
+  const { default: Fastify } = await import("fastify");
+  const { registerAuth, searchLimit, SESSION_COOKIE } = await import("./plugin.ts");
+  const { errorHandler } = await import("../lib/http-error.ts");
+
+  const app = Fastify();
+  await registerAuth(app);
+  app.setErrorHandler(errorHandler);
+  app.post("/api/search", searchLimit({ typed: 2, filterOnly: 3 }), async () => ({ ok: true }));
+  await app.ready();
+
+  const u = await users.createUser("limits@example.com", "password1");
+  const cookie = `${SESSION_COOKIE}=${sessions.createSession(u.id).rawToken}`;
+  const search = (payload: object) => app.inject({ method: "POST", url: "/api/search", headers: { cookie }, payload });
+
+  it("limits typed requests and filter-only searches separately", async () => {
+    expect((await search({ query: "diesel" })).statusCode).toBe(200);
+    expect((await search({ query: "cheap" })).statusCode).toBe(200);
+    const limited = await search({ query: "red" });
+    expect(limited.statusCode).toBe(429);
+    expect(Number(limited.headers["retry-after"])).toBeGreaterThan(0);
+    expect(limited.json().error).toMatch(/rate limit/i);
+
+    // A blank query is a filter-only search: its own bucket, still open.
+    for (const body of [{ filters: [] }, { query: "  " }, { plan: { filters: [] } }]) expect((await search(body)).statusCode).toBe(200);
+    expect((await search({})).statusCode).toBe(429);
+  });
+});

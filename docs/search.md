@@ -1,6 +1,6 @@
 # Search & web lookups
 
-`POST /api/search` with `{ collectionId?, query? | plan?, enrich? }`.
+`POST /api/search` with `{ collectionId? | groupId?, query? | plan?, filters?, facets?, enrich? }` — see [API](api.md).
 
 ## Query plan
 
@@ -51,6 +51,53 @@ removing one re-runs the search with the edited `plan` (no LLM call).
    LanceDB (`item_id IN (…)` prefilter).
 4. An explicit sort wins; semantic score breaks ties; missing sort values go last.
 
+## Filter panel
+
+*Filters* on the Search tab lists every field of the searched items, each with
+the control that fits it. It is a sidebar from 1024 px up (the Filters button
+hides it, remembered per browser) and a bottom sheet below that. *Find a field*
+searches the English name and the page's own wording.
+
+| Field | Control | Condition |
+| --- | --- | --- |
+| Number specs, price | from / to | `gte` / `lte` |
+| Text specs, currency, collection (group or all collections) | every value with its count | one → `eq`, several → `in` (any of them) |
+| Yes/no specs (features) | Yes / No | `eq true` / `eq false` |
+| Title, description, product | contains | one `contains` per word (all must appear) |
+
+- **Listing fields** (`price`, `title`, `description`, `product` = the normalized
+  `identity`, `currency`, `collection`) are item columns that filter and sort like
+  spec keys. Except price they are *strict*: a listing without the value never
+  matches (a web lookup can't fill it in), instead of landing in "can't be judged
+  yet". A collection filter only narrows the already-checked read scope. The query
+  parser knows these fields too, for literal words no spec key covers.
+- **Counts** come with the search (`facets: true`, `server/src/search/facets.ts`,
+  one extra scan of the scope). Each field is counted over the items that pass
+  every *other* active filter, so its own options stay visible while it is
+  filtered ("petrol 18" next to a ticked "diesel"). An item missing a filtered
+  spec counts toward that field only. Text values are counted case-insensitively;
+  up to 500 per field are listed (rarer ones are matched with a contains box), and
+  ticked values always are.
+- A panel change replaces every condition on that field (LLM-made ones too),
+  shows at once as chips, and searches 350 ms later with the edited `plan` — no
+  LLM call, and `enrich: false`, so it never starts a paid web lookup. Items missing
+  a filtered spec still show under "can't be judged yet" with *Look up on the web*.
+- Fields set in the panel **stick across typed requests**: they are sent as
+  `filters` next to `query` and merged after parsing (cached plans never hold
+  them); the request's own condition on the same field wins. Switching the
+  collection or group clears them.
+- Text is compared Unicode-aware through `ulower()`, a JS function registered on
+  the SQLite connection (SQLite's `lower()` only folds ASCII, so "škoda" would miss
+  "Škoda"). `contains` matches literally: `%` and `_` are escaped.
+- Listings without a value don't vanish silently: under each listing field the
+  panel says how many have none ("30 have none", price: "on request") and, while
+  the field is filtered, that they are left out (price: under "can't be judged
+  yet"). Facets carry this as `missing`. A listing without a product name is
+  searched by its title.
+- Filter-only searches have their own, higher rate limit (240 a minute, typed
+  requests 30). If one is still hit, the UI waits the `Retry-After` time and
+  searches again ("updating in N s") instead of showing an error.
+
 ## Results list & sources
 
 When the plan names any fields (sort, filters, `show`, missing attributes), the
@@ -68,7 +115,14 @@ an entry is from the page. Cells show "looking up…" while a lookup job runs.
 Triggered when the plan has `missingAttributes`, or a filtered/sorted key is
 present on fewer than `ENRICH_COVERAGE_THRESHOLD` (80 %) of candidates. Also
 available manually ("Look up on the web" under the unknown bucket,
-`POST /api/enrich`).
+`POST /api/enrich`; shown only when an item there lacks a spec — price and
+other listing fields can't be looked up).
+
+In the UI only a **typed request** starts lookups by itself. Every other re-run
+(removing a chip, the filter panel, an empty Search with panel filters, the
+sold/removed toggle) sends `enrich: false`; the server then returns
+`enrichOffer` and the banner offers **Look up N products on the web**, so
+nothing is spent until it's pressed.
 
 - Items are grouped by `identity` (normalized brand/model/variant/year from
   extraction), so **one lookup answers every listing of the same model**.

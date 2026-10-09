@@ -11,7 +11,7 @@ for (const k of ["OPENROUTER_MODEL", "OPENROUTER_EXTRACTION_MODEL", "OPENROUTER_
 const db = await import("../db/sqlite.ts");
 const users = await import("../auth/users.ts");
 const keys = await import("./keys.ts");
-const { llmStatus, resolveModel, requireLlm, setServerLlmAccess, LlmUnavailableError } = await import("./resolve.ts");
+const { llmStatus, resolveModel, requireLlm, setServerLlmAccess, setServerDailyLimitUsd, serverDailyLimitUsd, DEFAULT_SERVER_DAILY_LIMIT_USD, LlmUnavailableError } = await import("./resolve.ts");
 
 afterAll(() => fs.rmSync(dataDir, { recursive: true, force: true }));
 
@@ -21,6 +21,8 @@ const user = await users.createUser("user@example.com", "password1", "user");
 describe("LLM resolver", () => {
   beforeEach(() => {
     setServerLlmAccess("everyone");
+    setServerDailyLimitUsd(DEFAULT_SERVER_DAILY_LIMIT_USD);
+    db.getDb().exec("DELETE FROM llm_usage");
     for (const u of [admin, user]) {
       for (const k of keys.listKeys(u.id)) keys.deleteKey(u.id, k.provider);
       keys.saveModelChoices(u.id, { fast: null, smart: null, web: null });
@@ -115,5 +117,34 @@ describe("LLM resolver", () => {
     expect(llmStatus(admin.id).effective.fast).toMatchObject({ funding: "own", provider: "anthropic" });
     expect(llmStatus(user.id).effective.fast?.funding).toBe("platform");
     expect(keys.listKeys(user.id)).toEqual([]);
+  });
+
+  it("stops a user's work on the server key once today's limit is spent; admins and own keys aren't limited", () => {
+    const spend = (userId: number, cost: number, at = Date.now()) =>
+      db.getDb()
+        .prepare("INSERT INTO llm_usage (created_at, purpose, provider, model, funding, cost, user_id) VALUES (?, 'extract', 'openrouter', 'm', 'platform', ?, ?)")
+        .run(at, cost, userId);
+    expect(serverDailyLimitUsd()).toBe(1);
+    setServerDailyLimitUsd(0.05);
+
+    spend(user.id, 0.04);
+    spend(user.id, 0.5, db.startOfDay() - 1000); // yesterday's spend doesn't count
+    expect(llmStatus(user.id).effective.fast?.funding).toBe("platform");
+
+    spend(user.id, 0.02);
+    expect(llmStatus(user.id).effective.fast).toBeNull();
+    expect(llmStatus(user.id).unavailable.fast).toMatch(/today's \$0\.05 on the server's LLM key/);
+    expect(() => requireLlm(user.id, "fast")).toThrow(LlmUnavailableError);
+    expect(() => resolveModel(user.id, "extract")).toThrow(LlmUnavailableError);
+
+    spend(admin.id, 5);
+    expect(llmStatus(admin.id).effective.fast?.funding).toBe("platform");
+
+    keys.saveKey(user.id, "deepseek", "sk-deepseek-123456", null);
+    expect(llmStatus(user.id).effective.fast).toMatchObject({ funding: "own", provider: "deepseek" });
+
+    setServerDailyLimitUsd(0);
+    keys.deleteKey(user.id, "deepseek");
+    expect(llmStatus(user.id).effective.fast?.funding).toBe("platform");
   });
 });

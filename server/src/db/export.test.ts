@@ -11,12 +11,13 @@ const db = await import("./sqlite.ts");
 
 afterAll(() => fs.rmSync(dataDir, { recursive: true, force: true }));
 
-const addUser = (email: string) =>
-  Number(db.getDb().prepare("INSERT INTO users (email, password_hash, role, created_at) VALUES (?, 'x', 'user', ?)").run(email, Date.now()).lastInsertRowid);
+const addUser = (email: string, role: "user" | "admin" = "user") =>
+  Number(db.getDb().prepare("INSERT INTO users (email, password_hash, role, created_at) VALUES (?, 'x', ?, ?)").run(email, role, Date.now()).lastInsertRowid);
 
 describe("collection export / import", () => {
   const owner = addUser("owner@example.com");
-  const importer = addUser("importer@example.com");
+  const importerId = addUser("importer@example.com");
+  const importer = { id: importerId, role: "user" as const };
 
   const sourceId = db.createCollection("Bikes", "https://shop.example/bikes", "shop.example", owner);
   db.saveDetection(sourceId, { listItemSelector: ".card", paginationType: "pages", nextSelector: "a.next" });
@@ -54,8 +55,8 @@ describe("collection export / import", () => {
     const { collectionId, itemIds } = db.importCollection(exported, importer);
     expect(collectionId).not.toBe(sourceId);
     expect(itemIds).toHaveLength(2);
-    const c = db.getCollection(collectionId, { id: importer, role: "user" })!;
-    expect(c).toMatchObject({ name: "Bikes", ownerId: importer, isShared: false, canEdit: true, itemCount: 2, grouping: "loose" });
+    const c = db.getCollection(collectionId, importer)!;
+    expect(c).toMatchObject({ name: "Bikes", ownerId: importerId, isShared: false, canEdit: true, itemCount: 2, grouping: "loose" });
     expect(c.detection).toMatchObject({ paginationType: "pages" });
 
     const items = db.listItems(collectionId, 10);
@@ -81,7 +82,7 @@ describe("collection export / import", () => {
   it("exports every readable collection and imports the bundle", () => {
     const other = db.createCollection("Cars", "https://shop.example/cars", "shop.example", owner);
     db.upsertItem({ collectionId: other, url: "https://shop.example/car", title: "Car", price: 5000, currency: "EUR", mainImage: null, description: null, identity: null, specs: {}, rawText: null });
-    const hidden = db.createCollection("Private", "https://elsewhere.example", "elsewhere.example", importer);
+    const hidden = db.createCollection("Private", "https://elsewhere.example", "elsewhere.example", importerId);
 
     const bundle = importRequestSchema.parse(JSON.parse(JSON.stringify(db.exportCollections({ id: owner, role: "user" }))));
     if (!("collections" in bundle)) throw new Error("expected a bundle");
@@ -92,7 +93,7 @@ describe("collection export / import", () => {
     expect(imported).toHaveLength(2);
     expect(db.listCollections()).toHaveLength(before + 2);
     const cars = imported.map((i) => db.getCollection(i.collectionId)!).find((c) => c.name === "Cars")!;
-    expect(cars).toMatchObject({ ownerId: importer, itemCount: 1 });
+    expect(cars).toMatchObject({ ownerId: importerId, itemCount: 1 });
     db.deleteCollection(hidden);
   });
 
@@ -109,5 +110,70 @@ describe("collection export / import", () => {
     const broken = { ...exported, items: [...exported.items, { ...exported.items[0], url: "https://shop.example/c", specs: { bad: 1n as unknown as number } }] };
     expect(() => db.importCollection(broken, importer)).toThrow();
     expect(db.listCollections()).toHaveLength(before);
+  });
+  describe("hardening", () => {
+    const admin = { id: addUser("admin@example.com", "admin"), role: "admin" as const };
+    const item0 = exported.items[0];
+    const file = (over: Partial<typeof exported> = {}) => collectionExportSchema.parse(JSON.parse(JSON.stringify({ ...exported, ...over })));
+
+    it("only accepts http(s) links: item and start URLs must be, images and sources are dropped otherwise", () => {
+      expect(collectionExportSchema.safeParse({ ...exported, items: [{ ...item0, url: "javascript:alert(1)" }] }).success).toBe(false);
+      expect(collectionExportSchema.safeParse({ ...exported, collection: { ...exported.collection, startUrl: "file:///etc/passwd" } }).success).toBe(false);
+      const parsed = file({ items: [{ ...item0, mainImage: "javascript:alert(1)", sources: { weight_kg: { origin: "web", sourceUrl: "data:text/html,x", confidence: 1 } } }] });
+      expect(parsed.items[0].mainImage).toBeNull();
+      expect(parsed.items[0].sources.weight_kg.sourceUrl).toBeNull();
+    });
+
+    it("drops a detection that doesn't fit and URL patterns that could backtrack", () => {
+      const badShape = file({ collection: { ...exported.collection, detection: { listItemSelector: ".c", paginationType: "nope" } as never } });
+      expect(badShape.collection.detection).toBeNull();
+
+      const evil = file({ collection: { ...exported.collection, name: "Evil", detection: { listItemSelector: ".card", paginationType: "pages", itemUrlPattern: "^(a+)+$" } } });
+      const { collectionId } = db.importCollection(evil, importer);
+      expect(db.getCollection(collectionId)!.detection).toMatchObject({ listItemSelector: ".card", itemUrlPattern: null });
+
+      const safe = file({ collection: { ...exported.collection, name: "Safe", detection: { listItemSelector: ".card", paginationType: "pages", itemUrlPattern: "^https://shop\\.example/p/" } } });
+      expect(db.getCollection(db.importCollection(safe, importer).collectionId)!.detection?.itemUrlPattern).toBe("^https://shop\\.example/p/");
+    });
+
+    it("caps timestamps from the future", () => {
+      const future = Date.now() + 365 * 86_400_000;
+      const { collectionId } = db.importCollection(file({ collection: { ...exported.collection, name: "Future", createdAt: future }, items: [{ ...item0, indexedAt: future }] }), importer);
+      expect(db.getCollection(collectionId)!.createdAt).toBeLessThanOrEqual(Date.now());
+      expect(db.listItems(collectionId, 10)[0].indexedAt).toBeLessThanOrEqual(Date.now());
+    });
+
+    it("only an admin's import adds shared grouping and lookup cache rows", () => {
+      const caches = {
+        aliases: [{ identity: "trike z", canonical: "trike z 2025" }],
+        webFacts: [{ identity: "trike z 2025", key: "weight_kg", value: 99, unit: "kg", sourceUrl: null, confidence: 1, found: true, fetchedAt: Date.now() }],
+      };
+      db.importCollection(file({ ...caches, collection: { ...exported.collection, name: "Trikes" } }), importer);
+      expect(db.getCanonicalIdentity("trike z")).toBe("trike z");
+      expect(db.getWebFact("trike z 2025", "weight_kg")).toBeNull();
+
+      db.importCollection(file({ ...caches, collection: { ...exported.collection, name: "Trikes" } }), admin);
+      expect(db.getCanonicalIdentity("trike z")).toBe("trike z 2025");
+      expect(db.getWebFact("trike z 2025", "weight_kg")?.value).toBe(99);
+    });
+
+    it("never reuses imported rows for other collections until this server extracted or detected them", () => {
+      const url = "https://solo.example/item";
+      const imported = file({
+        collection: { ...exported.collection, name: "Solo", host: "solo.example", detection: { listItemSelector: ".solo", paginationType: "pages" } },
+        items: [{ ...item0, url, identity: "solo bike 2030", specs: { power_kw: 77 }, contentHash: "hx" }],
+      });
+      const { collectionId } = db.importCollection(imported, importer);
+      expect(db.findReusableExtraction(url, "hx", -1)).toBeNull();
+      expect(db.findPageValue(["solo bike 2030"], "power_kw")).toBeNull();
+      expect(db.findDetectionForHost("solo.example", -1)).toBeNull();
+
+      // A crawl of the imported collection re-extracts the item and re-detects the listing.
+      db.upsertItem({ collectionId, url, title: "Solo", price: null, currency: null, mainImage: null, description: null, identity: "solo bike 2030", specs: { power_kw: 77 }, rawText: null, contentHash: "hx" });
+      db.saveDetection(collectionId, { listItemSelector: ".solo", paginationType: "pages" });
+      expect(db.findReusableExtraction(url, "hx", -1)?.specs).toContainEqual(expect.objectContaining({ key: "power_kw", value: 77 }));
+      expect(db.findPageValue(["solo bike 2030"], "power_kw")).toEqual({ value: 77, url });
+      expect(db.findDetectionForHost("solo.example", -1)).toMatchObject({ listItemSelector: ".solo" });
+    });
   });
 });

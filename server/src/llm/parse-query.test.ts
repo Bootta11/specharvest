@@ -44,4 +44,53 @@ describe("sanitizePlan", () => {
   it("defaults show to an empty list for older plans", () => {
     expect(sanitizePlan({ filters: [], sort: null, semanticText: null, missingAttributes: [] }, keys).show).toEqual([]);
   });
+
+  it("knows every listing field", () => {
+    const plan = sanitizePlan(
+      {
+        filters: [
+          { key: "description", op: "contains", value: "garage" },
+          { key: "product", op: "contains", value: "golf" },
+          { key: "currency", op: "eq", value: "EUR" },
+          { key: "collection", op: "in", value: [2, 5] },
+        ],
+        sort: { key: "title", dir: "asc" },
+        semanticText: null,
+        missingAttributes: [],
+      },
+      keys,
+    );
+    expect(plan.filters.map((f) => f.key)).toEqual(["description", "product", "currency", "collection"]);
+    expect(plan.sort?.key).toBe("title");
+    expect(plan.missingAttributes).toEqual([]);
+  });
+
+  it("keeps lists for `in` only", () => {
+    const plan = sanitizePlan(
+      {
+        filters: [
+          { key: "fuel_type", op: "eq", value: ["diesel", "hybrid"] },
+          { key: "power_kw", op: "in", value: [100] },
+          { key: "power_kw", op: "in", value: 90 },
+          { key: "power_kw", op: "gt", value: [1, 2] },
+          { key: "color", op: "in", value: ["red", "red", "blue"] },
+          { key: "color", op: "in", value: null },
+        ],
+        sort: null,
+        semanticText: null,
+        missingAttributes: [],
+      },
+      keys,
+    );
+    expect(plan.filters).toEqual([
+      { key: "fuel_type", op: "in", value: ["diesel", "hybrid"] },
+      { key: "power_kw", op: "eq", value: 100 },
+      { key: "power_kw", op: "eq", value: 90 },
+      { key: "color", op: "in", value: ["red", "blue"] },
+    ]);
+    expect(plan.missingAttributes.map((m) => [m.key, m.type])).toEqual([
+      ["fuel_type", "string"],
+      ["color", "string"],
+    ]);
+  });
 });

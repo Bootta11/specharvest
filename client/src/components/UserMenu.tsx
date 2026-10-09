@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { UserSummary } from "@specharvest/shared";
+import { isNative, serverUrl } from "../lib/platform.ts";
 
 /** Header avatar with the account / admin / sign-out menu. */
 export function UserMenu({ user, onAccount, onLlm, onAdmin, onLogout }: { user: UserSummary; onAccount: () => void; onLlm: () => void; onAdmin: () => void; onLogout: () => void }) {
@@ -25,7 +26,7 @@ export function UserMenu({ user, onAccount, onLlm, onAdmin, onLogout }: { user: 
   const item = "block w-full px-4 py-2.5 text-left text-sm hover:bg-stone-100 dark:hover:bg-stone-800";
 
   return (
-    <div ref={rootRef} className="relative">
+    <div ref={rootRef} className="relative shrink-0">
       <button
         onClick={() => setOpen((o) => !o)}
         className="grid size-8 place-items-center rounded-full bg-brand-700 text-sm font-semibold uppercase text-white hover:bg-brand-800"
@@ -42,7 +43,10 @@ export function UserMenu({ user, onAccount, onLlm, onAdmin, onLogout }: { user: 
             <div className="truncate text-sm font-medium" title={user.email}>
               {user.email}
             </div>
-            <div className="text-xs text-stone-500">{user.role === "admin" ? "Admin" : "User"}</div>
+            <div className="truncate text-xs text-stone-500">
+              {user.role === "admin" ? "Admin" : "User"}
+              {isNative && ` · ${serverUrl().replace(/^https?:\/\//, "")}`}
+            </div>
           </div>
           <button role="menuitem" className={item} onClick={pick(onAccount)}>
             Account & API keys

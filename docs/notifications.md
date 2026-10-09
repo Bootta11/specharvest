@@ -40,7 +40,18 @@ breaks existing subscriptions, so re-enable push in each browser afterwards.
 
 Secrets (tokens, webhook URLs, Apprise URLs) are never sent back to the UI.
 The API returns `********` in their place, and saving the form unchanged keeps
-the stored value.
+the stored value. They're stored encrypted with `ENCRYPTION_KEY`, as are the
+generated Web Push keys. If that key changes, re-enter the secrets and turn
+push on again in each browser.
+
+**Where notifications may go.** Admins may send to any address, including
+your LAN. Everyone else is limited to public hosts plus the hosts in
+`OUTBOUND_ALLOWED_HOSTS` (default `apprise`, the bundled container). Saving a
+channel that points elsewhere fails with the reason. For non-admins, Apprise
+URLs that forward to any address (`json://`, `xml://`, `form://`,
+`apprise://`) and URLs with a local host are refused too. Redirects are never
+followed, so use the final URL. Set `ALLOW_PRIVATE_TARGETS=true` to lift the
+address checks for everyone on a single-user LAN setup.
 
 Set `PUBLIC_URL` (e.g. `https://specharvest.example`) to include a link to the
 job in ntfy, Telegram, Discord and Apprise messages.

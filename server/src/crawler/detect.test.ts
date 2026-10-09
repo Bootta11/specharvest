@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { inferItemUrlPattern } from "./detect.ts";
 import { normalizeItemUrl } from "./paginate.ts";
 import { findRepeatedClassNames, sanitizeForLlm } from "./sanitize.ts";
+import { isSafeItemUrlPattern, safeItemUrlPattern, withSafeUrlPattern } from "./url-pattern.ts";
 
 describe("inferItemUrlPattern", () => {
   it("finds the dominant first path segment", () => {
@@ -30,5 +31,25 @@ describe("sanitizeForLlm", () => {
 
   it("finds repeated classes", () => {
     expect(findRepeatedClassNames('<i class="c x"></i><i class="c"></i><i class="c y"></i>')).toEqual(["c"]);
+  });
+});
+
+describe("isSafeItemUrlPattern", () => {
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  it("accepts what our detection produces", () => {
+    expect(isSafeItemUrlPattern(inferItemUrlPattern(["https://olx.ba/artikal/1", "https://olx.ba/artikal/2", "https://olx.ba/artikal/3"])!)).toBe(true);
+    // heuristicDetection's shape: escaped origin, literal and [^/?#]+ segments, end anchor.
+    expect(isSafeItemUrlPattern(`^${esc("https://www.auto.example")}/oglasi/[^/?#]+/[^/?#]+(?:[/?#]|$)`)).toBe(true);
+    expect(isSafeItemUrlPattern(`^${esc("http://[::1]:8080/p/")}`)).toBe(true);
+  });
+
+  it("rejects anything that could backtrack or isn't anchored", () => {
+    for (const p of ["^(a+)+$", "(.*)*", "^a\\1", "^[a-z]+$", "^.*", "^https://x\\.com/(?:a|b)", "^https://x\\.com/a{1,9}", "https://x\\.com/"]) {
+      expect(isSafeItemUrlPattern(p), p).toBe(false);
+    }
+    expect(safeItemUrlPattern("^(a+)+$")).toBeNull();
+    expect(withSafeUrlPattern({ listItemSelector: ".c", itemUrlPattern: "^(a+)+$" })).toEqual({ listItemSelector: ".c", itemUrlPattern: null });
+    expect(withSafeUrlPattern(null)).toBeNull();
   });
 });

@@ -1,6 +1,6 @@
 import PQueue from "p-queue";
 import { z } from "zod";
-import type { Item, Job, LookupStats, MissingAttribute, SpecKey, SpecValue } from "@specharvest/shared";
+import { isHttpUrl, type Item, type Job, type LookupStats, type MissingAttribute, type SpecKey, type SpecValue } from "@specharvest/shared";
 import { env } from "../config.ts";
 import * as db from "../db/sqlite.ts";
 import { upsertVector } from "../db/lance.ts";
@@ -11,7 +11,7 @@ import { coerceToType } from "../llm/extract.ts";
 import { proposeKeyMerges } from "../llm/consolidate.ts";
 import { createLogger, errorMessage } from "../lib/logger.ts";
 import { retireChannel } from "../sse/hub.ts";
-import { embeddingText, emitJob, jobChannel, jobLog, patchJob } from "../crawler/job.ts";
+import { assertJobSlot, embeddingText, emitJob, jobChannel, jobLog, patchJob } from "../crawler/job.ts";
 import { autoConfirmMatches, canonicalizeIdentities, lookupIdentity, resolvedIdentity } from "./group.ts";
 import { candidateAttributes } from "./predict.ts";
 
@@ -83,7 +83,7 @@ async function lookup(item: Item, attrs: MissingAttribute[], extras: MissingAttr
       value,
       unit: r?.unit ?? a.unit ?? null,
       confidence: r?.confidence ?? null,
-      sourceUrl: (r?.source_url && /^https?:/.test(r.source_url) ? r.source_url : null) ?? res.citations[0]?.url ?? null,
+      sourceUrl: [r?.source_url, res.citations[0]?.url].find(isHttpUrl) ?? null,
     };
   });
   return { results, webSearches: res.webSearches };
@@ -198,6 +198,7 @@ export function startEnrichment(input: EnrichInput): Job {
     const job = db.getJob(running);
     if (job && (job.status === "queued" || job.status === "running")) return job;
   }
+  assertJobSlot(input.userId);
   const job = db.createJob("enrich", input.collectionId, undefined, input.userId);
   activeByScope.set(scope, job.id);
   emitJob(job);

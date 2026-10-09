@@ -1,11 +1,14 @@
 import type { Item, SpecKey, SpecValue } from "@specharvest/shared";
 import { formatSpecValue, sourceHost, specLabel } from "@specharvest/shared";
+import { safeUrl } from "../lib/api.ts";
+
+/** How a currency is written after an amount ("BAM" is shown as "KM"). */
+export const currencyLabel = (currency: string | null) => (currency === "BAM" ? "KM" : currency);
 
 export function formatPrice(price: number | null, currency: string | null) {
   if (price === null) return "Price on request";
   const n = price.toLocaleString("en-US", { maximumFractionDigits: 2 });
-  if (!currency) return n;
-  return currency === "BAM" ? `${n} KM` : `${n} ${currency}`;
+  return currency ? `${n} ${currencyLabel(currency)}` : n;
 }
 
 export function GlobeIcon({ className = "size-3.5" }: { className?: string }) {
@@ -46,16 +49,17 @@ export function SourceBadge({ item, k, compact = false }: { item: Item; k: strin
   const source = item.sources[k];
   const link = "inline-flex items-center gap-1 whitespace-nowrap hover:underline";
   if (source?.origin === "web") {
-    const host = sourceHost(source.sourceUrl);
-    const title = `Found by web lookup${source.confidence != null ? ` (${Math.round(source.confidence * 100)}% confident)` : ""}${source.sourceUrl ? ` — ${source.sourceUrl}` : ""}`;
+    const sourceUrl = safeUrl(source.sourceUrl);
+    const host = sourceHost(sourceUrl);
+    const title = `Found by web lookup${source.confidence != null ? ` (${Math.round(source.confidence * 100)}% confident)` : ""}${sourceUrl ? ` — ${sourceUrl}` : ""}`;
     const body = (
       <>
         <GlobeIcon className="size-3.5 shrink-0" />
         {!compact && <span className="truncate">{host ?? "web"}</span>}
       </>
     );
-    return source.sourceUrl ? (
-      <a href={source.sourceUrl} target="_blank" rel="noreferrer" title={title} className={`${link} min-w-0 text-sky-600 dark:text-sky-400`} onClick={(e) => e.stopPropagation()}>
+    return sourceUrl ? (
+      <a href={sourceUrl} target="_blank" rel="noreferrer" title={title} className={`${link} min-w-0 text-sky-600 dark:text-sky-400`} onClick={(e) => e.stopPropagation()}>
         {body}
       </a>
     ) : (
@@ -65,7 +69,7 @@ export function SourceBadge({ item, k, compact = false }: { item: Item; k: strin
     );
   }
   return (
-    <a href={item.url} target="_blank" rel="noreferrer" title="Scraped from the listing page" className={`${link} text-stone-400 hover:text-stone-600 dark:text-stone-500 dark:hover:text-stone-300`} onClick={(e) => e.stopPropagation()}>
+    <a href={safeUrl(item.url)} target="_blank" rel="noreferrer" title="Scraped from the listing page" className={`${link} text-stone-400 hover:text-stone-600 dark:text-stone-500 dark:hover:text-stone-300`} onClick={(e) => e.stopPropagation()}>
       <PageIcon className="size-3.5 shrink-0" />
       {!compact && <span>Listing</span>}
     </a>
@@ -109,8 +113,8 @@ export function ItemCard({ item, keys, highlightKeys, onOpen }: Props) {
   return (
     <article className={`card flex flex-col overflow-hidden ${item.goneAt ? "opacity-60" : ""}`}>
       <button onClick={onOpen} className="relative block aspect-[4/3] w-full overflow-hidden bg-stone-100 dark:bg-stone-800" aria-label={`Details for ${item.title}`}>
-        {item.mainImage ? (
-          <img src={item.mainImage} alt="" loading="lazy" referrerPolicy="no-referrer" className="size-full object-cover transition hover:scale-[1.02]" />
+        {safeUrl(item.mainImage) ? (
+          <img src={safeUrl(item.mainImage)} alt="" loading="lazy" referrerPolicy="no-referrer" className="size-full object-cover transition hover:scale-[1.02]" />
         ) : (
           <span className="flex size-full items-center justify-center text-sm text-stone-400">No image</span>
         )}
@@ -142,7 +146,7 @@ export function ItemCard({ item, keys, highlightKeys, onOpen }: Props) {
           <span>
             {Object.keys(item.specs).length} specs{features ? ` · ${features} features` : ""}
           </span>
-          <a href={item.url} target="_blank" rel="noreferrer" className="font-medium text-brand-700 hover:underline dark:text-brand-500">
+          <a href={safeUrl(item.url)} target="_blank" rel="noreferrer" className="font-medium text-brand-700 hover:underline dark:text-brand-500">
             Open listing ↗
           </a>
         </div>

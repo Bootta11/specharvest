@@ -1,5 +1,6 @@
 import type { Item, QueryPlan, SpecKey } from "@specharvest/shared";
 import { formatSpecValue, specLabel } from "@specharvest/shared";
+import { safeUrl } from "../lib/api.ts";
 import { formatPrice, GlobeIcon, GoneBadge, PageIcon, SourceBadge } from "./ItemCard.tsx";
 
 interface Props {
@@ -52,8 +53,8 @@ export function CompareTable({ items, keys, fieldKeys, sort, pendingKeys, onOpen
                 <td className="px-3 py-2 align-top text-stone-400">{i + 1}</td>
                 <td className="sticky left-0 z-10 max-w-80 bg-white px-3 py-2 align-top group-hover:bg-stone-50 dark:bg-stone-900 dark:group-hover:bg-stone-800">
                   <button onClick={() => onOpen(item)} className="flex w-full min-w-0 items-center gap-3 text-left">
-                    {item.mainImage ? (
-                      <img src={item.mainImage} alt="" loading="lazy" referrerPolicy="no-referrer" className="size-10 shrink-0 rounded object-cover" />
+                    {safeUrl(item.mainImage) ? (
+                      <img src={safeUrl(item.mainImage)} alt="" loading="lazy" referrerPolicy="no-referrer" className="size-10 shrink-0 rounded object-cover" />
                     ) : (
                       <span className="size-10 shrink-0 rounded bg-stone-100 dark:bg-stone-800" />
                     )}

@@ -1,0 +1,57 @@
+{
+  "title": "specharvest docs",
+  "src": "..",
+  "out": "../.run/docs-site",
+  "favicon": "assets/favicon.svg",
+  "theme": {
+    "customJs": [
+      "assets/js/github-anchors.js"
+    ]
+  },
+  "markdown": {
+    "breaks": false
+  },
+  "plugins": {
+    "ai": {
+      "enabled": false
+    }
+  },
+  "navigation": [
+    {
+      "title": "Overview",
+      "path": "/"
+    },
+    {
+      "title": "Architecture",
+      "path": "/docs/architecture"
+    },
+    {
+      "title": "Crawling",
+      "path": "/docs/crawling"
+    },
+    {
+      "title": "Search & web lookups",
+      "path": "/docs/search"
+    },
+    {
+      "title": "API",
+      "path": "/docs/api"
+    },
+    {
+      "title": "Users & access",
+      "path": "/docs/auth"
+    },
+    {
+      "title": "LLM providers",
+      "path": "/docs/llm-providers"
+    },
+    {
+      "title": "Deployment",
+      "path": "/docs/deployment"
+    },
+    {
+      "title": "Notifications",
+      "path": "/docs/notifications"
+    }
+  ]
+}

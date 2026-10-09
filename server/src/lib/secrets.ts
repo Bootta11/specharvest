@@ -55,6 +55,11 @@ export function encryptSecret(plain: string, aad: string): string {
   return [VERSION, b64(iv), b64(cipher.getAuthTag()), b64(ct)].join(".");
 }
 
+/** Whether a stored value is an encryptSecret blob (rather than plain text saved before encryption existed). */
+export function isEncryptedSecret(value: string): boolean {
+  return /^v1\.[\w-]+\.[\w-]+\.[\w-]*$/.test(value);
+}
+
 /** Throws when the blob was tampered with, belongs to another `aad`, or the master key changed. */
 export function decryptSecret(blob: string, aad: string): string {
   const [version, iv, tag, ct] = blob.split(".");

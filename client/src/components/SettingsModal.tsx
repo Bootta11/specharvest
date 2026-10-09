@@ -12,6 +12,7 @@ import {
   setBrowserNotify,
   showLocalNotification,
 } from "../lib/api.ts";
+import { isNative } from "../lib/platform.ts";
 
 type ChannelKey = Exclude<NotificationChannel, "push">;
 type TestState = { busy?: boolean; ok?: boolean; error?: string };
@@ -167,8 +168,13 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
               </section>
 
               <section>
-                <h3 className="mb-1 text-sm font-semibold">This browser</h3>
-                {!browserNotifySupported() ? (
+                <h3 className="mb-1 text-sm font-semibold">{isNative ? "This phone" : "This browser"}</h3>
+                {isNative ? (
+                  <p className="text-sm text-stone-500">
+                    The app notifies you when a crawl or web lookup finishes, while it's open or in the background. Jobs that finish while it's closed show up next time
+                    you open it — for alerts then, use one of the channels below (e.g. ntfy or Telegram).
+                  </p>
+                ) : !browserNotifySupported() ? (
                   <p className="text-sm text-stone-500">This browser doesn't support notifications.</p>
                 ) : (
                   <>

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { llmTiers, type LlmModelChoices, type LlmModelOption, type LlmProviderInfo, type LlmSettingsResponse, type LlmTestResult, type LlmTier } from "@specharvest/shared";
-import { api } from "../lib/api.ts";
+import { api, formatUsd } from "../lib/api.ts";
 import { Field, Modal, Notice } from "./Modal.tsx";
 
 const TIERS: Record<LlmTier, { title: string; hint: string }> = {
@@ -116,6 +116,9 @@ function Status({ settings }: { settings: LlmSettingsResponse }) {
             : settings.keys.length
               ? "Only your own keys are used — the server's key isn't available to you."
               : "The server's key isn't available to you — add a key of your own."}
+        {server.configured && server.allowed && server.dailyLimitUsd > 0 && (
+          <> Today you've used {formatUsd(server.spentTodayUsd)} of your {formatUsd(server.dailyLimitUsd)} a day on it.</>
+        )}
       </p>
     </section>
   );

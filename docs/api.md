@@ -1,12 +1,23 @@
 # HTTP API
 
 Every route except `/api/health` and `/api/auth/{status,login,signup,logout}`
-needs a signed-in user: the `specharvest_session` cookie set by login, or an
-`X-Api-Key: shk_…` header (create keys under *Account*). Without one the API
+needs a signed-in user: the `specharvest_session` cookie set by login, the
+Android app's `Authorization: Bearer <session token>` (see [Android app](mobile-app.md)),
+or an `X-Api-Key: shk_…` header (create keys under *Account*). Without one the API
 answers `401`. What a user sees is scoped to them — see [auth](auth.md):
 collections they own or that are shared (admins: all), and only their own jobs,
 searches, spend and notification channels. Someone else's private collection or
 job answers `404`; changing a collection shared with you answers `403`.
+
+Cookie-authenticated writes from another site's page answer `403` (checked via
+`Sec-Fetch-Site`/`Origin`; `X-Api-Key` and bearer-token requests are exempt). With the header
+`X-SpecHarvest-Client: app`, login and sign-up answer `{user, token}` and set no cookie. CORS is
+allowed only for the app's origins (`https://localhost`, `http://localhost`, `APP_ORIGINS`), never with
+cookies. Routes that cost
+LLM money or start work answer `429` (with `Retry-After`) past their per-user rate (e.g. 30 typed
+searches — with a `query` — and, counted apart, 240 filter-only searches, or 10 crawls a minute), and so does starting a job while you already have
+`MAX_ACTIVE_JOBS_PER_USER` running. Unexpected server errors answer `500` with
+`{error: "Internal error"}`; the details only go to the server log.
 
 ```bash
 curl -H "X-Api-Key: shk_…" https://specharvest.example/api/collections
@@ -28,7 +39,7 @@ curl -H "X-Api-Key: shk_…" https://specharvest.example/api/collections
 | `GET /api/users` | admin | all users |
 | `POST /api/users` | admin; `{email, role?: "user"\|"admin"}` | user + `temporaryPassword` (shown once) (201) |
 | `PATCH /api/users/:id` | admin; `{disabled}` | user (disabling signs them out; their data stays) |
-| `GET /api/settings/admin`, `PUT /api/settings/admin` | admin; `{signupEnabled?, serverLlmAccess?: "everyone"\|"admins"\|"nobody"}` | `{signupEnabled, serverLlmAccess, serverLlmConfigured}` |
+| `GET /api/settings/admin`, `PUT /api/settings/admin` | admin; `{signupEnabled?, serverLlmAccess?: "everyone"\|"admins"\|"nobody", serverLlmDailyLimitUsd?}` | `{signupEnabled, serverLlmAccess, serverLlmDailyLimitUsd, serverLlmConfigured}` (daily limit per non-admin on the server key, USD, 0 = none) |
 
 ## LLM provider (your own keys)
 
@@ -48,13 +59,13 @@ See [LLM providers](llm-providers.md). Tiers: `fast`, `smart`, `web`.
 | Method & path | Body / query | Returns |
 | --- | --- | --- |
 | `GET /api/health` (also `HEAD`) | public | `{ok, status, checks: {database: {ok, latencyMs}}, uptimeSeconds, timestamp}`; 503 with `ok:false` if the DB is down |
-| `GET /api/config` | | `version` (commit), proxy flag, crawl defaults, and for you: `llmConfigured`, `webSearchEnabled`, `llm: {effective, unavailable}` per tier |
+| `GET /api/config` | | `version` (commit), proxy flag, crawl `defaults` and your `limits` (`{maxPages, maxItems}`), and for you: `llmConfigured`, `webSearchEnabled`, `llm: {effective, unavailable}` per tier |
 | `GET /api/collections` | | readable collections with item counts, `llmCost` (USD), `ownerEmail`, `isShared`, `grouping`, `canEdit` |
 | `PATCH /api/collections/:id` | `{name?, isShared?, grouping?: "strict" \| "loose"}` (owner/admin; switching to `loose` groups waiting single-candidate matches) | collection |
 | `DELETE /api/collections/:id` | | deletes items + vectors |
 | `GET /api/collections/:id/export` | (any reader) | `.json` download (see [Export file](#export-file)) |
 | `GET /api/collections/export` | | `.json` download of every readable collection (`format: "specharvest.collections"`) |
-| `POST /api/collections/import` | an export file, single or *Export all* (≤ 500 MB) | new private collection(s) of the caller (201): the collection, or an array for a bundle (all or nothing); vectors are rebuilt in the background |
+| `POST /api/collections/import` | an export file, single or *Export all* (≤ `IMPORT_MAX_MB`, default 50 MB) | new private collection(s) of the caller (201): the collection, or an array for a bundle (all or nothing); vectors are rebuilt in the background |
 | `GET /api/groups` | | your groups `[{id, name, collectionIds, itemCount, createdAt}]` — members you can no longer read are left out |
 | `POST /api/groups`, `PATCH /api/groups/:id` | `{name, collectionIds}` (PATCH: either) — readable collections only | group (POST: 201) |
 | `DELETE /api/groups/:id` | | `{ok}` — the collections stay |
@@ -62,8 +73,8 @@ See [LLM providers](llm-providers.md). Tiers: `fast`, `smart`, `web`.
 | `POST /api/collections/:id/consolidate` | | `{merges, moved}` — merge duplicate keys now |
 | `GET /api/items` | `?collectionId&limit&offset&includeGone=1` | items (gone listings hidden unless `includeGone`) |
 | `GET /api/items/:id` | | item incl. `rawText` |
-| `POST /api/crawl` | `{url, collectionId?, name?, maxPages?, maxItems?, useProxy?, mode?: "quick"\|"deep"\|"full"}` (`refresh: true` = `full`; `name` sets the collection name instead of deriving it from the page title; `collectionId` re-crawls that collection — owner/admin — otherwise your own collection for the URL is reused or a new one created) | job (202) |
-| `POST /api/search` | `{collectionId? \| groupId?, query? \| plan?, limit?, enrich?, includeGone?}` | `{plan, items, unknown, total, keys, enrichJobId, enrichNote, llmCost}` (`llmCost` = USD spent parsing the query, 0 when cached) |
+| `POST /api/crawl` | `{url, collectionId?, name?, maxPages?, maxItems?, useProxy?, mode?: "quick"\|"deep"\|"full"}` (`refresh: true` = `full`; `name` sets the collection name instead of deriving it from the page title; `collectionId` re-crawls that collection — owner/admin — otherwise your own collection for the URL is reused or a new one created). `url` must be http(s) on a public host; `maxPages`/`maxItems` at most your `limits` | job (202); 400 for a private/local address or over a limit |
+| `POST /api/search` | `{collectionId? \| groupId?, query? \| plan?, filters?, facets?, limit?, enrich?, includeGone?}`. `filters` (≤ 100) are extra conditions ANDed with the parsed `query` or the given `plan` (a plan condition on the same key wins); with neither, they filter everything. A filter is `{key, op, value}`: `op` is `eq`/`neq`/`gt`/`gte`/`lt`/`lte`/`contains`/`exists`, or `in` with a list `value` (any of them). Besides spec keys, `key` can be a listing field: `price`, `title`, `description`, `product` (normalized brand/model/variant/year, or the title when a listing has none), `currency`, `collection` (an id inside the searched scope) | `{plan, items, unknown, total, keys, enrichJobId, enrichNote, enrichOffer, llmCost, facets?}` (`llmCost` = USD spent parsing the query, 0 when cached). Without `enrich: false` missing/poorly covered specs start a web lookup job (`enrichJobId`); with it, `enrichOffer` = `{attributes, products, listings}` says what one would look up (send the search again with `enrich: true`). `facets: true` adds value counts per field (`missing` = items counted for it without a value): `{key, count, missing, kind: "range", min, max, unit}` \| `{…, kind: "values", values: [{value, count}], more}` \| `{…, kind: "boolean", yes, no}` \| `{…, kind: "text"}` — see [filter panel](search.md#filter-panel) |
 | `GET /api/searches` | `?collectionId \| groupId&limit` | your recent searches `[{query, usedAt, hits}]` |
 | `POST /api/enrich` | `{collectionId? \| groupId?, attributes:[{key,type,unit,label}], itemIds?}` | `{job}` (202) |
 | `GET /api/jobs`, `GET /api/jobs/:id` | | jobs (incl. `llmCost` so far, `resumable`) |
@@ -74,22 +85,27 @@ See [LLM providers](llm-providers.md). Tiers: `fast`, `smart`, `web`.
 | `GET /api/jobs/events` | SSE | your jobs (admins: all): `jobs` (active jobs snapshot on connect), then `job` on every change |
 | `GET /api/jobs/:id/events` | SSE | events `job`, `log`, `item`, `queue` (history replayed) |
 | `GET /api/settings/notifications` | | your notification settings, secrets replaced by `********` |
-| `PUT /api/settings/notifications` | settings (a `********` field keeps its stored value) | saved settings (masked) |
+| `PUT /api/settings/notifications` | settings (a `********` field keeps its stored value) | saved settings (masked); 400 when an enabled channel points somewhere you may not send ([details](notifications.md#server-side-channels)) |
 | `POST /api/notifications/test` | `{channel: "ntfy"\|"telegram"\|"discord"\|"webhook"\|"apprise"\|"push"}` | `{ok, error?}` |
 | `GET /api/push/key` | | `{publicKey}` (VAPID) |
-| `POST /api/push/subscribe`, `DELETE /api/push/subscribe` | `PushSubscription` JSON / `{endpoint}` | `{ok}` |
+| `POST /api/push/subscribe`, `DELETE /api/push/subscribe` | `PushSubscription` JSON (https endpoint of a push service) / `{endpoint}` | `{ok}` |
 
 ## Export file
 
 `{format: "specharvest.collection", version: 1, exportedAt, collection, specKeys, items, aliases, webFacts}`:
 
 - `collection`: `{name, startUrl, host, createdAt, grouping, detection}` (`grouping` defaults to `"strict"` when absent). Import always creates a new collection; on a name clash
-  with one of yours it gets an ` (imported)` suffix.
+  with one of yours it gets an ` (imported)` suffix. A `detection` that doesn't fit the expected shape is dropped (the next
+  crawl detects the listing again), and so is an item URL pattern our own detection wouldn't produce.
 - `items`: every listing (gone ones included) with `specs`, per-key `sources` (web lookup values: origin, source URL,
   confidence), raw/detail text and change-detection hashes, so a later *Re-crawl* still skips unchanged ads. No ids.
 - `specKeys`: the key registry (counts are recomputed on import).
-- `aliases`, `webFacts`: product grouping and the web lookup cache for the collection's product names. Imported with
-  insert-or-ignore, so grouping decisions and lookups already on the target server win.
+- `aliases`, `webFacts`: product grouping and the web lookup cache for the collection's product names. These are shared
+  by every user, so only an admin's import adds them, with insert-or-ignore: grouping decisions and lookups already on
+  the target server win.
+
+Item and start URLs must be http(s), and links that aren't (images, sources) are dropped. Timestamps from the future are
+set to the import time, and text fields have generous size limits.
 
 *Export all* wraps several of these: `{format: "specharvest.collections", version: 1, exportedAt, collections: [<export>, …]}`.
 

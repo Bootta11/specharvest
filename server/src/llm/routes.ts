@@ -10,7 +10,7 @@ import { classifyLlmError, probeModel } from "./client.ts";
 import { deleteKey, listKeys, markKeyWorking, modelChoices, saveKey, saveModelChoices, setKeyError, usableKeys } from "./keys.ts";
 import { modelOptions } from "./pricing.ts";
 import { getProvider, modelCanSearch, PROVIDERS, providerInfo, servesTier, type ProviderDef } from "./providers.ts";
-import { clientForKey, forgetClients, llmStatus, resolveModel, serverAllowed, serverLlmAccess, type ResolvedModel } from "./resolve.ts";
+import { clientForKey, dailyLimitFor, forgetClients, llmStatus, resolveModel, serverAllowed, serverLlmAccess, serverSpendToday, type ResolvedModel } from "./resolve.ts";
 
 /** Saving/testing a key makes a real (tiny) call to the provider — keep it from being hammered. */
 const probeLimit = { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } };
@@ -28,7 +28,13 @@ function settingsFor(user: AuthUser): LlmSettingsResponse {
     keys: listKeys(user.id),
     models: modelChoices(user.id),
     ...llmStatus(user.id),
-    server: { configured: !!env.OPENROUTER_API_KEY, allowed: serverAllowed(user), access: serverLlmAccess() },
+    server: {
+      configured: !!env.OPENROUTER_API_KEY,
+      allowed: serverAllowed(user),
+      access: serverLlmAccess(),
+      dailyLimitUsd: dailyLimitFor(user),
+      spentTodayUsd: serverSpendToday(user.id),
+    },
     providers: PROVIDERS.filter((p) => !p.custom || user.role === "admin").map(providerInfo),
   };
 }

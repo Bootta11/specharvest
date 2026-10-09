@@ -2,6 +2,7 @@ import type { Page } from "puppeteer-core";
 import type { CollectionDetection } from "../db/sqlite.ts";
 import { gotoAndSettle } from "./browser.ts";
 import { createLogger } from "../lib/logger.ts";
+import { safeItemUrlPattern } from "./url-pattern.ts";
 
 const log = createLogger("paginate");
 
@@ -19,6 +20,8 @@ export interface ItemCard {
  * itemUrlPattern (drops ads/promos inside the grid).
  */
 export async function collectItemCards(page: Page, detection: Pick<CollectionDetection, "listItemSelector" | "itemUrlPattern">): Promise<ItemCard[]> {
+  // Compiled here and in the page for every link — only patterns that can't backtrack (crawler/url-pattern.ts).
+  const pattern = safeItemUrlPattern(detection.itemUrlPattern);
   const cards = await page.evaluate(
     (selector, pattern) => {
       const isReal = (href: string | null | undefined) => !!href && /^https?:/.test(href) && href !== location.href && !href.startsWith(location.href + "#");
@@ -47,9 +50,9 @@ export async function collectItemCards(page: Page, detection: Pick<CollectionDet
       return out;
     },
     detection.listItemSelector || "",
-    detection.itemUrlPattern || "",
+    pattern || "",
   );
-  const re = detection.itemUrlPattern ? new RegExp(detection.itemUrlPattern) : null;
+  const re = pattern ? new RegExp(pattern) : null;
   const byUrl = new Map<string, string>();
   for (const c of cards) {
     const url = normalizeItemUrl(c.url);

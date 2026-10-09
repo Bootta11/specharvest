@@ -10,6 +10,8 @@ import { proposeKeyMerges } from "../llm/consolidate.ts";
 import { groupForCollection } from "../enrich/group.ts";
 import { withLlmContext } from "../llm/usage.ts";
 import { createLogger, errorMessage } from "../lib/logger.ts";
+import { httpError } from "../lib/http-error.ts";
+import { getUser } from "../auth/users.ts";
 import { notifyJobFinished } from "../notify/index.ts";
 import { publish, retireChannel, reviveChannel } from "../sse/hub.ts";
 import { BlockedPageError, gotoAndSettle, waitForStableText, withPage } from "./browser.ts";
@@ -17,6 +19,7 @@ import { detectListingStructure } from "./detect.ts";
 import { changedTokens, fingerprint, removedShare } from "./fingerprint.ts";
 import { collectItemUrls, walkListing } from "./paginate.ts";
 import { snapshotDetail, type DetailSnapshot, type OtherListingHints } from "./sanitize.ts";
+import { safeItemUrlPattern } from "./url-pattern.ts";
 
 const log = createLogger("job");
 
@@ -36,6 +39,17 @@ export function emit(jobId: number, event: JobEvent) {
 export function jobLog(jobId: number, message: string, level: "info" | "warn" | "error" = "info") {
   log[level](`job ${jobId}: ${message}`);
   emit(jobId, { type: "log", message, level });
+}
+
+/**
+ * One user can't fill the shared browser and queue with their jobs: a non-admin may have at most
+ * MAX_ACTIVE_JOBS_PER_USER crawls + web lookups queued or running. Throws 429 when that's reached.
+ */
+export function assertJobSlot(userId: number | null) {
+  const max = env.MAX_ACTIVE_JOBS_PER_USER;
+  if (userId === null || max <= 0 || getUser(userId)?.role === "admin") return;
+  const running = db.countActiveJobs(userId);
+  if (running >= max) throw httpError(429, `You already have ${running} job${running === 1 ? "" : "s"} running (at most ${max}) — wait for one to finish, or stop one.`);
 }
 
 export function patchJob(jobId: number, patch: Parameters<typeof db.updateJob>[1]): Job {
@@ -129,6 +143,7 @@ export function startCrawl(req: CrawlRequest, userId: number | null, collectionI
     const active = db.activeJobForCollection(existing.id, "crawl");
     if (active) return active;
   }
+  assertJobSlot(userId);
   const host = new URL(url).hostname;
   const name = req.name?.trim();
   const targetId = existing?.id ?? db.createCollection(name || host, url, host, userId);
@@ -166,6 +181,7 @@ export function resumeCrawl(jobId: number): Job {
   if (!job || !job.resumable || !params || job.collectionId == null) throw new ResumeError("This job can't be resumed");
   const active = db.activeJobForCollection(job.collectionId, "crawl");
   if (active) throw new ResumeError(`Crawl #${active.id} is already running for this collection`);
+  assertJobSlot(job.userId);
   reviveChannel(jobChannel(jobId));
   const resumed = patchJob(jobId, { status: "running", error: null, finishedAt: null, itemsFailed: 0, message: "Resuming" });
   launch(jobId, job.collectionId, params, job.startedAt);
@@ -239,7 +255,7 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
 
   throwIfStopped(signal);
   if (walk.items.size === 0) throw new Error("No item links found on the listing page");
-  const hints: OtherListingHints = { listItemSelector: walk.detection.listItemSelector, itemUrlPattern: walk.detection.itemUrlPattern };
+  const hints: OtherListingHints = { listItemSelector: walk.detection.listItemSelector, itemUrlPattern: safeItemUrlPattern(walk.detection.itemUrlPattern) };
 
   // ---- 2. Sort walked items: new → extract; existing → change check (no LLM unless changed) ----
   const known = db.getItemFingerprints(collectionId);

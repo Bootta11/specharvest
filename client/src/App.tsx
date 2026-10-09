@@ -11,6 +11,7 @@ import { AdminModal } from "./components/AdminModal.tsx";
 import { LlmSettingsModal } from "./components/LlmSettingsModal.tsx";
 import { LoginView } from "./views/LoginView.tsx";
 import { useAuth, type Auth } from "./lib/auth.ts";
+import { isNative } from "./lib/platform.ts";
 
 type Tab = "search" | "ingest";
 
@@ -49,6 +50,8 @@ function Workspace({ user, auth }: { user: UserSummary; auth: Auth }) {
   const [groups, setGroups] = useState<CollectionGroup[] | null>(null);
   const [scope, setScope] = useState<SearchScope | null>(readScope);
   const [error, setError] = useState<string | null>(null);
+  // Bumped to remount the Collections tab on a job opened from outside (a notification tap).
+  const [ingestKey, setIngestKey] = useState(0);
 
   const refreshCollections = useCallback(async () => {
     try {
@@ -70,7 +73,13 @@ function Workspace({ user, auth }: { user: UserSummary; auth: Auth }) {
       const name = collections.find((c) => c.id === job.collectionId)?.name;
       const detail = job.status === "failed" ? (job.error ?? job.message ?? "Failed") : (job.message ?? "Finished");
       const body = job.llmCost ? `${detail}\n${formatUsd(job.llmCost)} LLM` : detail;
-      showLocalNotification(`${what} ${job.status === "done" ? "done" : job.status}${name ? ` · ${name}` : ""}`, body, `job-${job.id}`, `/?job=${job.id}`);
+      const title = `${what} ${job.status === "done" ? "done" : job.status}${name ? ` · ${name}` : ""}`;
+      if (!isNative) return void showLocalNotification(title, body, `job-${job.id}`, `/?job=${job.id}`);
+      void import("./lib/native.ts").then(({ isAppForeground, notifyJob }) => {
+        // Like cursor-agent-remote: no notification for the job you're looking at.
+        const watching = isAppForeground() && storageGet("tab") === "ingest" && storageGet("crawlJobId") === String(job.id);
+        if (!watching) void notifyJob(job.id, title, body);
+      });
     },
     [collections, refreshCollections],
   );
@@ -100,6 +109,27 @@ function Workspace({ user, auth }: { user: UserSummary; auth: Auth }) {
     setTab(t);
     storageSet("tab", t);
   };
+
+  // Android app: notifications, back button, external links, reconnect on resume (lib/native.ts).
+  useEffect(() => {
+    if (!isNative) return;
+    let cleanup = () => {};
+    let cancelled = false;
+    void import("./lib/native.ts")
+      .then(({ initNative }) =>
+        initNative((jobId) => {
+          storageSet("crawlJobId", String(jobId));
+          setTab("ingest");
+          storageSet("tab", "ingest");
+          setIngestKey((k) => k + 1);
+        }),
+      )
+      .then((c) => (cancelled ? c() : (cleanup = c)));
+    return () => {
+      cancelled = true;
+      cleanup();
+    };
+  }, []);
   const selectScope = (s: SearchScope) => {
     setScope(s);
     storageSet("scope", s);
@@ -108,10 +138,11 @@ function Workspace({ user, auth }: { user: UserSummary; auth: Auth }) {
   return (
     <div className="min-h-dvh">
       <header className="sticky top-0 z-20 border-b border-stone-200 bg-white/85 backdrop-blur dark:border-stone-800 dark:bg-stone-950/85">
-        <div className="mx-auto flex h-14 max-w-7xl items-center gap-2 px-4 sm:gap-3">
-          <img src="/favicon.svg" alt="" className="size-7" />
-          <span className="hidden font-semibold tracking-tight sm:inline">SpecHarvest</span>
-          <div className="ml-auto flex items-center gap-1.5 sm:gap-2">
+        {/* Phones: icons on the first row, the Search/Collections switch full width on a second row. */}
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-2 py-2 pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] md:h-14 md:flex-nowrap md:gap-3 md:py-0">
+          <img src="/favicon.svg" alt="" className="size-7 shrink-0" />
+          <span className="hidden font-semibold tracking-tight md:inline">SpecHarvest</span>
+          <div className="ml-auto flex shrink-0 items-center gap-1.5 md:order-last md:gap-2">
             {feed.active.length > 0 && (
               <button
                 onClick={() => selectTab("ingest")}
@@ -123,7 +154,7 @@ function Workspace({ user, auth }: { user: UserSummary; auth: Auth }) {
                   <span className="relative inline-flex size-2 rounded-full bg-brand-600" />
                 </span>
                 {feed.active.length}
-                <span className="hidden sm:inline">running</span>
+                <span className="hidden md:inline">running</span>
               </button>
             )}
             <SpendMenu isAdmin={user.role === "admin"} />
@@ -138,13 +169,14 @@ function Workspace({ user, auth }: { user: UserSummary; auth: Auth }) {
                 <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
               </svg>
             </button>
+            <UserMenu user={user} onAccount={() => setDialog("account")} onLlm={() => setDialog("llm")} onAdmin={() => setDialog("admin")} onLogout={auth.logout} />
           </div>
-          <nav className="flex rounded-lg bg-stone-100 p-1 text-sm dark:bg-stone-900" aria-label="Main">
+          <nav className="order-last flex w-full rounded-lg bg-stone-100 p-1 text-sm md:order-none md:w-auto dark:bg-stone-900" aria-label="Main">
             {(["search", "ingest"] as const).map((t) => (
               <button
                 key={t}
                 onClick={() => selectTab(t)}
-                className={`rounded-md px-2.5 py-1.5 font-medium transition sm:px-3 ${
+                className={`flex-1 rounded-md px-2.5 py-1.5 font-medium transition md:flex-none md:px-3 ${
                   tab === t ? "bg-white text-brand-800 shadow-sm dark:bg-stone-800 dark:text-brand-100" : "text-stone-600 hover:text-stone-900 dark:text-stone-400"
                 }`}
                 aria-current={tab === t ? "page" : undefined}
@@ -153,7 +185,6 @@ function Workspace({ user, auth }: { user: UserSummary; auth: Auth }) {
               </button>
             ))}
           </nav>
-          <UserMenu user={user} onAccount={() => setDialog("account")} onLlm={() => setDialog("llm")} onAdmin={() => setDialog("admin")} onLogout={auth.logout} />
         </div>
       </header>
 
@@ -186,6 +217,7 @@ function Workspace({ user, auth }: { user: UserSummary; auth: Auth }) {
           />
         ) : (
           <IngestView
+            key={ingestKey}
             config={config}
             collections={collections}
             groups={groups ?? []}

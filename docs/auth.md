@@ -64,6 +64,15 @@ saves LLM calls.
 - **Disabling** a user ends their sessions and blocks sign-in and API keys
   until they are re-enabled. Their collections stay. Admins can't disable
   themselves.
+- **Limits for regular users:** at most `MAX_ACTIVE_JOBS_PER_USER` (3)
+  crawls and web lookups running at once, crawls of at most `MAX_PAGES_CAP` /
+  `MAX_ITEMS_CAP` (50 pages / 1000 items), and a daily allowance on the
+  server's LLM key (see [LLM providers](llm-providers.md#for-admins)). Admins
+  have none of these limits.
+- **Importing** creates private collections of the importer. The file's
+  product grouping and web lookup cache rows are shared by everyone, so they
+  are only added when an admin imports. Imported listings are never reused for
+  other users' crawls or lookups until a crawl here has read them again.
 
 ## Sessions & API keys
 
@@ -72,11 +81,21 @@ saves LLM calls.
   `Secure` is on when `PUBLIC_URL` is `https://…`; set `SESSION_COOKIE_SECURE`
   to override, e.g. `false` when testing over plain HTTP on a LAN IP.
   `localhost` is fine either way.
+- **Android app** sessions are the same sessions, but the token is returned to the app and sent as
+  `Authorization: Bearer …` instead of living in a cookie (see [Android app](mobile-app.md)).
+  Sign-out and a password change end them like any other session.
 - **API keys** (`shk_…`, *Account → API keys*) act as their owner. Send them in
   an `X-Api-Key` header. A key is shown only at creation and can be revoked at
   any time.
 - **Storage:** only sha256 hashes of session tokens and API keys are kept.
   Passwords are hashed with salted scrypt (`scrypt$N$r$p$salt$hash`).
-- **Rate limit:** login and sign-up allow 10 attempts per minute per IP. The
-  server trusts `X-Forwarded-For` because it runs behind a tunnel or reverse
-  proxy.
+- **Rate limit:** login, sign-up and account changes (which check the current
+  password) allow 10 attempts per minute per IP. The client IP comes from
+  `X-Forwarded-For` only when a trusted proxy set it (`TRUST_PROXY`, see
+  [deployment](deployment.md#security-settings)), so a client can't fake it.
+  Routes that spend LLM money or start work are limited per user, e.g. 30
+  searches and 10 crawls a minute.
+- **Cross-site requests:** writes made with the session cookie (and sign-in
+  itself) must come from the app's own pages. The browser's `Sec-Fetch-Site`
+  (or `Origin`) header is checked, so another site can't post on your behalf.
+  Requests with an `X-Api-Key` or the app's bearer token aren't affected.

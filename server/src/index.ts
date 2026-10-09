@@ -3,8 +3,21 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import fastifyStatic from "@fastify/static";
-import { z, ZodError } from "zod";
-import { crawlRequestSchema, groupInputSchema, groupingModes, importRequestSchema, enrichRequestSchema, isActiveJob, notificationChannels, searchRequestSchema, type CollectionProducts, type ItemDetail } from "@specharvest/shared";
+import { z } from "zod";
+import {
+  CRAWL_MAX_ITEMS,
+  CRAWL_MAX_PAGES,
+  crawlRequestSchema,
+  enrichRequestSchema,
+  groupInputSchema,
+  groupingModes,
+  importRequestSchema,
+  isActiveJob,
+  notificationChannels,
+  searchRequestSchema,
+  type CollectionProducts,
+  type ItemDetail,
+} from "@specharvest/shared";
 import { env } from "./config.ts";
 import * as db from "./db/sqlite.ts";
 import { deleteVectors, upsertVector } from "./db/lance.ts";
@@ -24,30 +37,43 @@ import { registerLlmRoutes } from "./llm/routes.ts";
 import { startPriceRefresh } from "./llm/pricing.ts";
 import { subscribe } from "./sse/hub.ts";
 import { createLogger, errorMessage } from "./lib/logger.ts";
-import { httpError } from "./lib/http-error.ts";
+import { errorHandler, httpError } from "./lib/http-error.ts";
+import { assertPublicUrl, strictPolicy } from "./lib/net-guard.ts";
+import { registerSecurityHeaders } from "./lib/security-headers.ts";
 import { bootstrapAdmin } from "./auth/bootstrap.ts";
 import { requireCollection, requireGroup, requireJob } from "./auth/ownership.ts";
-import { currentUser, registerAuth, requireAdmin } from "./auth/plugin.ts";
+import { currentUser, registerAuth, requireAdmin, searchLimit, userLimit } from "./auth/plugin.ts";
+import type { AuthUser } from "./auth/ownership.ts";
 import { registerAuthRoutes } from "./auth/routes.ts";
 import { pruneSessions } from "./auth/sessions.ts";
 
 const log = createLogger("server");
+
+// A stray rejected promise in background work (a crawl, an embedding) must not take every running crawl down with it.
+process.on("unhandledRejection", (err) => log.error("Unhandled promise rejection", err instanceof Error ? (err.stack ?? err.message) : String(err)));
+process.on("uncaughtException", (err) => {
+  log.error("Uncaught exception — exiting", err.stack ?? err.message);
+  process.exit(1);
+});
 
 db.getDb();
 await bootstrapAdmin();
 pruneSessions();
 startPriceRefresh();
 
-// trustProxy: rate limiting keys on the client IP behind the tunnel / reverse proxy.
-const app = Fastify({ logger: false, bodyLimit: 1_000_000, trustProxy: true });
-await registerAuth(app);
-
-app.setErrorHandler((err, _req, reply) => {
-  if (err instanceof ZodError) return reply.status(400).send({ error: "Invalid request", issues: err.issues });
-  const status = (err as { statusCode?: number }).statusCode ?? 500;
-  if (status >= 500) log.error("Request failed", errorMessage(err));
-  return reply.status(status).send({ error: errorMessage(err) });
+const app = Fastify({
+  logger: false,
+  bodyLimit: 1_000_000,
+  // Rate limits key on the client IP: only proxies matching TRUST_PROXY may set X-Forwarded-For (config.ts).
+  trustProxy: env.TRUST_PROXY,
+  // Fastify's default (0) turns off Node's guard against clients that send a body very slowly.
+  requestTimeout: 300_000,
+  // Open SSE streams would otherwise keep app.close() waiting on shutdown.
+  forceCloseConnections: true,
 });
+await registerAuth(app);
+registerSecurityHeaders(app);
+app.setErrorHandler(errorHandler);
 
 const idParam = (p: unknown) => {
   const id = Number((p as { id?: string }).id);
@@ -79,15 +105,25 @@ app.get("/api/health", async (_req, reply) => {
     .send({ ok, status: ok ? "ok" : "error", checks, uptimeSeconds: Math.round(process.uptime()), timestamp: new Date().toISOString() });
 });
 
+/** Most one crawl may ask for: admins up to the hard ceiling, everyone else MAX_PAGES_CAP / MAX_ITEMS_CAP. */
+function crawlLimits(user: AuthUser) {
+  return user.role === "admin"
+    ? { maxPages: CRAWL_MAX_PAGES, maxItems: CRAWL_MAX_ITEMS }
+    : { maxPages: Math.min(env.MAX_PAGES_CAP, CRAWL_MAX_PAGES), maxItems: Math.min(env.MAX_ITEMS_CAP, CRAWL_MAX_ITEMS) };
+}
+
 // Per user: which LLM provider/model each tier runs on for them (own key or server key), see llm/resolve.ts.
 app.get("/api/config", async (req) => {
-  const llm = llmStatus(currentUser(req).id);
+  const user = currentUser(req);
+  const llm = llmStatus(user.id);
+  const limits = crawlLimits(user);
   return {
     version: env.APP_GIT_SHA ?? "dev",
     proxyConfigured: proxyConfigured(),
     webSearchEnabled: env.WEB_SEARCH_ENABLED && !!llm.effective.web,
     llmConfigured: !!llm.effective.fast,
-    defaults: { maxPages: env.MAX_PAGES, maxItems: env.MAX_ITEMS },
+    defaults: { maxPages: Math.min(env.MAX_PAGES, limits.maxPages), maxItems: Math.min(env.MAX_ITEMS, limits.maxItems) },
+    limits,
     llm,
   };
 });
@@ -179,10 +215,10 @@ app.delete("/api/groups/:id", async (req) => {
   return { ok: true };
 });
 
-app.post("/api/collections/import", { bodyLimit: 500_000_000 }, async (req, reply) => {
+app.post("/api/collections/import", { bodyLimit: env.IMPORT_MAX_MB * 1024 * 1024, ...userLimit(5) }, async (req, reply) => {
   const user = currentUser(req);
   const body = importRequestSchema.parse(req.body);
-  const imported = db.importCollections("collections" in body ? body.collections : [body], user.id);
+  const imported = db.importCollections("collections" in body ? body.collections : [body], user);
   void (async () => {
     for (const { collectionId, itemIds } of imported) {
       for (const item of db.getItemsByIds(itemIds)) {
@@ -194,14 +230,14 @@ app.post("/api/collections/import", { bodyLimit: 500_000_000 }, async (req, repl
       }
       log.info(`Imported collection ${collectionId}: embedded ${itemIds.length} items`);
     }
-  })();
+  })().catch((err) => log.error("Embedding imported items failed", errorMessage(err)));
   const collections = imported.map(({ collectionId }) => db.getCollection(collectionId, user));
   return reply.status(201).send("collections" in body ? collections : collections[0]);
 });
 
 // Products (name variants grouped). For the owner, names never seen before are grouped first (one cheap LLM
 // call) and the rule-based regroup runs (free); possible matches come back as suggestions to confirm.
-app.get("/api/collections/:id/products", async (req): Promise<CollectionProducts> => {
+app.get("/api/collections/:id/products", userLimit(20), async (req): Promise<CollectionProducts> => {
   const user = currentUser(req);
   const collection = requireCollection(idParam(req.params), user, "read");
   const items = db.listItems(collection.id, 5000);
@@ -247,7 +283,7 @@ app.post("/api/collections/:id/split", async (req) => {
   return { ok: true };
 });
 
-app.post("/api/collections/:id/consolidate", async (req) => {
+app.post("/api/collections/:id/consolidate", userLimit(5), async (req) => {
   const user = currentUser(req);
   const id = requireCollection(idParam(req.params), user, "write").id;
   requireLlm(user.id, "smart");
@@ -273,16 +309,27 @@ app.get("/api/items/:id", async (req, reply) => {
 
 // ---------- Jobs ----------
 
-app.post("/api/crawl", async (req, reply) => {
+app.post("/api/crawl", userLimit(10), async (req, reply) => {
   const user = currentUser(req);
   requireLlm(user.id, "fast");
   const body = crawlRequestSchema.parse(req.body);
   if (body.useProxy && !proxyConfigured()) return reply.status(400).send({ error: "PROXY_SERVER is not configured" });
   if (body.collectionId) requireCollection(body.collectionId, user, "write");
-  return reply.status(202).send(startCrawl(body, user.id, body.collectionId));
+  const limits = crawlLimits(user);
+  if (body.maxPages !== undefined && body.maxPages > limits.maxPages) throw httpError(400, `At most ${limits.maxPages} listing pages per crawl`);
+  if (body.maxItems !== undefined && body.maxItems > limits.maxItems) throw httpError(400, `At most ${limits.maxItems} items per crawl`);
+  // Shops are public sites: the crawler never opens loopback/LAN/metadata addresses (lib/net-guard.ts).
+  await assertPublicUrl(body.url, strictPolicy());
+  const params = {
+    ...body,
+    // The configured defaults may be above this user's cap.
+    maxPages: body.maxPages ?? (env.MAX_PAGES > limits.maxPages ? limits.maxPages : undefined),
+    maxItems: body.maxItems ?? (env.MAX_ITEMS > limits.maxItems ? limits.maxItems : undefined),
+  };
+  return reply.status(202).send(startCrawl(params, user.id, body.collectionId));
 });
 
-app.post("/api/enrich", async (req, reply) => {
+app.post("/api/enrich", userLimit(10), async (req, reply) => {
   const body = enrichRequestSchema.parse(req.body);
   if (!env.WEB_SEARCH_ENABLED) return reply.status(400).send({ error: "Web lookups are disabled (WEB_SEARCH_ENABLED=false)" });
   requireLlm(currentUser(req).id, "web");
@@ -315,10 +362,16 @@ app.get("/api/usage/credits", async (req) => {
 
 app.get("/api/jobs", async (req) => db.listJobs(30, currentUser(req)));
 
+/** Takes over the response for an SSE stream, keeping headers already set on it (CORS for the Android app). */
+function hijackForStream(reply: FastifyReply) {
+  for (const [name, value] of Object.entries(reply.getHeaders())) if (value !== undefined) reply.raw.setHeader(name, value);
+  reply.hijack();
+}
+
 // The user's job snapshots (admins: everyone's): active jobs first, then live updates (no replayed history).
 app.get("/api/jobs/events", async (req, reply) => {
   const user = currentUser(req);
-  reply.hijack();
+  hijackForStream(reply);
   subscribe(JOBS_CHANNEL, reply.raw, undefined, {
     replay: false,
     initial: [{ type: "jobs", jobs: db.listActiveJobs(user) }],
@@ -352,7 +405,7 @@ app.get("/api/jobs/:id", async (req) => requireJob(idParam(req.params), currentU
 app.get("/api/jobs/:id/events", async (req, reply) => {
   const job = requireJob(idParam(req.params), currentUser(req));
   const id = job.id;
-  reply.hijack();
+  hijackForStream(reply);
   subscribe(jobChannel(id), reply.raw, req.headers["last-event-id"] as string | undefined);
   // A finished job's channel may already be retired — always end with a fresh snapshot.
   if (!isActiveJob(job)) emitJob(job);
@@ -362,21 +415,23 @@ app.get("/api/jobs/:id/events", async (req, reply) => {
 
 // Each user configures (and tests) their own channels.
 app.get("/api/settings/notifications", async (req) => maskSettings(getNotificationSettings(currentUser(req).id)));
-app.put("/api/settings/notifications", async (req) => maskSettings(saveNotificationSettings(currentUser(req).id, req.body)));
+app.put("/api/settings/notifications", async (req) => maskSettings(await saveNotificationSettings(currentUser(req), req.body)));
 
-app.post("/api/notifications/test", async (req) => {
+app.post("/api/notifications/test", userLimit(10), async (req) => {
   const { channel } = z.object({ channel: z.enum(notificationChannels) }).parse(req.body);
   return sendTest(currentUser(req).id, channel);
 });
 
 const pushSubscriptionSchema = z.object({
-  endpoint: z.string().url(),
-  keys: z.object({ p256dh: z.string().min(1), auth: z.string().min(1) }),
+  endpoint: z.url({ protocol: /^https$/ }).max(2000),
+  keys: z.object({ p256dh: z.string().min(1).max(200), auth: z.string().min(1).max(200) }),
 });
 
 app.get("/api/push/key", async () => ({ publicKey: vapidKeys().publicKey }));
 app.post("/api/push/subscribe", async (req) => {
   const sub = pushSubscriptionSchema.parse(req.body);
+  // Push services are public; anything else would make the server POST into its own network.
+  await assertPublicUrl(sub.endpoint, strictPolicy());
   db.savePushSub(sub, req.headers["user-agent"]?.slice(0, 300) ?? null, currentUser(req).id);
   return { ok: true };
 });
@@ -387,7 +442,7 @@ app.delete("/api/push/subscribe", async (req) => {
 
 // ---------- Search ----------
 
-app.post("/api/search", async (req) => {
+app.post("/api/search", searchLimit({ typed: 30, filterOnly: 240 }), async (req) => {
   const body = searchRequestSchema.parse(req.body);
   const user = currentUser(req);
   return search(body, user, readScope(req, body.collectionId, body.groupId));
@@ -415,6 +470,8 @@ await app.listen({ port: env.PORT, host: "0.0.0.0" });
 log.info(`SpecHarvest API listening on :${env.PORT} (data: ${env.DATA_DIR})`);
 
 const shutdown = async () => {
+  // Don't outlive Docker's stop timeout if something still holds the server open.
+  setTimeout(() => process.exit(0), 10_000).unref();
   await app.close().catch(() => {});
   process.exit(0);
 };

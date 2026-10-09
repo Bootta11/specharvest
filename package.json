@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "./scripts/dev.sh",
     "kill": "./scripts/kill.sh",
+    "docs": "echo \"Docs: http://specharvest-docs.localhost:${DOCS_PORT:-3190}\" && cd docmd && docmd dev -p ${DOCS_PORT:-3190}",
     "dev:server": "npm run dev --workspace server",
     "dev:client": "npm run dev --workspace client",
     "build": "npm run build --workspace client",
@@ -32,5 +33,8 @@
     "@lancedb/lancedb": {
       "@huggingface/transformers": "^4.3.0"
     }
+  },
+  "devDependencies": {
+    "@docmd/core": "^0.9.7"
   }
 }

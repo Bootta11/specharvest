@@ -1,13 +1,16 @@
-import { humanizeKey, type Item, type MissingAttribute, type QueryPlan, type SearchRequest, type SearchResponse, type SpecKey } from "@specharvest/shared";
+import { humanizeKey, isListingField, isStrictField, LISTING_FIELDS, type Item, type MissingAttribute, type QueryPlan, type SearchRequest, type SearchResponse, type SpecKey } from "@specharvest/shared";
 import { env } from "../config.ts";
 import * as db from "../db/sqlite.ts";
 import { rankByVector } from "../db/lance.ts";
 import { embed } from "../embedding.ts";
 import { applyCachedFacts, startEnrichment } from "../enrich/web.ts";
+import { resolvedIdentity } from "../enrich/group.ts";
 import { normalizeQuery, parseQuery, sanitizePlan } from "../llm/parse-query.ts";
 import { withLlmContext } from "../llm/usage.ts";
 import { llmStatus } from "../llm/resolve.ts";
-import { buildCandidateQuery, COLUMN_KEYS, hasValue, valueOf } from "./filters.ts";
+import { buildCandidateQuery, hasValue, mergeFilters, valueOf } from "./filters.ts";
+import { computeFacets } from "./facets.ts";
+import { errorMessage } from "../lib/logger.ts";
 
 const DEFAULT_LIMIT = 60;
 
@@ -48,17 +51,23 @@ async function runSearch(req: SearchRequest, viewer: db.Viewer, scope: db.Collec
     db.recordSearch(viewer.id, db.historySlot(collectionId, req.groupId), normalizeQuery(req.query));
   }
   else plan = { filters: [], sort: null, semanticText: null, missingAttributes: [], show: [] };
+  // Filter-panel conditions, merged after parsing so cached plans never hold them.
+  if (req.filters?.length) {
+    const extra = sanitizePlan({ filters: req.filters, sort: null, semanticText: null, missingAttributes: [] }, keys, db.keyAliasesOf).filters;
+    plan = sanitizePlan(mergeFilters(plan, extra), keys, db.keyAliasesOf);
+  }
 
-  const known = new Set([...Object.keys(COLUMN_KEYS), ...keys.map((k) => k.key)]);
+  const known = new Set([...LISTING_FIELDS, ...keys.map((k) => k.key)]);
   const q = buildCandidateQuery(plan.filters, keys, scope, req.includeGone);
   const pool = db.getItemsByIds(db.queryItemIds(q.sql, q.params));
-  const activeKeys = new Set(q.active.map((f) => f.key));
+  // Strict listing fields are settled in SQL — a missing value there never makes an item "unknown".
+  const activeKeys = new Set(q.active.map((f) => f.key).filter((k) => !isStrictField(k)));
   const sortKey = plan.sort && known.has(plan.sort.key) ? plan.sort : null;
 
   // ---- Which attributes are missing / poorly covered → web enrichment ----
   const wanted = new Map<string, MissingAttribute>();
   for (const m of plan.missingAttributes) wanted.set(m.key, m);
-  const referenced = [...new Set([...q.active.map((f) => f.key), ...(sortKey ? [sortKey.key] : []), ...plan.show.filter((k) => known.has(k))])].filter((k) => !COLUMN_KEYS[k]);
+  const referenced = [...new Set([...q.active.map((f) => f.key), ...(sortKey ? [sortKey.key] : []), ...plan.show.filter((k) => known.has(k))])].filter((k) => !isListingField(k));
   for (const k of referenced) {
     const covered = pool.filter((i) => hasValue(i, k)).length;
     if (pool.length > 0 && covered / pool.length < env.ENRICH_COVERAGE_THRESHOLD) {
@@ -70,6 +79,7 @@ async function runSearch(req: SearchRequest, viewer: db.Viewer, scope: db.Collec
 
   let enrichJobId: number | null = null;
   let enrichNote: string | null = null;
+  let enrichOffer: SearchResponse["enrichOffer"] = null;
   if (wanted.size > 0 && pool.length > 0) {
     const attrs = [...wanted.values()].slice(0, 5);
     const labels = attrs.map((w) => w.label).join(", ");
@@ -81,10 +91,19 @@ async function runSearch(req: SearchRequest, viewer: db.Viewer, scope: db.Collec
       const stillMissing = pool.filter((i) => attrs.some((a) => !hasValue(i, a.key))).length;
       if (stillMissing) enrichNote = `${stillMissing} items still lack ${labels} (not found on the web)`;
     } else if (webBlocked) enrichNote = webBlocked;
-    else if (req.enrich !== false) {
-      const job = startEnrichment({ collectionId, groupId: req.groupId, userId: viewer.id, attributes: attrs, itemIds: needLookup.map((i) => i.id) });
-      enrichJobId = job.id;
-      enrichNote = `Looking up ${labels} on the web for ${needLookup.length} items`;
+    else if (req.enrich === false) {
+      // Not started — the caller can ask for it (search again with enrich: true).
+      enrichOffer = { attributes: attrs, products: new Set(needLookup.map(resolvedIdentity)).size, listings: needLookup.length };
+    } else {
+      try {
+        const job = startEnrichment({ collectionId, groupId: req.groupId, userId: viewer.id, attributes: attrs, itemIds: needLookup.map((i) => i.id) });
+        enrichJobId = job.id;
+        enrichNote = `Looking up ${labels} on the web for ${needLookup.length} items`;
+      } catch (err) {
+        // Too many jobs running (assertJobSlot): the search still answers, the lookup waits for a free slot.
+        if ((err as { statusCode?: number }).statusCode !== 429) throw err;
+        enrichNote = `Web lookup of ${labels} not started: ${errorMessage(err)}`;
+      }
     }
   }
 
@@ -126,5 +145,7 @@ async function runSearch(req: SearchRequest, viewer: db.Viewer, scope: db.Collec
     keys,
     enrichJobId,
     enrichNote,
+    enrichOffer,
+    ...(req.facets ? { facets: computeFacets(q.active, keys, scope, req.includeGone) } : {}),
   };
 }
