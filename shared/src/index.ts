@@ -676,6 +676,12 @@ export interface LlmModelOption {
   output: number | null;
 }
 
+/** A provider's models for the pickers: live from the provider (with your key), or models.dev as fallback. */
+export interface LlmModelList {
+  source: "live" | "models.dev";
+  models: LlmModelOption[];
+}
+
 export interface LlmTestResult {
   ok: boolean;
   provider?: string;

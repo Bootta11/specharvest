@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { llmModelChoicesSchema, llmTiers, saveLlmKeySchema, type LlmModelOption, type LlmPurpose, type LlmSettingsResponse, type LlmTestResult, type LlmTier } from "@specharvest/shared";
+import { llmModelChoicesSchema, llmTiers, saveLlmKeySchema, type LlmModelList, type LlmPurpose, type LlmSettingsResponse, type LlmTestResult, type LlmTier } from "@specharvest/shared";
 import { env } from "../config.ts";
 import { httpError } from "../lib/http-error.ts";
 import { errorMessage } from "../lib/logger.ts";
@@ -8,7 +8,7 @@ import { currentUser } from "../auth/plugin.ts";
 import type { AuthUser } from "../auth/ownership.ts";
 import { classifyLlmError, probeModel } from "./client.ts";
 import { deleteKey, listKeys, markKeyWorking, modelChoices, saveKey, saveModelChoices, setKeyError, usableKeys } from "./keys.ts";
-import { modelOptions } from "./pricing.ts";
+import { forgetModelLists, listModels } from "./models.ts";
 import { getProvider, modelCanSearch, PROVIDERS, providerInfo, servesTier, type ProviderDef } from "./providers.ts";
 import { clientForKey, dailyLimitFor, forgetClients, llmStatus, resolveModel, serverAllowed, serverLlmAccess, serverSpendToday, type ResolvedModel } from "./resolve.ts";
 
@@ -110,6 +110,7 @@ export function registerLlmRoutes(app: FastifyInstance) {
     const warning = await verifyKey(user.id, p, body.apiKey, baseUrl);
     saveKey(user.id, p.id, body.apiKey, baseUrl, warning);
     forgetClients(user.id);
+    forgetModelLists(user.id);
     return settingsFor(user);
   });
 
@@ -118,6 +119,7 @@ export function registerLlmRoutes(app: FastifyInstance) {
     const p = getProvider(String((req.params as { provider?: string }).provider ?? ""));
     if (!p || !deleteKey(user.id, p.id)) return reply.status(404).send({ error: "Not found" });
     forgetClients(user.id);
+    forgetModelLists(user.id);
     return settingsFor(user);
   });
 
@@ -139,15 +141,16 @@ export function registerLlmRoutes(app: FastifyInstance) {
     return settingsFor(user);
   });
 
-  // Suggestions for the model pickers (models.dev prices); a custom endpoint lists its own models.
-  app.get("/api/settings/llm/models/:provider", async (req): Promise<LlmModelOption[]> => {
+  // The model pickers: the provider's live list for your key (llm/models.ts); a custom endpoint lists its own models.
+  app.get("/api/settings/llm/models/:provider", async (req): Promise<LlmModelList> => {
     const user = currentUser(req);
     const p = providerParam(req.params, user);
-    if (!p.custom) return modelOptions(p.id);
+    const { tier } = z.object({ tier: z.enum(llmTiers).optional() }).parse(req.query);
     const key = usableKeys(user.id).get(p.id);
-    if (!key?.baseUrl) return [];
+    if (!p.custom) return listModels(user.id, p.id, key?.apiKey ?? null, tier);
+    if (!key?.baseUrl) return { source: "live", models: [] };
     try {
-      return (await listRemoteModels(key.baseUrl, key.apiKey)).map((id) => ({ id, name: id, input: null, output: null }));
+      return { source: "live", models: (await listRemoteModels(key.baseUrl, key.apiKey)).map((id) => ({ id, name: id, input: null, output: null })) };
     } catch (err) {
       if ((err as { statusCode?: number }).statusCode) throw err;
       throw httpError(400, `Couldn't reach ${key.baseUrl}/models: ${errorMessage(err)}`);

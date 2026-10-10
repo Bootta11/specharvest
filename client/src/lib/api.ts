@@ -15,7 +15,7 @@ import type {
   Job,
   JobEvent,
   LlmModelChoices,
-  LlmModelOption,
+  LlmModelList,
   LlmSettingsResponse,
   LlmStatus,
   LlmTestResult,
@@ -170,7 +170,7 @@ export const api = {
   saveLlmKey: (provider: string, apiKey: string, baseUrl?: string) => request<LlmSettingsResponse>("PUT", `/api/settings/llm/keys/${encodeURIComponent(provider)}`, { apiKey, baseUrl }),
   deleteLlmKey: (provider: string) => request<LlmSettingsResponse>("DELETE", `/api/settings/llm/keys/${encodeURIComponent(provider)}`),
   saveLlmModels: (choices: LlmModelChoices) => request<LlmSettingsResponse>("PUT", "/api/settings/llm/models", choices),
-  llmModelOptions: (provider: string) => request<LlmModelOption[]>("GET", `/api/settings/llm/models/${encodeURIComponent(provider)}`),
+  llmModelOptions: (provider: string, tier: LlmTier) => request<LlmModelList>("GET", `/api/settings/llm/models/${encodeURIComponent(provider)}?tier=${tier}`),
   testLlm: (tier: LlmTier) => request<LlmTestResult>("POST", "/api/settings/llm/test", { tier }),
   recentSearches: (scope: SearchScope) => {
     const { collectionId, groupId } = scopeParams(scope);
@@ -417,7 +417,7 @@ export function registerServiceWorker(): Promise<ServiceWorkerRegistration | nul
 export async function showLocalNotification(title: string, body: string, tag: string, url: string) {
   if (!browserNotifyEnabled()) return;
   const reg = await registerServiceWorker();
-  const opts: NotificationOptions = { body, tag, icon: "/favicon.svg", data: { url } };
+  const opts: NotificationOptions = { body, tag, icon: "/icon-192.png", data: { url } };
   if (reg) return reg.showNotification(title, opts);
   const n = new Notification(title, opts);
   n.onclick = () => {

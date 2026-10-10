@@ -4,6 +4,8 @@ import { api, downloadExport, formatUsd, storageGet, storageSet, useJobStream, t
 import { JobProgress, StatusBadge, jobPercent } from "../components/JobProgress.tsx";
 import { ProductsModal } from "../components/ProductsModal.tsx";
 import { GroupModal } from "../components/GroupModal.tsx";
+import { clearPendingShare, peekPendingShare, sameUrl } from "../lib/share.ts";
+import { ClearableInput } from "../components/ClearableInput.tsx";
 
 interface Props {
   config: AppConfig | null;
@@ -31,8 +33,10 @@ const timeAgo = (ts: number) => {
 const jobLabel = (j: Job) => `${j.kind === "crawl" ? "Crawl" : "Web lookup"} #${j.id}`;
 
 export function IngestView({ config, collections, groups, feed, onChanged, onSearch }: Props) {
-  const [url, setUrl] = useState("");
-  const [name, setName] = useState("");
+  /** A link shared from another app (Android), prefilled below until a crawl starts or it's dismissed. */
+  const [shared, setShared] = useState(peekPendingShare);
+  const [url, setUrl] = useState(() => shared?.url ?? "");
+  const [name, setName] = useState(() => shared?.title ?? "");
   const [maxPages, setMaxPages] = useState<number | "">("");
   const [maxItems, setMaxItems] = useState<number | "">("");
   const [useProxy, setUseProxy] = useState(false);
@@ -54,6 +58,22 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
   useEffect(() => {
     loadJobs();
   }, []);
+
+  // Read during render (pure), cleared here once shown.
+  useEffect(() => {
+    if (!shared) return;
+    clearPendingShare();
+    window.scrollTo({ top: 0 });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // A shared link fills every field: the limits get the server defaults (config may arrive after mount).
+  useEffect(() => {
+    if (!shared || !config) return;
+    setMaxPages((v) => (v === "" ? config.defaults.maxPages : v));
+    setMaxItems((v) => (v === "" ? config.defaults.maxItems : v));
+  }, [config]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const sharedMatch = shared ? collections.find((c) => c.canEdit && sameUrl(c.startUrl, shared.url)) : undefined;
 
   // Refresh lists when the watched job finishes.
   const finished = !!stream.job && !isActiveJob(stream.job);
@@ -87,6 +107,7 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
     try {
       const job = await api.crawl(body);
       selectJob(job.id);
+      setShared(null);
       if (body.name) setName("");
       onChanged();
       loadJobs();
@@ -177,6 +198,35 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
       <section className="space-y-4">
+        {shared && (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-brand-100 bg-brand-50 px-4 py-3 text-sm text-brand-900 dark:border-brand-900 dark:bg-brand-900/30 dark:text-brand-100">
+            <div className="min-w-0 flex-1 basis-56">
+              <div className="font-medium">Shared link</div>
+              <div className="truncate text-xs opacity-80" title={shared.url}>
+                {shared.url}
+              </div>
+              <div className="mt-1">
+                {sharedMatch ? (
+                  <>
+                    Already collected as <span className="font-medium">{sharedMatch.name}</span> — re-crawl it, or start a new collection below.
+                  </>
+                ) : (
+                  "Review the settings below and tap Start crawl."
+                )}
+              </div>
+            </div>
+            <div className="flex shrink-0 gap-2">
+              {sharedMatch && (
+                <button className="btn-primary btn-sm" disabled={busy} onClick={() => start({ url: sharedMatch.startUrl, collectionId: sharedMatch.id, mode })}>
+                  Re-crawl
+                </button>
+              )}
+              <button className="btn-ghost btn-sm" onClick={() => setShared(null)} aria-label="Dismiss shared link">
+                Dismiss
+              </button>
+            </div>
+          </div>
+        )}
         <form onSubmit={submit} className="card space-y-4 p-4 sm:p-5">
           <div>
             <h2 className="text-lg font-semibold">Crawl a shop listing</h2>
@@ -186,37 +236,37 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
           </div>
           <label className="block">
             <span className="mb-1 block text-sm font-medium">Listing URL</span>
-            <input className="input" type="url" required placeholder="https://shop.example/category?…" value={url} onChange={(e) => setUrl(e.target.value)} />
+            <ClearableInput type="url" required placeholder="https://shop.example/category?…" value={url} onChange={(e) => setUrl(e.target.value)} onClear={() => setUrl("")} />
           </label>
           <label className="block">
             <span className="mb-1 block text-sm font-medium">
               Title <span className="font-normal text-stone-500">(optional)</span>
             </span>
-            <input className="input" type="text" maxLength={200} placeholder="Defaults to the page title" value={name} onChange={(e) => setName(e.target.value)} />
+            <ClearableInput type="text" maxLength={200} placeholder="Defaults to the page title" value={name} onChange={(e) => setName(e.target.value)} onClear={() => setName("")} />
           </label>
           <div className="grid grid-cols-2 gap-3">
             <label className="block">
               <span className="mb-1 block text-sm font-medium">Max pages</span>
-              <input
-                className="input"
+              <ClearableInput
                 type="number"
                 min={1}
                 max={config?.limits.maxPages ?? 200}
                 placeholder={String(config?.defaults.maxPages ?? 10)}
                 value={maxPages}
                 onChange={(e) => setMaxPages(e.target.value ? Number(e.target.value) : "")}
+                onClear={() => setMaxPages("")}
               />
             </label>
             <label className="block">
               <span className="mb-1 block text-sm font-medium">Max items</span>
-              <input
-                className="input"
+              <ClearableInput
                 type="number"
                 min={1}
                 max={config?.limits.maxItems ?? 5000}
                 placeholder={String(config?.defaults.maxItems ?? 200)}
                 value={maxItems}
                 onChange={(e) => setMaxItems(e.target.value ? Number(e.target.value) : "")}
+                onClear={() => setMaxItems("")}
               />
             </label>
           </div>

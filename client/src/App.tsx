@@ -12,6 +12,7 @@ import { LlmSettingsModal } from "./components/LlmSettingsModal.tsx";
 import { LoginView } from "./views/LoginView.tsx";
 import { useAuth, type Auth } from "./lib/auth.ts";
 import { isNative } from "./lib/platform.ts";
+import { SHARE_EVENT, hasPendingShare } from "./lib/share.ts";
 
 type Tab = "search" | "ingest";
 
@@ -43,7 +44,7 @@ export default function App() {
 
 function Workspace({ user, auth }: { user: UserSummary; auth: Auth }) {
   const [dialog, setDialog] = useState<"account" | "llm" | "admin" | null>(null);
-  const [tab, setTab] = useState<Tab>(() => (takeJobParam() || storageGet("tab") === "ingest" ? "ingest" : "search"));
+  const [tab, setTab] = useState<Tab>(() => (takeJobParam() || hasPendingShare() || storageGet("tab") === "ingest" ? "ingest" : "search"));
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [collections, setCollections] = useState<Collection[]>([]);
@@ -130,6 +131,18 @@ function Workspace({ user, auth }: { user: UserSummary; auth: Auth }) {
       cleanup();
     };
   }, []);
+
+  // A link shared from another app (lib/share.ts): open the Collections tab, whose crawl form picks it up.
+  useEffect(() => {
+    const onShare = () => {
+      setTab("ingest");
+      storageSet("tab", "ingest");
+      setIngestKey((k) => k + 1);
+    };
+    window.addEventListener(SHARE_EVENT, onShare);
+    return () => window.removeEventListener(SHARE_EVENT, onShare);
+  }, []);
+
   const selectScope = (s: SearchScope) => {
     setScope(s);
     storageSet("scope", s);
@@ -140,7 +153,7 @@ function Workspace({ user, auth }: { user: UserSummary; auth: Auth }) {
       <header className="sticky top-0 z-20 border-b border-stone-200 bg-white/85 backdrop-blur dark:border-stone-800 dark:bg-stone-950/85">
         {/* Phones: icons on the first row, the Search/Collections switch full width on a second row. */}
         <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-2 py-2 pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] md:h-14 md:flex-nowrap md:gap-3 md:py-0">
-          <img src="/favicon.svg" alt="" className="size-7 shrink-0" />
+          <img src="/logo.png" alt="" className="size-8 shrink-0" />
           <span className="hidden font-semibold tracking-tight md:inline">SpecHarvest</span>
           <div className="ml-auto flex shrink-0 items-center gap-1.5 md:order-last md:gap-2">
             {feed.active.length > 0 && (

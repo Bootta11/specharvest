@@ -13,7 +13,7 @@ self.addEventListener("push", (event) => {
     self.registration.showNotification(data.title || "SpecHarvest", {
       body: data.body || "",
       tag: data.tag,
-      icon: "/favicon.svg",
+      icon: "/icon-192.png",
       data: { url: data.url || "/" },
     }),
   );

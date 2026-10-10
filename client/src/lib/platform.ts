@@ -1,4 +1,5 @@
 import { Capacitor } from "@capacitor/core";
+import { Preferences } from "@capacitor/preferences";
 
 /**
  * Web vs the Android app (Capacitor, see docs/mobile-app.md). The web build talks to its own origin with the
@@ -11,20 +12,42 @@ export const DEFAULT_SERVER = "https://specharvest.bootta.dev";
 const SERVER_KEY = "serverUrl";
 const TOKEN_KEY = "sessionToken";
 
+/**
+ * The app's server and token live in native storage (Capacitor Preferences) rather than the WebView's
+ * localStorage, which Android may clear under storage pressure and which would sign you out. Loaded once
+ * into memory before the UI renders (loadNativeSettings), so reads stay synchronous.
+ */
+const cache = new Map<string, string>();
+
 function read(key: string): string | null {
-  try {
-    return localStorage.getItem(key);
-  } catch {
-    return null;
-  }
+  return cache.get(key) ?? null;
 }
 
 function write(key: string, value: string | null) {
-  try {
-    if (value === null) localStorage.removeItem(key);
-    else localStorage.setItem(key, value);
-  } catch {
-    /* storage unavailable */
+  if (value === null) {
+    cache.delete(key);
+    void Preferences.remove({ key });
+  } else {
+    cache.set(key, value);
+    void Preferences.set({ key, value });
+  }
+}
+
+/** Call before rendering in the app. Also adopts values an older build kept in localStorage. */
+export async function loadNativeSettings() {
+  if (!isNative) return;
+  for (const key of [SERVER_KEY, TOKEN_KEY]) {
+    const { value } = await Preferences.get({ key });
+    let v = value;
+    if (v === null) {
+      try {
+        v = localStorage.getItem(key);
+        if (v !== null) await Preferences.set({ key, value: v });
+      } catch {
+        /* no localStorage */
+      }
+    }
+    if (v !== null) cache.set(key, v);
   }
 }
 

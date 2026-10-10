@@ -4,6 +4,7 @@ import { Directory, Encoding, Filesystem } from "@capacitor/filesystem";
 import { LocalNotifications } from "@capacitor/local-notifications";
 import { Share } from "@capacitor/share";
 import { RESUME_EVENT } from "./api.ts";
+import { parseShared, setPendingShare } from "./share.ts";
 
 /**
  * Android-only glue (Capacitor), imported lazily from the app shell. Notifications work like
@@ -15,6 +16,24 @@ import { RESUME_EVENT } from "./api.ts";
 let foreground = true;
 
 export const isAppForeground = () => foreground;
+
+/**
+ * Links shared from other apps arrive as specharvest://share?text=… (MainActivity.java). Called before the
+ * first render, so it also works on the sign-in screen; a cold-start share is retained until this listens.
+ */
+export async function listenForShares() {
+  await CapacitorApp.addListener("appUrlOpen", ({ url }) => {
+    let text: string | null = null;
+    try {
+      const u = new URL(url);
+      if (u.protocol === "specharvest:" && u.host === "share") text = u.searchParams.get("text");
+    } catch {
+      return;
+    }
+    const shared = text && parseShared(text);
+    if (shared) setPendingShare(shared);
+  });
+}
 
 /** Sets up notifications, foreground tracking, the back button and external links. Returns a cleanup. */
 export async function initNative(onOpenJob: (jobId: number) => void): Promise<() => void> {

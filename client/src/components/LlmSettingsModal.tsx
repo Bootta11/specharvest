@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { llmTiers, type LlmModelChoices, type LlmModelOption, type LlmProviderInfo, type LlmSettingsResponse, type LlmTestResult, type LlmTier } from "@specharvest/shared";
+import { llmTiers, type LlmModelChoices, type LlmModelList, type LlmModelOption, type LlmProviderInfo, type LlmSettingsResponse, type LlmTestResult, type LlmTier } from "@specharvest/shared";
 import { api, formatUsd } from "../lib/api.ts";
 import { Field, Modal, Notice } from "./Modal.tsx";
 
@@ -271,37 +271,55 @@ function Keys({ settings, onSaved }: { settings: LlmSettingsResponse; onSaved: (
   );
 }
 
+/** "$0.05 / $0.40" per 1M tokens, for the dropdown options. */
+function shortPrice(m: LlmModelOption): string {
+  if (m.input === null || m.output === null) return "";
+  const f = (n: number) => `$${n < 0.1 ? +n.toFixed(3) : +n.toFixed(2)}`;
+  return ` — ${f(m.input)} / ${f(m.output)}`;
+}
+
+const OTHER = "__other__";
+
 function Models({ settings, onSaved }: { settings: LlmSettingsResponse; onSaved: (s: LlmSettingsResponse) => void }) {
   const [choices, setChoices] = useState<LlmModelChoices>(settings.models);
-  const [options, setOptions] = useState<Record<string, LlmModelOption[]>>({});
+  // Model lists per provider + tier (web lists only models that can search); "loading" while fetching.
+  const [lists, setLists] = useState<Record<string, LlmModelList | "loading">>({});
+  // Tiers where the user chose "Other model id…" and types it.
+  const [typing, setTyping] = useState<Partial<Record<LlmTier, boolean>>>({});
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
   const label = useLabels(settings.providers);
 
   // Server-side changes (a removed key clears its picks) win over the draft.
   useEffect(() => setChoices(settings.models), [settings.models]);
+  // A changed key may change what its account can use.
+  useEffect(() => setLists({}), [settings.keys]);
 
   const connected = settings.providers.filter((p) => settings.keys.some((k) => k.provider === p.id));
   const usable = (tier: LlmTier) => connected.filter((p) => p.tiers.includes(tier) && (tier !== "web" || p.webSearch));
+  const listKey = (provider: string, tier: LlmTier) => `${provider}:${tier}`;
 
-  // Model suggestions (with prices) for every provider in use.
   useEffect(() => {
     for (const tier of llmTiers) {
       const id = choices[tier]?.provider;
-      if (id && !options[id]) {
-        setOptions((o) => ({ ...o, [id]: [] }));
-        api.llmModelOptions(id).then((list) => setOptions((o) => ({ ...o, [id]: list })), () => {});
-      }
+      if (!id || lists[listKey(id, tier)]) continue;
+      setLists((l) => ({ ...l, [listKey(id, tier)]: "loading" }));
+      api.llmModelOptions(id, tier).then(
+        (list) => setLists((l) => ({ ...l, [listKey(id, tier)]: list })),
+        () => setLists((l) => ({ ...l, [listKey(id, tier)]: { source: "models.dev", models: [] } })),
+      );
     }
-  }, [choices, options]);
+  }, [choices, lists]);
 
   const dirty = JSON.stringify(choices) !== JSON.stringify(settings.models);
 
   const pickProvider = (tier: LlmTier, id: string) => {
     const p = settings.providers.find((x) => x.id === id);
     setChoices((c) => ({ ...c, [tier]: p ? { provider: p.id, model: p.defaults[tier] ?? "" } : null }));
+    setTyping((t) => ({ ...t, [tier]: false }));
     setMsg(null);
   };
+  const setModel = (tier: LlmTier, model: string) => setChoices((c) => ({ ...c, [tier]: c[tier] ? { ...c[tier]!, model } : null }));
 
   const save = async () => {
     setBusy(true);
@@ -335,9 +353,15 @@ function Models({ settings, onSaved }: { settings: LlmSettingsResponse; onSaved:
       <div className="space-y-4">
         {llmTiers.map((tier) => {
           const pick = choices[tier];
-          const list = pick ? (options[pick.provider] ?? []) : [];
-          const price = pick ? priceLabel(list.find((m) => m.id === pick.model)) : null;
           const auto = settings.effective[tier];
+          const entry = pick ? lists[listKey(pick.provider, tier)] : undefined;
+          const loading = entry === "loading" || (!!pick && entry === undefined);
+          const list = entry && entry !== "loading" ? entry : null;
+          const models = list?.models ?? [];
+          const current = pick ? models.find((m) => m.id === pick.model) : undefined;
+          // A saved or default model the list doesn't contain stays selectable, so it's never silently lost.
+          const options = pick?.model && !current ? [{ id: pick.model, name: pick.model, input: null, output: null }, ...models] : models;
+          const free = !!pick && (typing[tier] || (!!list && models.length === 0));
           return (
             <div key={tier} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.4fr)] sm:items-start">
               <div className="min-w-0">
@@ -353,24 +377,63 @@ function Models({ settings, onSaved }: { settings: LlmSettingsResponse; onSaved:
                 ))}
               </select>
               <div className="min-w-0">
-                <input
-                  className="input font-mono text-xs"
-                  aria-label={`${TIERS[tier].title} model`}
-                  list={`llm-models-${tier}`}
-                  disabled={!pick}
-                  value={pick?.model ?? (auto ? auto.model : "")}
-                  placeholder="model id"
-                  onChange={(e) => setChoices((c) => ({ ...c, [tier]: pick ? { ...pick, model: e.target.value } : null }))}
-                />
-                <datalist id={`llm-models-${tier}`}>
-                  {list.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.name}
-                      {priceLabel(m) ? ` — ${priceLabel(m)}` : ""}
-                    </option>
-                  ))}
-                </datalist>
-                {pick ? price && <div className="mt-1 text-xs text-stone-500">{price}</div> : auto && <div className="mt-1 text-xs text-stone-500">{label(auto.provider)} · {auto.funding === "own" ? "your key" : "server key"}</div>}
+                {!pick ? (
+                  <input className="input font-mono text-xs" aria-label={`${TIERS[tier].title} model`} disabled value={auto?.model ?? ""} />
+                ) : free ? (
+                  <input
+                    className="input font-mono text-xs"
+                    aria-label={`${TIERS[tier].title} model id`}
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    value={pick.model}
+                    placeholder="exact model id"
+                    onChange={(e) => setModel(tier, e.target.value)}
+                  />
+                ) : (
+                  <select
+                    className="input"
+                    aria-label={`${TIERS[tier].title} model`}
+                    disabled={loading}
+                    value={pick.model}
+                    onChange={(e) => (e.target.value === OTHER ? setTyping((t) => ({ ...t, [tier]: true })) : setModel(tier, e.target.value))}
+                  >
+                    {loading ? (
+                      <option>Loading models…</option>
+                    ) : (
+                      <>
+                        {!pick.model && <option value="">Choose a model…</option>}
+                        {options.map((m) => (
+                          <option key={m.id} value={m.id}>
+                            {m.name}
+                            {shortPrice(m)}
+                          </option>
+                        ))}
+                        <option value={OTHER}>Other model id…</option>
+                      </>
+                    )}
+                  </select>
+                )}
+                <div className="mt-1 flex flex-wrap gap-x-2 text-xs text-stone-500">
+                  {!pick ? (
+                    auto && (
+                      <span>
+                        {label(auto.provider)} · {auto.funding === "own" ? "your key" : "server key"}
+                      </span>
+                    )
+                  ) : (
+                    <>
+                      {pick.model && <span className="truncate font-mono">{pick.model}</span>}
+                      {priceLabel(current) && <span>{priceLabel(current)}</span>}
+                      {list?.source === "models.dev" && !free && <span>from the public price list</span>}
+                      {typing[tier] && models.length > 0 && (
+                        <button type="button" className="text-brand-700 underline dark:text-brand-100" onClick={() => setTyping((t) => ({ ...t, [tier]: false }))}>
+                          Back to list
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
               </div>
             </div>
           );

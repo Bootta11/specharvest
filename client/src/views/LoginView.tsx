@@ -106,7 +106,7 @@ export function LoginView({ auth }: { auth: Auth }) {
     <div className="grid min-h-dvh place-items-center px-4 py-10">
       <div className="w-full max-w-sm">
         <div className="mb-6 flex items-center justify-center gap-2">
-          <img src="/favicon.svg" alt="" className="size-9" />
+          <img src="/logo.png" alt="" className="size-10" />
           <span className="text-xl font-semibold tracking-tight">SpecHarvest</span>
         </div>
         {isNative && (
