@@ -7,6 +7,7 @@ import type {
   CollectionGroup,
   CollectionProducts,
   CrawlRequest,
+  InspectResult,
   EnrichRequest,
   GroupInput,
   GroupingMode,
@@ -129,6 +130,8 @@ export const api = {
   splitProductName: (id: number, identity: string) => request<{ ok: true }>("POST", `/api/collections/${id}/split`, { identity }),
   item: (id: number) => request<ItemDetail>("GET", `/api/items/${id}`),
   crawl: (body: CrawlRequest) => request<Job>("POST", "/api/crawl", body),
+  /** What a URL is before crawling it: listing, single item, or an unrelated page. */
+  inspectUrl: (url: string) => request<InspectResult>("POST", "/api/crawl/inspect", { url }),
   enrich: (body: EnrichRequest) => request<{ job: Job | null; note?: string }>("POST", "/api/enrich", body),
   jobs: () => request<Job[]>("GET", "/api/jobs"),
   stopJob: (id: number) => request<Job>("POST", `/api/jobs/${id}/stop`),

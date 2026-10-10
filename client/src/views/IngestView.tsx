@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
-import { isActiveJob, type Collection, type CollectionGroup, type CrawlMode, type Job } from "@specharvest/shared";
+import { isActiveJob, type Collection, type CollectionGroup, type CrawlMode, type CrawlRequest, type Job } from "@specharvest/shared";
 import { api, downloadExport, formatUsd, storageGet, storageSet, useJobStream, type AppConfig, type JobsFeed, type SearchScope } from "../lib/api.ts";
 import { JobProgress, StatusBadge, jobPercent } from "../components/JobProgress.tsx";
 import { ProductsModal } from "../components/ProductsModal.tsx";
 import { GroupModal } from "../components/GroupModal.tsx";
 import { clearPendingShare, peekPendingShare, sameUrl } from "../lib/share.ts";
 import { ClearableInput } from "../components/ClearableInput.tsx";
+import { usePageCheck } from "../lib/page-check.ts";
 
 interface Props {
   config: AppConfig | null;
@@ -17,9 +18,21 @@ interface Props {
 }
 
 const MODES: Array<{ value: CrawlMode; label: string; hint: string }> = [
-  { value: "quick", label: "Quick check", hint: "Compares listing tiles; opens an ad only if its tile changed. AI reads only new or changed ads." },
-  { value: "deep", label: "Deep check", hint: "Opens every saved ad and compares its text. AI reads only new or changed ads." },
-  { value: "full", label: "Re-extract all", hint: "AI reads every ad again, changed or not. Slowest and most expensive." },
+  {
+    value: "quick",
+    label: "Quick check",
+    hint: "Compares listing tiles; opens an ad only if its tile changed. AI reads only new or changed ads.",
+  },
+  {
+    value: "deep",
+    label: "Deep check",
+    hint: "Opens every saved ad and compares its text. AI reads only new or changed ads.",
+  },
+  {
+    value: "full",
+    label: "Re-extract all",
+    hint: "AI reads every ad again, changed or not. Slowest and most expensive.",
+  },
 ];
 
 const timeAgo = (ts: number) => {
@@ -37,6 +50,13 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
   const [shared, setShared] = useState(peekPendingShare);
   const [url, setUrl] = useState(() => shared?.url ?? "");
   const [name, setName] = useState(() => shared?.title ?? "");
+  /** The user typed the title themselves — the checked page's title doesn't replace it. */
+  const [nameEdited, setNameEdited] = useState(false);
+  /** "Crawl anyway" on a page the check says isn't a shop page. */
+  const [override, setOverride] = useState(false);
+  /** Item pages: add to this collection id, or "new" for a new collection named `newCollectionName`. */
+  const [itemTarget, setItemTarget] = useState<number | "new">("new");
+  const [newCollectionName, setNewCollectionName] = useState("");
   const [maxPages, setMaxPages] = useState<number | "">("");
   const [maxItems, setMaxItems] = useState<number | "">("");
   const [useProxy, setUseProxy] = useState(false);
@@ -75,6 +95,30 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
 
   const sharedMatch = shared ? collections.find((c) => c.canEdit && sameUrl(c.startUrl, shared.url)) : undefined;
 
+  // What the URL is (listing / single item / unrelated), checked as soon as it's in the field.
+  const check = usePageCheck(url, config?.llmConfigured !== false, shared?.url);
+  const checked = check?.status === "done" ? check.result : null;
+  const isItem = checked?.kind === "item";
+  const blocked = checked?.kind === "other" && !override;
+  const editable = collections.filter((c) => c.canEdit);
+  useEffect(() => setOverride(false), [check?.url]);
+  useEffect(() => {
+    if (!checked) return;
+    if (checked.title && !nameEdited) setName(checked.title);
+    if (checked.kind !== "item") return;
+    // Default: the newest collection of yours from the same site, else a new one named after the category.
+    const host = (() => {
+      try {
+        return new URL(check!.url).hostname;
+      } catch {
+        return "";
+      }
+    })();
+    const sameSite = editable.find((c) => c.host === host);
+    setItemTarget(sameSite ? sameSite.id : "new");
+    setNewCollectionName(checked.category?.name ?? host.replace(/^www\./, ""));
+  }, [checked]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Refresh lists when the watched job finishes.
   const finished = !!stream.job && !isActiveJob(stream.job);
   useEffect(() => {
@@ -101,7 +145,7 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
     storageSet("crawlMode", m);
   };
 
-  const start = async (body: { url: string; collectionId?: number; name?: string; maxPages?: number; maxItems?: number; useProxy?: boolean; mode: CrawlMode }) => {
+  const start = async (body: CrawlRequest) => {
     setBusy(true);
     setError(null);
     try {
@@ -120,6 +164,15 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
+    if (isItem) {
+      start({
+        url: url.trim(),
+        kind: "item",
+        ...(itemTarget === "new" ? { name: newCollectionName.trim() } : { collectionId: itemTarget }),
+        useProxy: useProxy || undefined,
+      });
+      return;
+    }
     start({
       url: url.trim(),
       name: name.trim() || undefined,
@@ -210,6 +263,8 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
                   <>
                     Already collected as <span className="font-medium">{sharedMatch.name}</span> — re-crawl it, or start a new collection below.
                   </>
+                ) : isItem ? (
+                  "Choose where to add it and tap Add item."
                 ) : (
                   "Review the settings below and tap Start crawl."
                 )}
@@ -217,7 +272,17 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
             </div>
             <div className="flex shrink-0 gap-2">
               {sharedMatch && (
-                <button className="btn-primary btn-sm" disabled={busy} onClick={() => start({ url: sharedMatch.startUrl, collectionId: sharedMatch.id, mode })}>
+                <button
+                  className="btn-primary btn-sm"
+                  disabled={busy}
+                  onClick={() =>
+                    start({
+                      url: sharedMatch.startUrl,
+                      collectionId: sharedMatch.id,
+                      mode,
+                    })
+                  }
+                >
                   Re-crawl
                 </button>
               )}
@@ -229,67 +294,162 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
         )}
         <form onSubmit={submit} className="card space-y-4 p-4 sm:p-5">
           <div>
-            <h2 className="text-lg font-semibold">Crawl a shop listing</h2>
+            <h2 className="text-lg font-semibold">{isItem ? "Add a single item" : "Crawl a shop listing"}</h2>
             <p className="mt-1 text-sm text-stone-600 dark:text-stone-400">
-              Paste a category or search-results URL. Item cards and pagination are detected automatically, every item page is read, and its specs are normalized.
+              Paste a category or search-results URL, or one item&apos;s page. Item cards and pagination are detected automatically, every item page is read, and its specs are normalized.
             </p>
           </div>
           <label className="block">
-            <span className="mb-1 block text-sm font-medium">Listing URL</span>
+            <span className="mb-1 block text-sm font-medium">Listing or item URL</span>
             <ClearableInput type="url" required placeholder="https://shop.example/category?…" value={url} onChange={(e) => setUrl(e.target.value)} onClear={() => setUrl("")} />
+            {check?.status === "checking" && (
+              <span className="mt-1.5 flex items-center gap-2 text-xs text-stone-500">
+                <span className="size-3 animate-spin rounded-full border-2 border-stone-300 border-t-brand-600" aria-hidden />
+                Checking what this page is…
+              </span>
+            )}
+            {check?.status === "failed" && <span className="mt-1.5 block text-xs text-stone-500">Couldn't check the page — it will be crawled as a listing.</span>}
+            {checked?.kind === "listing" && <span className="mt-1.5 block text-xs text-brand-700 dark:text-brand-100">✓ Shop listing — {checked.reason}</span>}
           </label>
-          <label className="block">
-            <span className="mb-1 block text-sm font-medium">
-              Title <span className="font-normal text-stone-500">(optional)</span>
-            </span>
-            <ClearableInput type="text" maxLength={200} placeholder="Defaults to the page title" value={name} onChange={(e) => setName(e.target.value)} onClear={() => setName("")} />
-          </label>
-          <div className="grid grid-cols-2 gap-3">
-            <label className="block">
-              <span className="mb-1 block text-sm font-medium">Max pages</span>
-              <ClearableInput
-                type="number"
-                min={1}
-                max={config?.limits.maxPages ?? 200}
-                placeholder={String(config?.defaults.maxPages ?? 10)}
-                value={maxPages}
-                onChange={(e) => setMaxPages(e.target.value ? Number(e.target.value) : "")}
-                onClear={() => setMaxPages("")}
-              />
-            </label>
-            <label className="block">
-              <span className="mb-1 block text-sm font-medium">Max items</span>
-              <ClearableInput
-                type="number"
-                min={1}
-                max={config?.limits.maxItems ?? 5000}
-                placeholder={String(config?.defaults.maxItems ?? 200)}
-                value={maxItems}
-                onChange={(e) => setMaxItems(e.target.value ? Number(e.target.value) : "")}
-                onClear={() => setMaxItems("")}
-              />
-            </label>
-          </div>
-          <fieldset>
-            <legend className="mb-1 block text-sm font-medium">Already saved ads</legend>
-            <div role="radiogroup" className="grid grid-cols-1 gap-1 rounded-lg bg-stone-100 p-1 sm:grid-cols-3 dark:bg-stone-800">
-              {MODES.map((m) => (
-                <button
-                  key={m.value}
-                  type="button"
-                  role="radio"
-                  aria-checked={mode === m.value}
-                  onClick={() => chooseMode(m.value)}
-                  className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
-                    mode === m.value ? "bg-white text-brand-800 shadow-sm dark:bg-stone-900 dark:text-brand-200" : "text-stone-600 hover:text-stone-900 dark:text-stone-400 dark:hover:text-stone-100"
-                  }`}
-                >
-                  {m.label}
+          {checked?.kind === "other" && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
+              <p>
+                <span className="font-medium">This doesn't look like a shop listing or item.</span> {checked.reason}.
+              </p>
+              {override ? (
+                <p className="mt-1 text-xs">Crawling it as a listing anyway.</p>
+              ) : (
+                <button type="button" className="mt-1 text-xs font-medium underline" onClick={() => setOverride(true)}>
+                  Crawl anyway
                 </button>
-              ))}
+              )}
             </div>
-            <p className="mt-1.5 text-xs text-stone-500">{MODES.find((m) => m.value === mode)!.hint}</p>
-          </fieldset>
+          )}
+          {isItem && (
+            <div className="space-y-3 rounded-lg border border-stone-200 p-3 dark:border-stone-700">
+              <div className="text-sm">
+                <div className="font-medium">Single item page</div>
+                {checked.title && (
+                  <div className="truncate text-stone-600 dark:text-stone-400" title={checked.title}>
+                    {checked.title}
+                  </div>
+                )}
+              </div>
+              <label className="block">
+                <span className="mb-1 block text-sm font-medium">Add it to</span>
+                <select className="input" value={itemTarget} onChange={(e) => setItemTarget(e.target.value === "new" ? "new" : Number(e.target.value))}>
+                  <option value="new">New collection…</option>
+                  {editable.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name} ({c.itemCount})
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {itemTarget === "new" && (
+                <label className="block">
+                  <span className="mb-1 block text-sm font-medium">New collection name</span>
+                  <ClearableInput
+                    type="text"
+                    required
+                    maxLength={200}
+                    placeholder="e.g. Mountain bikes"
+                    value={newCollectionName}
+                    onChange={(e) => setNewCollectionName(e.target.value)}
+                    onClear={() => setNewCollectionName("")}
+                  />
+                  <span className="mt-1 block text-xs text-stone-500">More items can join it later.</span>
+                </label>
+              )}
+              {checked.category && (
+                <p className="text-xs text-stone-600 dark:text-stone-400">
+                  This ad is in <span className="font-medium">{checked.category.name}</span> —{" "}
+                  <button
+                    type="button"
+                    className="font-medium text-brand-700 underline dark:text-brand-100"
+                    onClick={() => {
+                      setUrl(checked.category!.url);
+                      setName("");
+                      setNameEdited(false);
+                    }}
+                  >
+                    crawl that listing instead
+                  </button>
+                </p>
+              )}
+            </div>
+          )}
+          {!isItem && (
+            <>
+              <label className="block">
+                <span className="mb-1 block text-sm font-medium">
+                  Title <span className="font-normal text-stone-500">(optional)</span>
+                </span>
+                <ClearableInput
+                  type="text"
+                  maxLength={200}
+                  placeholder="Defaults to the page title"
+                  value={name}
+                  onChange={(e) => {
+                    setName(e.target.value);
+                    setNameEdited(true);
+                  }}
+                  onClear={() => {
+                    setName("");
+                    setNameEdited(true);
+                  }}
+                />
+              </label>
+              <div className="grid grid-cols-2 gap-3">
+                <label className="block">
+                  <span className="mb-1 block text-sm font-medium">Max pages</span>
+                  <ClearableInput
+                    type="number"
+                    min={1}
+                    max={config?.limits.maxPages ?? 200}
+                    placeholder={String(config?.defaults.maxPages ?? 10)}
+                    value={maxPages}
+                    onChange={(e) => setMaxPages(e.target.value ? Number(e.target.value) : "")}
+                    onClear={() => setMaxPages("")}
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-1 block text-sm font-medium">Max items</span>
+                  <ClearableInput
+                    type="number"
+                    min={1}
+                    max={config?.limits.maxItems ?? 5000}
+                    placeholder={String(config?.defaults.maxItems ?? 200)}
+                    value={maxItems}
+                    onChange={(e) => setMaxItems(e.target.value ? Number(e.target.value) : "")}
+                    onClear={() => setMaxItems("")}
+                  />
+                </label>
+              </div>
+              <fieldset>
+                <legend className="mb-1 block text-sm font-medium">Already saved ads</legend>
+                <div role="radiogroup" className="grid grid-cols-1 gap-1 rounded-lg bg-stone-100 p-1 sm:grid-cols-3 dark:bg-stone-800">
+                  {MODES.map((m) => (
+                    <button
+                      key={m.value}
+                      type="button"
+                      role="radio"
+                      aria-checked={mode === m.value}
+                      onClick={() => chooseMode(m.value)}
+                      className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
+                        mode === m.value
+                          ? "bg-white text-brand-800 shadow-sm dark:bg-stone-900 dark:text-brand-200"
+                          : "text-stone-600 hover:text-stone-900 dark:text-stone-400 dark:hover:text-stone-100"
+                      }`}
+                    >
+                      {m.label}
+                    </button>
+                  ))}
+                </div>
+                <p className="mt-1.5 text-xs text-stone-500">{MODES.find((m) => m.value === mode)!.hint}</p>
+              </fieldset>
+            </>
+          )}
           {config?.proxyConfigured && (
             <label className="inline-flex items-center gap-2 text-sm">
               <input type="checkbox" className="size-4 accent-brand-700" checked={useProxy} onChange={(e) => setUseProxy(e.target.checked)} />
@@ -297,8 +457,11 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
             </label>
           )}
           {error && <p className="text-sm text-red-700 dark:text-red-300">{error}</p>}
-          <button className="btn-primary w-full sm:w-auto" disabled={busy || !url.trim() || config?.llmConfigured === false}>
-            {busy ? "Starting…" : "Start crawl"}
+          <button
+            className="btn-primary w-full sm:w-auto"
+            disabled={busy || !url.trim() || config?.llmConfigured === false || check?.status === "checking" || blocked || (isItem && itemTarget === "new" && !newCollectionName.trim())}
+          >
+            {busy ? "Starting…" : check?.status === "checking" ? "Checking page…" : isItem ? "Add item" : "Start crawl"}
           </button>
         </form>
 
@@ -396,7 +559,8 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
                     </div>
                     <div className="truncate text-xs text-stone-500">
                       {!c.canEdit && c.ownerEmail && <>by {c.ownerEmail} · </>}
-                      {c.itemCount} items ·{" "}
+                      {c.itemCount} items
+                      {c.manualCount > 0 && c.kind === "listing" && <> ({c.manualCount} added by hand)</>} ·{" "}
                       <button
                         type="button"
                         className="hover:text-brand-700 hover:underline dark:hover:text-brand-500"
@@ -429,9 +593,11 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
                           className="btn-ghost btn-sm"
                           disabled={busy}
                           onClick={() => start({ url: c.startUrl, collectionId: c.id, mode })}
-                          title={`Crawl again — ${MODES.find((m) => m.value === mode)!.label.toLowerCase()} of saved ads`}
+                          title={
+                            c.kind === "items" ? "Open each saved item page again and update what changed" : `Crawl again — ${MODES.find((m) => m.value === mode)!.label.toLowerCase()} of saved ads`
+                          }
                         >
-                          Re-crawl
+                          {c.kind === "items" ? "Re-check" : "Re-crawl"}
                         </button>
                         <button className="btn-ghost btn-sm" onClick={() => rename(c)}>
                           Rename

@@ -3,6 +3,34 @@
 A crawl job (`POST /api/crawl`) runs five stages; progress streams over
 `GET /api/jobs/:id/events`.
 
+## 0. Page check
+
+Before anything is crawled, the form asks `POST /api/crawl/inspect` what the URL is
+(`crawler/inspect.ts`) — as soon as it's typed (debounced) or shared:
+
+1. **What we know about the site**: a saved listing structure for the host whose card
+   selector finds ≥ 10 items here → *listing*; the URL matches its item-URL pattern →
+   *item* (a few matching cards can be an item page's "similar ads" strip).
+2. **Structured data**: one JSON-LD `Product`/`Vehicle` (related products inside it don't
+   count) or `og:type=product` → *item*; several products, `ItemList` or `CollectionPage` →
+   *listing*; `NewsArticle`/`Article`/`BlogPosting` or `og:type=article` → *other*.
+3. Otherwise **one small LLM call** (detect tier) on the page's title, link/price counts
+   and visible text.
+
+Costs one page load and at most one small LLM call; cached per URL for 10 minutes.
+The form then adapts:
+
+- *listing* → crawl as below.
+- *item* → **Add item**: `POST /api/crawl` with `kind: "item"` adds that one page to a
+  collection you can edit (default: your newest one from the same site) or to a new
+  collection (named after the item's breadcrumb category). Hand-added items are never
+  marked gone, and a *Re-crawl* re-opens their pages too (LLM only if they changed). A
+  collection started from an item has no listing: its *Re-check* deep-checks its items. When
+  the page has a breadcrumb category, the form offers to crawl that listing instead.
+- *other* (news, blog…) → a warning; *Start crawl* stays off until *Crawl anyway*.
+
+If the check fails or takes over 25 s, the form works as before.
+
 ## 1. Listing detection (once per collection)
 
 Strategy adapted from twinlisting:

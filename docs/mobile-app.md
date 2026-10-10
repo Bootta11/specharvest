@@ -71,7 +71,9 @@ Push doesn't work inside the app, so its toggle is hidden there.
 
 - **Share a link to SpecHarvest** from any app (Chrome, a shop app…): the app opens on Collections with the
   crawl form filled in — the link, a title (from the shared text, or guessed from the URL) and the default
-  limits; each field has an ✕ to clear it. Check the settings and tap *Start crawl*. If the link is already one of
+  limits; each field has an ✕ to clear it. The link is checked first (see
+  [page check](crawling.md#0-page-check)): an item page gets *Add item*, a news page a warning.
+  Check the settings and tap *Start crawl*. If the link is already one of
   your collections' start URLs, it offers *Re-crawl* too. Shared while signed out, the link waits until you
   sign in. (`MainActivity` turns the share into a `specharvest://share?text=…` link; see `src/lib/share.ts`.)
 - The back button closes the open dialog or menu, otherwise it sends the app to the background.

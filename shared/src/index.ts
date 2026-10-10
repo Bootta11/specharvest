@@ -7,6 +7,8 @@ export type SpecOrigin = "page" | "web";
 export type GroupingMode = "strict" | "loose";
 export const groupingModes = ["strict", "loose"] as const satisfies readonly GroupingMode[];
 
+export type CollectionKind = "listing" | "items";
+
 export interface Collection {
   id: number;
   name: string;
@@ -24,6 +26,10 @@ export interface Collection {
   isShared: boolean;
   /** How product names are grouped: strict = certain matches only; loose = also a possible match with a single candidate. */
   grouping: GroupingMode;
+  /** listing = crawled from a listing page; items = started from a single item page (no listing to walk). */
+  kind: CollectionKind;
+  /** Items added by hand from their own page (kept and re-checked on re-crawls, never marked gone). */
+  manualCount: number;
   /** The viewer owns it or is an admin: may crawl, rename, share or delete. */
   canEdit: boolean;
 }
@@ -329,8 +335,30 @@ export const crawlRequestSchema = z.object({
   mode: z.enum(crawlModes).optional(),
   /** Legacy alias for mode "full". */
   refresh: z.boolean().optional(),
+  /**
+   * listing (default) walks a listing page; item adds this one item page to `collectionId`, or to a new
+   * collection named `name` when no collectionId is given.
+   */
+  kind: z.enum(["listing", "item"]).optional(),
 });
 export type CrawlRequest = z.infer<typeof crawlRequestSchema>;
+
+// ---------- Page check (before crawling) ----------
+
+export const inspectRequestSchema = z.object({ url: httpUrlSchema });
+
+export type PageKind = "listing" | "item" | "other";
+
+export interface InspectResult {
+  /** listing = shop category/search page; item = one product/ad page; other = not a shop page (news, blog…). */
+  kind: PageKind;
+  /** The page's own title (product name on an item page), when found. */
+  title: string | null;
+  /** Short human-readable reason for the verdict. */
+  reason: string;
+  /** Item pages: the category listing it belongs to, from breadcrumbs. */
+  category: { name: string; url: string } | null;
+}
 
 export const enrichRequestSchema = z.object({
   collectionId: z.number().int().positive().nullable().optional(),
@@ -387,6 +415,8 @@ export const collectionExportSchema = z.object({
     createdAt: z.number(),
     // Absent in files from before grouping modes existed.
     grouping: z.enum(groupingModes).default("strict"),
+    // Absent in files from before single-item collections existed.
+    kind: z.enum(["listing", "items"]).default("listing"),
     // A detection that doesn't fit is dropped (the next crawl detects again) rather than failing the import.
     detection: listingDetectionSchema.nullable().default(null).catch(null),
   }),
@@ -422,6 +452,7 @@ export const collectionExportSchema = z.object({
         lastSeenAt: nullableNumber,
         checkedAt: nullableNumber,
         goneAt: nullableNumber,
+        manual: z.boolean().default(false),
       }),
     )
     .max(20_000),

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import { COLLECTION_EXPORT_FORMAT, COLLECTIONS_EXPORT_FORMAT, type Collection, type CollectionExport, type GroupingMode, type CollectionGroup, type CollectionsExport, type Item, type Job, type JobKind, type LlmFunding, type LlmPurpose, type LookupStats, type SpecKey, type SpecOrigin, type SpecSource, type SpecType, type SpecValue, type UsageSummary } from "@specharvest/shared";
+import { COLLECTION_EXPORT_FORMAT, COLLECTIONS_EXPORT_FORMAT, type Collection, type CollectionExport, type GroupingMode, type CollectionGroup, type CollectionKind, type CollectionsExport, type Item, type Job, type JobKind, type LlmFunding, type LlmPurpose, type LookupStats, type SpecKey, type SpecOrigin, type SpecSource, type SpecType, type SpecValue, type UsageSummary } from "@specharvest/shared";
 import { env } from "../config.ts";
 import { withSafeUrlPattern } from "../crawler/url-pattern.ts";
 
@@ -240,6 +240,10 @@ export function getDb(): DatabaseSync {
   // lookups don't reuse them until this server extracts the item / detects the listing itself.
   addColumnIfMissing("items", "imported", "INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing("collections", "detection_imported", "INTEGER NOT NULL DEFAULT 0");
+  // Single items added by hand (not from walking a listing) — never marked gone by a listing walk.
+  addColumnIfMissing("items", "manual", "INTEGER NOT NULL DEFAULT 0");
+  // 'items': started from a single item page, so there is no listing to walk.
+  addColumnIfMissing("collections", "kind", "TEXT NOT NULL DEFAULT 'listing'");
   // Per-user LLM keys: which provider served a call, who paid (own key / server key), and whether the cost is an estimate.
   // Rows from before were all OpenRouter calls on the server's key.
   if (!columnExists("llm_usage", "provider")) {
@@ -358,11 +362,14 @@ function toCollection(r: Row, viewer?: Viewer): Collection {
     ownerEmail: r.owner_email == null ? null : String(r.owner_email),
     isShared: Number(r.is_shared ?? 0) === 1,
     grouping: r.grouping === "loose" ? "loose" : "strict",
+    kind: r.kind === "items" ? "items" : "listing",
+    manualCount: Number(r.manual_count ?? 0),
     canEdit: !!viewer && (viewer.role === "admin" || ownerId === viewer.id),
   };
 }
 
 const COLLECTION_SELECT = `SELECT c.*, u.email AS owner_email, (SELECT COUNT(*) FROM items i WHERE i.collection_id = c.id) AS item_count,
+  (SELECT COUNT(*) FROM items i WHERE i.collection_id = c.id AND i.manual = 1) AS manual_count,
   (SELECT COUNT(DISTINCT COALESCE(a.canonical, NULLIF(i.identity, ''), lower(trim(i.title)))) FROM items i
      LEFT JOIN identity_aliases a ON a.identity = i.identity WHERE i.collection_id = c.id AND i.gone_at IS NULL) AS product_count,
   (SELECT COALESCE(SUM(l.cost), 0) FROM llm_usage l WHERE l.collection_id = c.id) AS llm_cost
@@ -402,10 +409,10 @@ export function findCollectionByUrl(startUrl: string, userId: number | null) {
   return r ? getCollection(Number(r.id)) : null;
 }
 
-export function createCollection(name: string, startUrl: string, host: string, userId: number | null = null): number {
+export function createCollection(name: string, startUrl: string, host: string, userId: number | null = null, kind: CollectionKind = "listing"): number {
   const res = getDb()
-    .prepare("INSERT INTO collections (name, start_url, host, created_at, user_id) VALUES (?, ?, ?, ?, ?)")
-    .run(name, startUrl, host, Date.now(), userId);
+    .prepare("INSERT INTO collections (name, start_url, host, created_at, user_id, kind) VALUES (?, ?, ?, ?, ?, ?)")
+    .run(name, startUrl, host, Date.now(), userId, kind);
   return Number(res.lastInsertRowid);
 }
 
@@ -532,7 +539,7 @@ export function exportCollection(id: number): CollectionExport {
     format: COLLECTION_EXPORT_FORMAT,
     version: 1,
     exportedAt: Date.now(),
-    collection: { name: c.name, startUrl: c.startUrl, host: c.host, createdAt: c.createdAt, grouping: c.grouping, detection: c.detection },
+    collection: { name: c.name, startUrl: c.startUrl, host: c.host, createdAt: c.createdAt, grouping: c.grouping, kind: c.kind, detection: c.detection },
     specKeys: (d.prepare("SELECT * FROM spec_keys WHERE collection_id = ? ORDER BY key").all(id) as Row[]).map((r) => {
       const { count: _, ...k } = toSpecKey(r);
       return k;
@@ -555,6 +562,7 @@ export function exportCollection(id: number): CollectionExport {
       lastSeenAt: num(r.last_seen_at),
       checkedAt: num(r.checked_at),
       goneAt: num(r.gone_at),
+      manual: Number(r.manual ?? 0) === 1,
     })),
     aliases: aliasRows.map((r) => ({ identity: String(r.identity), canonical: String(r.canonical) })),
     webFacts: factRows.map((r) => ({
@@ -617,7 +625,7 @@ function insertImportedCollection(data: CollectionExport, importer: Viewer): Imp
   const past = <T extends number | null>(t: T): T => (t === null ? t : (Math.min(t, now) as T));
   const taken = new Set((d.prepare("SELECT name FROM collections WHERE user_id = ?").all(userId) as Row[]).map((r) => String(r.name)));
   const name = taken.has(data.collection.name) ? `${data.collection.name} (imported)` : data.collection.name;
-  const collectionId = createCollection(name, data.collection.startUrl, data.collection.host, userId);
+  const collectionId = createCollection(name, data.collection.startUrl, data.collection.host, userId, data.collection.kind);
   const detection = withSafeUrlPattern(data.collection.detection);
   d.prepare("UPDATE collections SET created_at = ?, grouping = ?, detection = ?, detection_imported = ? WHERE id = ?").run(
     past(data.collection.createdAt),
@@ -630,14 +638,14 @@ function insertImportedCollection(data: CollectionExport, importer: Viewer): Imp
   for (const k of data.specKeys) keyStmt.run(collectionId, k.key, k.type, k.unit, k.label, k.example, k.origin);
   const itemStmt = d.prepare(
     `INSERT OR IGNORE INTO items (collection_id, url, title, price, currency, main_image, description, identity, specs, raw_text, indexed_at,
-       card_hash, content_hash, content_text, last_seen_at, checked_at, gone_at, imported) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+       card_hash, content_hash, content_text, last_seen_at, checked_at, gone_at, manual, imported) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
   );
   const sourceStmt = d.prepare("INSERT OR REPLACE INTO spec_sources (item_id, key, origin, source_url, confidence, fetched_at) VALUES (?, ?, ?, ?, ?, ?)");
   const itemIds: number[] = [];
   for (const it of data.items) {
     const res = itemStmt.run(
       collectionId, it.url, it.title, it.price, it.currency, it.mainImage, it.description, it.identity, JSON.stringify(it.specs), it.rawText,
-      past(it.indexedAt), it.cardHash, it.contentHash, it.contentText, past(it.lastSeenAt), past(it.checkedAt), past(it.goneAt),
+      past(it.indexedAt), it.cardHash, it.contentHash, it.contentText, past(it.lastSeenAt), past(it.checkedAt), past(it.goneAt), it.manual ? 1 : 0,
     );
     if (!res.changes) continue; // duplicate URL in the file
     const itemId = Number(res.lastInsertRowid);
@@ -672,6 +680,8 @@ export interface ItemInput {
   contentHash?: string | null;
   /** Detail text without other listings — what contentHash was computed from (for change diffs). */
   contentText?: string | null;
+  /** Added by hand from its own page; once set it stays (a listing walk never clears it). */
+  manual?: boolean;
 }
 
 export function upsertItem(input: ItemInput): number {
@@ -691,16 +701,16 @@ export function upsertItem(input: ItemInput): number {
     d.prepare(
       `UPDATE items SET title=?, price=?, currency=?, main_image=?, description=?, identity=?, specs=?, raw_text=?, indexed_at=?,
          card_hash=COALESCE(?, card_hash), content_hash=COALESCE(?, content_hash), content_text=COALESCE(?, content_text), last_seen_at=?, checked_at=?, gone_at=NULL,
-         imported=0 WHERE id=?`,
-    ).run(input.title, input.price, input.currency, input.mainImage, input.description, input.identity, JSON.stringify(specs), input.rawText, now, input.cardHash ?? null, input.contentHash ?? null, input.contentText ?? null, now, now, id);
+         imported=0, manual=MAX(manual, ?) WHERE id=?`,
+    ).run(input.title, input.price, input.currency, input.mainImage, input.description, input.identity, JSON.stringify(specs), input.rawText, now, input.cardHash ?? null, input.contentHash ?? null, input.contentText ?? null, now, now, input.manual ? 1 : 0, id);
     return id;
   }
   const res = d
     .prepare(
-      `INSERT INTO items (collection_id, url, title, price, currency, main_image, description, identity, specs, raw_text, indexed_at, card_hash, content_hash, content_text, last_seen_at, checked_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO items (collection_id, url, title, price, currency, main_image, description, identity, specs, raw_text, indexed_at, card_hash, content_hash, content_text, last_seen_at, checked_at, manual)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(input.collectionId, input.url, input.title, input.price, input.currency, input.mainImage, input.description, input.identity, JSON.stringify(input.specs), input.rawText, now, input.cardHash ?? null, input.contentHash ?? null, input.contentText ?? null, now, now);
+    .run(input.collectionId, input.url, input.title, input.price, input.currency, input.mainImage, input.description, input.identity, JSON.stringify(input.specs), input.rawText, now, input.cardHash ?? null, input.contentHash ?? null, input.contentText ?? null, now, now, input.manual ? 1 : 0);
   return Number(res.lastInsertRowid);
 }
 
@@ -711,11 +721,12 @@ export interface ItemFingerprint {
   /** Stable detail text from the last check/extraction (falls back to raw_text for older rows). */
   contentText: string | null;
   goneAt: number | null;
+  manual: boolean;
 }
 
 /** Change-detection state of every item in a collection, by URL. */
 export function getItemFingerprints(collectionId: number): Map<string, ItemFingerprint> {
-  const rows = getDb().prepare("SELECT id, url, card_hash, content_hash, COALESCE(content_text, raw_text) AS content_text, gone_at FROM items WHERE collection_id = ?").all(collectionId) as Row[];
+  const rows = getDb().prepare("SELECT id, url, card_hash, content_hash, COALESCE(content_text, raw_text) AS content_text, gone_at, manual FROM items WHERE collection_id = ?").all(collectionId) as Row[];
   return new Map(
     rows.map((r) => [
       String(r.url),
@@ -725,6 +736,7 @@ export function getItemFingerprints(collectionId: number): Map<string, ItemFinge
         contentHash: r.content_hash == null ? null : String(r.content_hash),
         contentText: r.content_text == null ? null : String(r.content_text),
         goneAt: r.gone_at == null ? null : Number(r.gone_at),
+        manual: Number(r.manual ?? 0) === 1,
       },
     ]),
   );
@@ -744,11 +756,15 @@ export function touchItem(id: number, opts: { cardHash?: string | null; contentH
     .run(opts.cardHash ?? null, opts.contentHash ?? null, opts.contentText ?? null, now, opts.checked ? 1 : 0, now, id);
 }
 
-/** Marks items of a collection not in `seenUrls` as gone; returns how many were newly marked. */
+export function setItemManual(collectionId: number, url: string) {
+  getDb().prepare("UPDATE items SET manual = 1 WHERE collection_id = ? AND url = ?").run(collectionId, url);
+}
+
+/** Marks items of a collection not in `seenUrls` as gone (hand-added ones excepted); returns how many were newly marked. */
 export function markGone(collectionId: number, seenUrls: Iterable<string>): number {
   const seen = new Set(seenUrls);
   const d = getDb();
-  const rows = d.prepare("SELECT id, url FROM items WHERE collection_id = ? AND gone_at IS NULL").all(collectionId) as Row[];
+  const rows = d.prepare("SELECT id, url FROM items WHERE collection_id = ? AND gone_at IS NULL AND manual = 0").all(collectionId) as Row[];
   const stmt = d.prepare("UPDATE items SET gone_at = ? WHERE id = ?");
   const now = Date.now();
   let n = 0;

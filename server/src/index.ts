@@ -8,6 +8,7 @@ import {
   CRAWL_MAX_ITEMS,
   CRAWL_MAX_PAGES,
   crawlRequestSchema,
+  inspectRequestSchema,
   enrichRequestSchema,
   groupInputSchema,
   groupingModes,
@@ -23,6 +24,7 @@ import * as db from "./db/sqlite.ts";
 import { deleteVectors, upsertVector } from "./db/lance.ts";
 import { embed } from "./embedding.ts";
 import { proxyConfigured } from "./crawler/browser.ts";
+import { inspectUrl } from "./crawler/inspect.ts";
 import { embeddingText, emitJob, jobChannel, JOBS_CHANNEL, ResumeError, resumeCrawl, startCrawl, stopCrawl } from "./crawler/job.ts";
 import { getNotificationSettings, maskSettings, saveNotificationSettings, sendTest } from "./notify/index.ts";
 import { vapidKeys } from "./notify/push.ts";
@@ -327,6 +329,15 @@ app.post("/api/crawl", userLimit(10), async (req, reply) => {
     maxItems: body.maxItems ?? (env.MAX_ITEMS > limits.maxItems ? limits.maxItems : undefined),
   };
   return reply.status(202).send(startCrawl(params, user.id, body.collectionId));
+});
+
+// What a URL is before crawling it: listing, single item, or unrelated (crawler/inspect.ts).
+app.post("/api/crawl/inspect", userLimit(30), async (req) => {
+  const user = currentUser(req);
+  requireLlm(user.id, "fast");
+  const { url } = inspectRequestSchema.parse(req.body);
+  await assertPublicUrl(url, strictPolicy());
+  return inspectUrl(new URL(url).toString(), user.id);
 });
 
 app.post("/api/enrich", userLimit(10), async (req, reply) => {

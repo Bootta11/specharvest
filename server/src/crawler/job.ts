@@ -135,25 +135,29 @@ function launch(jobId: number, collectionId: number, req: CrawlRequest, resumeSi
  * Creates (or reuses) the collection + a job and runs the crawl in the background.
  * `collectionId` re-crawls that collection (the caller checked write access); otherwise the user's own
  * collection for the URL is reused or a new one is made for them.
+ * kind "item" adds the one item page at `url` to `collectionId`, or to a new collection of kind "items".
  */
 export function startCrawl(req: CrawlRequest, userId: number | null, collectionId?: number): Job {
   const url = new URL(req.url).toString();
-  const existing = collectionId ? db.getCollection(collectionId) : db.findCollectionByUrl(url, userId);
+  const addItem = req.kind === "item";
+  const existing = collectionId ? db.getCollection(collectionId) : addItem ? null : db.findCollectionByUrl(url, userId);
   if (existing) {
     const active = db.activeJobForCollection(existing.id, "crawl");
+    if (active && addItem) throw httpError(409, `Crawl #${active.id} is running for "${existing.name}" — add the item when it finishes`);
     if (active) return active;
   }
   assertJobSlot(userId);
   const host = new URL(url).hostname;
   const name = req.name?.trim();
-  const targetId = existing?.id ?? db.createCollection(name || host, url, host, userId);
-  if (existing && name && name !== existing.name) db.renameCollection(existing.id, name);
+  const targetId = existing?.id ?? db.createCollection(name || host, url, host, userId, addItem ? "items" : "listing");
+  if (existing && !addItem && name && name !== existing.name) db.renameCollection(existing.id, name);
   const params: CrawlRequest = {
     url,
     maxPages: req.maxPages,
     maxItems: req.maxItems,
     useProxy: req.useProxy,
     mode: req.mode ?? (req.refresh ? "full" : "quick"),
+    ...(addItem ? { kind: "item" as const } : {}),
   };
   const job = db.createJob("crawl", targetId, params, userId);
   emitJob(job);
@@ -198,15 +202,23 @@ const PARTIAL_RENDER_REJECT_SHARE = 0.3;
 async function runCrawl(jobId: number, collectionId: number, url: string, req: CrawlRequest, signal: AbortSignal, resumeSince?: number) {
   const maxPages = req.maxPages ?? env.MAX_PAGES;
   const maxItems = req.maxItems ?? env.MAX_ITEMS;
-  const mode: CrawlMode = req.mode ?? (req.refresh ? "full" : "quick");
   const pageOpts = { useProxy: !!req.useProxy };
-  patchJob(jobId, { status: "running", message: "Opening listing page" });
-  if (resumeSince) jobLog(jobId, "Resuming — walking the listing again, then skipping items already handled");
-  jobLog(jobId, `Crawling ${url} (max ${maxPages} pages, ${maxItems} items, ${mode} check${req.useProxy ? ", via proxy" : ""})`);
+  const target = db.getCollection(collectionId)!;
+  // No listing to walk: adding one item page, or re-checking a collection built from item pages.
+  const addItem = req.kind === "item";
+  const itemsOnly = !addItem && target.kind === "items";
+  // Without a listing card to compare, a quick check would call everything unchanged — open the pages.
+  const requested: CrawlMode = req.mode ?? (req.refresh ? "full" : "quick");
+  const mode: CrawlMode = (addItem || itemsOnly) && requested === "quick" ? "deep" : requested;
+  patchJob(jobId, { status: "running", message: addItem ? "Opening item page" : itemsOnly ? "Re-checking items" : "Opening listing page" });
+  if (resumeSince) jobLog(jobId, "Resuming — skipping items already handled");
+  if (addItem) jobLog(jobId, `Adding item ${url} to "${target.name}"${req.useProxy ? " (via proxy)" : ""}`);
+  else if (itemsOnly) jobLog(jobId, `Re-checking the ${target.itemCount} items of "${target.name}" (${mode} check${req.useProxy ? ", via proxy" : ""})`);
+  else jobLog(jobId, `Crawling ${url} (max ${maxPages} pages, ${maxItems} items, ${mode} check${req.useProxy ? ", via proxy" : ""})`);
 
   // ---- 1. Listing: detect (or reuse) structure, then walk pages ----
   throwIfStopped(signal);
-  const walk = await withPage(async (page) => {
+  const walk = addItem || itemsOnly ? fixedWalk(target, addItem ? [url] : [...db.getItemFingerprints(collectionId).keys()]) : await withPage(async (page) => {
     const collection = db.getCollection(collectionId)!;
     let detection = collection.detection;
     if (detection) {
@@ -254,7 +266,7 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
   }, pageOpts);
 
   throwIfStopped(signal);
-  if (walk.items.size === 0) throw new Error("No item links found on the listing page");
+  if (walk.items.size === 0) throw new Error(itemsOnly ? "This collection has no items to re-check" : "No item links found on the listing page");
   const hints: OtherListingHints = { listItemSelector: walk.detection.listItemSelector, itemUrlPattern: safeItemUrlPattern(walk.detection.itemUrlPattern) };
 
   // ---- 2. Sort walked items: new → extract; existing → change check (no LLM unless changed) ----
@@ -274,12 +286,23 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
     const fp = known.get(itemUrl);
     if (!fp) toExtract.push({ url: itemUrl, cardHash });
     else if (mode === "full") toExtract.push({ url: itemUrl, cardHash });
-    else if (mode === "deep") toCheck.push({ url: itemUrl, cardHash, fp });
+    // No card text (item pages without a listing): keep the stored card hash.
+    else if (mode === "deep") toCheck.push({ url: itemUrl, cardHash: cardText ? cardHash : (fp.cardHash ?? cardHash), fp });
     // Quick: a card we have never fingerprinted (rows from before change tracking) is adopted as the baseline.
     else if (fp.cardHash === null || fp.cardHash === cardHash) {
       db.touchItem(fp.id, { cardHash });
       unchanged++;
     } else toCheck.push({ url: itemUrl, cardHash, fp });
+  }
+  // Hand-added items aren't on the listing: open their pages too (LLM only if they changed).
+  let byHand = 0;
+  if (!addItem && !itemsOnly) {
+    for (const [itemUrl, fp] of known) {
+      if (!fp.manual || walk.items.has(itemUrl) || handled.has(itemUrl)) continue;
+      if (mode === "full") toExtract.push({ url: itemUrl, cardHash: fp.cardHash ?? "" });
+      else toCheck.push({ url: itemUrl, cardHash: fp.cardHash ?? "", fp });
+      byHand++;
+    }
   }
   const newCount = toExtract.filter((t) => !known.has(t.url)).length;
   if (resumeSince) jobLog(jobId, `Resuming — ${skipped} items already handled, ${walk.items.size - skipped} left`);
@@ -292,7 +315,9 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
     jobId,
     mode === "full"
       ? `Re-extracting all ${toExtract.length} items`
-      : `${newCount} new · ${toCheck.length} to re-check (${mode === "deep" ? "every detail page" : "listing card changed"}) · ${unchanged} unchanged (skipped)`,
+      : addItem || itemsOnly
+        ? `${newCount} new · ${toCheck.length} to re-check`
+        : `${newCount} new · ${toCheck.length - byHand} to re-check (${mode === "deep" ? "every detail page" : "listing card changed"})${byHand ? ` · ${byHand} added by hand to re-check` : ""} · ${unchanged} unchanged (skipped)`,
   );
 
   // ---- 3. Detail pages: render → (fingerprint) → LLM extract → store → embed ----
@@ -326,6 +351,7 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
       cardHash,
       contentHash,
       contentText: snapshot.stableText,
+      manual: addItem || undefined,
     });
     for (const s of extraction.specs) {
       db.upsertSpecKey(collectionId, { key: s.key, type: s.type, unit: s.unit, label: s.label, example: String(s.value).slice(0, 60), origin: "page" });
@@ -406,6 +432,8 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
   }
   await queue.onIdle();
   signal.removeEventListener("abort", onStop);
+  // An item already in the collection (e.g. from its listing) that didn't change is still "added by hand" now.
+  if (addItem && !halt && failed === 0) db.setItemManual(collectionId, url);
   db.recountSpecKeys(collectionId);
   // Key merging and gone-marking need the whole listing handled — they run when the resumed crawl completes.
   if (halt) throw new StopError(halt.message);
@@ -424,7 +452,7 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
       gone = db.markGone(collectionId, walk.items.keys());
       if (gone) jobLog(jobId, `${gone} items are no longer listed — marked as gone`);
     }
-  } else if (known.size > 0) {
+  } else if (known.size > 0 && !addItem && !itemsOnly) {
     jobLog(jobId, "Listing walk stopped at a limit — not checking for removed items");
   }
 
@@ -438,6 +466,17 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
   });
   jobLog(jobId, `Done: ${summary} — ${extracted} LLM extractions${reused ? `, ${reused} ads reused from cache (no LLM call)` : ""}`);
   retireChannel(jobChannel(jobId));
+}
+
+/** The "walk" of a collection without a listing: just these item URLs (no card text), never complete. */
+function fixedWalk(collection: { host: string; id: number; detection: db.CollectionDetection | null }, urls: string[]) {
+  // A known listing structure on this site helps strip "similar ads" from the item pages.
+  const detection = collection.detection ?? db.findDetectionForHost(collection.host, collection.id);
+  return {
+    items: new Map(urls.map((u) => [u, ""])),
+    complete: false,
+    detection: detection ?? { listItemSelector: "", paginationType: "pages" as const, itemUrlPattern: null },
+  };
 }
 
 /**

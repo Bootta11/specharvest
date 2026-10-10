@@ -59,7 +59,9 @@ CI tests, scans and publishes the image on every push to `master`. See
    person has their own collections, jobs, searches, alerts and spend.
    *Share* makes a collection searchable by everyone, read only
    ([details](docs/auth.md)).
-1. **Collections** tab → paste a category/search URL → *Start crawl*. Cards and
+1. **Collections** tab → paste a category/search URL → *Start crawl*. The page is
+   checked first: a single item page can be added to a collection instead, and a
+   news/blog page gets a warning ([details](docs/crawling.md#0-page-check)). Cards and
    pagination are detected automatically; progress streams live. *Re-crawl*
    only sends new or changed ads to the LLM (*Quick check* compares listing
    tiles, *Deep check* every ad page) and marks vanished ads as gone. *Stop* a
