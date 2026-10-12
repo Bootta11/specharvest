@@ -119,6 +119,15 @@ re-enter their keys. See [LLM providers](llm-providers.md#keys-at-rest).
 Compose interpolates `$` inside `.env` values. Single-quote any value that
 contains one, e.g. `ADMIN_PASSWORD='pa$$word'`.
 
+### Crawl capacity
+
+`SCRAPE_MAX_CONCURRENT_PAGES` (default 2) is how many browser pages all crawls and page checks
+share; see [page slots](crawling.md#2-listing-walk). The API itself is rarely the limit: under
+load, crawls mostly wait for a free page. Each open page costs roughly 100–200 MB in the browser
+and some CPU, and a remote browser (`PUPPETEER_WS_ENDPOINT`) may be shared with other apps. Raise
+it step by step and measure each step with the [load test](load-testing.md). Stop when crawl
+times stop improving or the browser host runs short of memory.
+
 ## Security settings
 
 | Variable | Default | Purpose |

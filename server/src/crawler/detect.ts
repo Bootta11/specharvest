@@ -120,6 +120,8 @@ export async function detectListingStructure(page: PageDriver, startUrl: string,
   const sanitized = sanitizeForLlm(html);
   let detection: CollectionDetection | null = null;
   let urls: string[] = [];
+  // Most item URLs any LLM selector found: one means a listing with a single card, which can't verify a selector.
+  let bestMatch = 0;
 
   report("Asking the LLM to find item cards and pagination…");
   let retry: Parameters<typeof detectListing>[2];
@@ -136,6 +138,7 @@ export async function detectListingStructure(page: PageDriver, startUrl: string,
       };
       urls = await collectItemUrls(page, candidate);
       log.info(`Attempt ${attempt}: "${candidate.listItemSelector}" → ${urls.length} item URLs (${candidate.paginationType})`);
+      bestMatch = Math.max(bestMatch, urls.length);
       if (urls.length >= MIN_ITEMS) detection = candidate;
       else retry = { previousSelector: candidate.listItemSelector, matched: urls.length, repeatedClasses: findRepeatedClassNames(sanitized) };
     } catch (err) {
@@ -147,7 +150,11 @@ export async function detectListingStructure(page: PageDriver, startUrl: string,
   if (!detection) {
     report("LLM selector didn't verify — falling back to link-shape heuristic");
     detection = await heuristicDetection(page);
-    if (!detection) throw new Error("Could not find item links on the listing page");
+    if (!detection) {
+      throw new Error(
+        bestMatch === 1 ? "This listing shows only one item — open it and add it as a single item instead" : "Could not find item links on the listing page",
+      );
+    }
     urls = await collectItemUrls(page, detection);
   }
 

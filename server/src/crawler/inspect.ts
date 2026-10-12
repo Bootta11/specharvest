@@ -90,12 +90,13 @@ export async function inspectUrl(url: string, userId: number | null, opts: { use
 async function runInspect(url: string, opts: WithPageOptions): Promise<InspectResult> {
   const host = new URL(url).hostname;
   const known = db.findDetectionForHost(host, 0);
+  // Someone is waiting on the crawl form: skip the queue of crawl pages.
   const page = await withPage(async (p) => {
     await gotoAndSettle(p, url);
     const knownListingItems = known ? (await collectItemUrls(p, known).catch(() => [])).length : 0;
     const facts = await p.run("pageSignals");
     return { ...facts, knownListingItems };
-  }, opts);
+  }, { ...opts, priority: "interactive" });
 
   const knownItemUrl = !!known?.itemUrlPattern && new RegExp(known.itemUrlPattern).test(url);
   const signals: PageSignals = { url, ldTypes: page.ldTypes, productNodes: page.productNodes, ogType: page.ogType, knownItemUrl, knownListingItems: page.knownListingItems };

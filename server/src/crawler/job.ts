@@ -245,7 +245,9 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
     snapshot = undefined;
     return s;
   };
-  const loadItem = async (itemUrl: string) => takeSnapshot(itemUrl) ?? loadDetail(itemUrl, pageOpts, hints);
+  // Adding one item is a single page someone is waiting for, so it skips the queue of crawl pages.
+  const itemPageOpts: WithPageOptions = req.kind === "item" ? { ...pageOpts, priority: "interactive" } : pageOpts;
+  const loadItem = async (itemUrl: string) => takeSnapshot(itemUrl) ?? loadDetail(itemUrl, itemPageOpts, hints);
   // No listing to walk: adding one item page, or re-checking a collection built from item pages.
   const addItem = req.kind === "item";
   const itemsOnly = !addItem && target.kind === "items";
@@ -361,7 +363,7 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
       // Lots of known text missing usually means the page hadn't finished rendering — look once more
       // rather than re-extracting (and overwriting good specs) from a partial page.
       if (t.fp.contentText && removedShare(t.fp.contentText, snapshot.stableText) > PARTIAL_RENDER_SHARE) {
-        const retry = await loadDetail(t.url, pageOpts, hints);
+        const retry = await loadDetail(t.url, itemPageOpts, hints);
         if (removedShare(t.fp.contentText, retry.stableText) < removedShare(t.fp.contentText, snapshot.stableText)) snapshot = retry;
         const lost = removedShare(t.fp.contentText, snapshot.stableText);
         if (lost > PARTIAL_RENDER_REJECT_SHARE) {
@@ -442,6 +444,7 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
   let walk!: { items: Map<string, string>; complete: boolean; detection: db.CollectionDetection };
   try {
     throwIfStopped(signal);
+    // Detection and the walk go before item pages other crawls have queued: they produce the first results.
     walk = addItem || itemsOnly ? queueFixed(fixedWalk(target, addItem ? [url] : [...known.keys()])) : await withPage(async (page) => {
       // The user's browser hides crawl pages by default, and hidden pages don't scroll: check once per site.
       const scroll = await page.checkScrollLoading?.(url);
@@ -451,7 +454,8 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
       if (detection) {
         await gotoAndSettle(page, url);
         const urls = await collectItemUrls(page, detection);
-        if (urls.length < 2) {
+        // A structure already verified on this site may find a single card: a listing with one item.
+        if (urls.length < 1) {
           jobLog(jobId, "Saved selectors no longer match — re-detecting", "warn");
           detection = null;
         } else {
@@ -464,7 +468,7 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
         if (fromHost) {
           await gotoAndSettle(page, url);
           const urls = await collectItemUrls(page, fromHost);
-          if (urls.length >= 2) {
+          if (urls.length >= 1) {
             detection = fromHost;
             db.saveDetection(collectionId, detection, inBrowser);
             jobLog(jobId, `Reusing the listing structure already known for ${collection.host} (${urls.length} items on page 1)`);
@@ -504,7 +508,7 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
         },
       });
       return { ...result, detection };
-    }, pageOpts);
+    }, { ...pageOpts, priority: "listing" });
 
     throwIfStopped(signal);
     if (walk.items.size === 0) throw new Error(itemsOnly ? "This collection has no items to re-check" : "No item links found on the listing page");

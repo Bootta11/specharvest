@@ -5,6 +5,7 @@ import { createLogger } from "../lib/logger.ts";
 import { assertPublicUrl, isPublicHost, strictPolicy, type TargetPolicy } from "../lib/net-guard.ts";
 import { withExtensionPage, type WaitOptions } from "../extension/driver.ts";
 import { FatalDriverError, type PageDriver, type Runner } from "./driver.ts";
+import { createSlotPool, type SlotPriority } from "./slots.ts";
 
 const log = createLogger("browser");
 
@@ -64,22 +65,8 @@ export function connect(): Promise<Browser> {
 
 // ---------- Global page slots ----------
 
-let active = 0;
-const waiters: Array<() => void> = [];
-
-async function acquireSlot() {
-  if (active < env.SCRAPE_MAX_CONCURRENT_PAGES) {
-    active++;
-    return;
-  }
-  await new Promise<void>((resolve) => waiters.push(resolve));
-  active++;
-}
-
-function releaseSlot() {
-  active--;
-  waiters.shift()?.();
-}
+// Every crawl and page check shares SCRAPE_MAX_CONCURRENT_PAGES pages; see slots.ts for who goes first.
+const slots = createSlotPool(() => env.SCRAPE_MAX_CONCURRENT_PAGES);
 
 export const proxyConfigured = () => !!env.PROXY_SERVER;
 
@@ -174,12 +161,14 @@ export interface WithPageOptions extends PageOptions, WaitOptions {
   runner?: Runner;
   /** runner browser: whose extension. */
   userId?: number | null;
+  /** Place in the queue for a server page slot (default "detail"). */
+  priority?: SlotPriority;
 }
 
 export async function withPage<T>(fn: (page: PageDriver) => Promise<T>, opts: WithPageOptions = {}): Promise<T> {
   // The user's Chrome has its own tab limit (set in the extension) and needs no server browser slot.
   if (opts.runner === "browser") return withExtensionPage(opts.userId ?? null, fn, opts);
-  await acquireSlot();
+  await slots.acquire(opts.priority);
   try {
     const browser = await connect();
     const { page, context } = await openPage(browser, opts);
@@ -203,7 +192,7 @@ export async function withPage<T>(fn: (page: PageDriver) => Promise<T>, opts: Wi
       else await page.close().catch(() => {});
     }
   } finally {
-    releaseSlot();
+    slots.release();
   }
 }
 

@@ -53,7 +53,10 @@ Strategy adapted from twinlisting:
 The result is saved on the collection; a re-crawl reuses it and only
 re-detects when it stops matching. A new collection on a host another
 collection (anyone's) already detected tries that structure first and keeps
-it when it yields ≥ 2 items on the live page — no LLM call.
+it when it yields an item on the live page — no LLM call. A structure verified on
+the site this way also accepts a listing with a single card; fresh detection needs ≥ 2
+to verify a selector, so a one-item listing on a site we don't know yet asks you to add
+that item on its own instead.
 
 ## 2. Listing walk
 
@@ -67,6 +70,14 @@ detail workers, so the first results appear after page 1 instead of after the
 last page. The walk keeps its own browser page, so a crawl has up to
 `SCRAPE_MAX_CONCURRENT_PAGES` + 1 pages open. Hand-added items and gone-marking
 still wait for the whole walk.
+
+**Page slots.** Every crawl and page check on the server shares one pool of
+`SCRAPE_MAX_CONCURRENT_PAGES` browser pages (`crawler/slots.ts`). When it's full, waiting
+pages go in this order: page checks and single added items (someone is looking at the form),
+then listing detection and walks (a crawl's first results), then item pages. Under load a new
+crawl therefore starts producing results soon, instead of queueing behind every item page
+other crawls have queued. Pages run in the user's own browser (`runner: "browser"`) don't use
+the pool.
 
 ## 3. Item extraction
 
