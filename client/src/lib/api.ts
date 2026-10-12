@@ -9,6 +9,8 @@ import type {
   CrawlRequest,
   InspectResult,
   EnrichRequest,
+  ExtensionDevice,
+  ExtensionStatus,
   GroupInput,
   GroupingMode,
   Item,
@@ -25,6 +27,7 @@ import type {
   NotificationSettings,
   ProviderCredits,
   RecentSearch,
+  Runner,
   SearchRequest,
   SearchResponse,
   SpecKey,
@@ -35,7 +38,7 @@ import type {
 } from "@specharvest/shared";
 import { isActiveJob, isHttpUrl } from "@specharvest/shared";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { apiUrl, authHeaders, isNative, setSessionToken } from "./platform.ts";
+import { activeAccount, apiUrl, authHeaders, forgetAccount, isNative, saveAccount, serverUrl } from "./platform.ts";
 
 export interface AppConfig {
   proxyConfigured: boolean;
@@ -48,6 +51,8 @@ export interface AppConfig {
   limits: { maxPages: number; maxItems: number };
   /** Which provider/model each tier runs on for this user, and why a tier can't run. */
   llm: LlmStatus;
+  /** Chrome Web Store page of the extension, when the server knows it. */
+  extensionStoreUrl: string | null;
 }
 
 /** Fired when the session is gone (expired, revoked, user disabled) — the app drops back to the login screen. */
@@ -81,13 +86,13 @@ async function request<T>(method: string, url: string, body?: unknown): Promise<
   return data as T;
 }
 
-/** The web gets the user (cookie set by the server); the app also gets its bearer token, kept on the device. */
+/** The web gets the user (cookie set by the server); the app also gets its bearer token, saved as an account. */
 type SignInResponse = UserSummary | { user: UserSummary; token: string };
 
 async function signedIn(res: Promise<SignInResponse>): Promise<UserSummary> {
   const data = await res;
   if (!("token" in data)) return data;
-  setSessionToken(data.token);
+  await saveAccount(serverUrl(), data.token, data.user);
   return data.user;
 }
 
@@ -131,11 +136,11 @@ export const api = {
   item: (id: number) => request<ItemDetail>("GET", `/api/items/${id}`),
   crawl: (body: CrawlRequest) => request<Job>("POST", "/api/crawl", body),
   /** What a URL is before crawling it: listing, single item, or an unrelated page. */
-  inspectUrl: (url: string) => request<InspectResult>("POST", "/api/crawl/inspect", { url }),
+  inspectUrl: (url: string, runner?: Runner) => request<InspectResult>("POST", "/api/crawl/inspect", { url, runner }),
   enrich: (body: EnrichRequest) => request<{ job: Job | null; note?: string }>("POST", "/api/enrich", body),
   jobs: () => request<Job[]>("GET", "/api/jobs"),
   stopJob: (id: number) => request<Job>("POST", `/api/jobs/${id}/stop`),
-  resumeJob: (id: number) => request<Job>("POST", `/api/jobs/${id}/resume`),
+  resumeJob: (id: number, runner?: Runner) => request<Job>("POST", `/api/jobs/${id}/resume`, runner ? { runner } : {}),
   search: (body: SearchRequest) => request<SearchResponse>("POST", "/api/search", body),
   usage: (all = false) => request<UsageSummary>("GET", `/api/usage${all ? "?scope=all" : ""}`),
   credits: () => request<ProviderCredits>("GET", "/api/usage/credits"),
@@ -150,17 +155,24 @@ export const api = {
   me: () => request<UserSummary>("GET", "/api/auth/me"),
   login: (email: string, password: string) => signedIn(request<SignInResponse>("POST", "/api/auth/login", { email, password })),
   signup: (email: string, password: string) => signedIn(request<SignInResponse>("POST", "/api/auth/signup", { email, password })),
+  /** In the app, signs out of (and forgets) the active account only; other saved accounts stay signed in. */
   logout: async () => {
+    const account = activeAccount();
     try {
       await request<null>("POST", "/api/auth/logout");
     } finally {
-      setSessionToken(null);
+      if (account) await forgetAccount(account.id);
     }
   },
   updateAccount: (body: { currentPassword: string; email?: string; newPassword?: string }) => request<UserSummary>("PATCH", "/api/auth/me", body),
   apiKeys: () => request<ApiKeySummary[]>("GET", "/api/api-keys"),
   createApiKey: (label: string) => request<ApiKeyCreated>("POST", "/api/api-keys", { label }),
   revokeApiKey: (id: number) => request<{ ok: true }>("DELETE", `/api/api-keys/${id}`),
+  extensionStatus: () => request<ExtensionStatus>("GET", "/api/extension/status"),
+  extensionDevices: () => request<ExtensionDevice[]>("GET", "/api/extension/devices"),
+  createExtensionToken: (name: string) => request<{ token: string; device: ExtensionDevice }>("POST", "/api/extension/devices", { name }),
+  revokeExtensionDevice: (id: number) => request<{ ok: true }>("DELETE", `/api/extension/devices/${id}`),
+  approveExtension: (challenge: string, deviceName: string) => request<{ ok: true }>("POST", "/api/extension/pair/approve", { challenge, deviceName }),
   // Admin
   users: () => request<UserSummary[]>("GET", "/api/users"),
   createUser: (email: string, role: UserRole) => request<UserCreated>("POST", "/api/users", { email, role }),
@@ -360,6 +372,8 @@ export interface JobsFeed {
   /** Latest snapshot of every job seen on the feed (active and recently finished). */
   jobs: Map<number, Job>;
   active: Job[];
+  /** The user's browser extension (null until the feed connected). */
+  extension: ExtensionStatus | null;
 }
 
 /**
@@ -368,6 +382,7 @@ export interface JobsFeed {
  */
 export function useJobsFeed(onFinish: (job: Job) => void): JobsFeed {
   const [jobs, setJobs] = useState<Map<number, Job>>(new Map());
+  const [extension, setExtension] = useState<ExtensionStatus | null>(null);
   const finishRef = useRef(onFinish);
   finishRef.current = onFinish;
   const jobsRef = useRef(jobs);
@@ -395,11 +410,12 @@ export function useJobsFeed(onFinish: (job: Job) => void): JobsFeed {
         // Jobs we saw running that finished while disconnected: fetch their final state.
         if (vanished.length) api.jobs().then((all) => apply(all.filter((j) => vanished.some((v) => v.id === j.id))), () => {});
       },
+      extension: (data) => setExtension((JSON.parse(data) as { status: ExtensionStatus }).status),
     });
   }, [apply]);
 
   const active = [...jobs.values()].filter(isActiveJob).sort((a, b) => a.id - b.id);
-  return { jobs, active };
+  return { jobs, active, extension };
 }
 
 // ---------- Browser notifications ----------
@@ -476,3 +492,8 @@ export function storageSet(key: string, value: string) {
     /* private mode etc. */
   }
 }
+
+/** Typed searches start paid web lookups by themselves only when this device opted in (Settings → LLM provider). */
+const AUTO_LOOKUP_STORAGE = "specharvest.autoLookup";
+export const autoLookupEnabled = () => storageGet(AUTO_LOOKUP_STORAGE) === "1";
+export const setAutoLookup = (on: boolean) => storageSet(AUTO_LOOKUP_STORAGE, on ? "1" : "0");

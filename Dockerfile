@@ -15,6 +15,8 @@ COPY package.json package-lock.json ./
 COPY shared/package.json shared/
 COPY server/package.json server/
 COPY client/package.json client/
+# The extension isn't part of the image, but npm ci checks every workspace in the lockfile.
+COPY extension/package.json extension/
 RUN npm ci --no-audit --no-fund
 COPY tsconfig.base.json ./
 COPY shared shared

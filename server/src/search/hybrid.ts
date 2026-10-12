@@ -10,6 +10,7 @@ import { withLlmContext } from "../llm/usage.ts";
 import { llmStatus } from "../llm/resolve.ts";
 import { buildCandidateQuery, hasValue, mergeFilters, valueOf } from "./filters.ts";
 import { computeFacets } from "./facets.ts";
+import { matchRegistrySynonyms } from "./registry-synonyms.ts";
 import { errorMessage } from "../lib/logger.ts";
 
 const DEFAULT_LIMIT = 60;
@@ -56,6 +57,9 @@ async function runSearch(req: SearchRequest, viewer: db.Viewer, scope: db.Collec
     const extra = sanitizePlan({ filters: req.filters, sort: null, semanticText: null, missingAttributes: [] }, keys, db.keyAliasesOf).filters;
     plan = sanitizePlan(mergeFilters(plan, extra), keys, db.keyAliasesOf);
   }
+
+  // A key the parser invented may be a synonym of a field the listings already have: use that field instead.
+  if (plan.missingAttributes.length && (await matchRegistrySynonyms(plan.missingAttributes, keys, scope))) plan = sanitizePlan(plan, keys, db.keyAliasesOf);
 
   const known = new Set([...LISTING_FIELDS, ...keys.map((k) => k.key)]);
   const q = buildCandidateQuery(plan.filters, keys, scope, req.includeGone);

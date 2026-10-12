@@ -1,13 +1,14 @@
 # Architecture
 
 ```
-React UI (Vite) ──HTTP/SSE──► Fastify API ──► crawler (puppeteer-core, p-queue)
+React UI (Vite) ──HTTP/SSE──► Fastify API ──► crawler (PageDriver: puppeteer-core | user's Chrome via extension, p-queue)
                                    │                 │
                                    │                 ├─► LLM (AI SDK → user's own key or server OpenRouter key): detection, extraction, key merging
                                    │                 └─► embeddings (Transformers.js, local)
                                    ├─► SQLite (node:sqlite)  items · specs JSON · key registry · jobs · web facts
                                    ├─► LanceDB               item vectors (semantic ranking)
-                                   └─► LLM + provider web search    missing-spec lookups
+                                   ├─► LLM + provider web search    missing-spec lookups
+                                   └─◄ WSS /api/extension/ws ◄── Chrome extension (WXT, MV3): crawl tabs in the user's browser
 ```
 
 ## Workspaces
@@ -16,6 +17,9 @@ React UI (Vite) ──HTTP/SSE──► Fastify API ──► crawler (puppeteer
 | --- | --- |
 | `shared/` | Types + zod schemas shared by API and UI (query plan, job events, …) |
 | `server/src/crawler/` | `browser.ts` (remote/local Chrome, page slots, proxy, navigation + bot-wall check), `detect.ts` (card + pagination detection), `paginate.ts` (walkers, card text, walk completeness), `fingerprint.ts` (change-detection hashes), `sanitize.ts` (LLM-ready HTML, detail-page text snapshot), `job.ts` (crawl orchestration) |
+| `server/src/extension/` | `gateway.ts` (the extension's WebSocket: auth, commands, tab slots, permission waits), `driver.ts` (`PageDriver` over the socket), `routes.ts` (pairing, connected browsers) — see [browser extension](extension.md) |
+| `shared/src/page-scripts.ts` | DOM functions both runners run in crawled pages (card collection, detail snapshot, page signals…) |
+| `extension/` | Chrome extension (WXT + React): background worker (socket, crawl tabs, site permissions), popup, settings, permission prompt page |
 | `server/src/llm/` | `client.ts` (AI SDK `generateText`, JSON extraction/repair/salvage, provider error classification), `providers.ts` (provider catalog), `resolve.ts` (which key/model serves a call, server-key policy), `keys.ts` (users' encrypted keys, model picks), `pricing.ts` (models.dev prices, cost estimates), `routes.ts` (LLM settings API), `usage.ts` (spend ledger), prompts: `detect.ts`, `extract.ts`, `parse-query.ts`, `consolidate.ts` — see [LLM providers](llm-providers.md) |
 | `server/src/search/` | `filters.ts` (plan → parametrized SQL, listing-field columns), `facets.ts` (value counts per field for the filter panel), `hybrid.ts` (bucketing, ranking, enrichment trigger) |
 | `server/src/enrich/web.ts` | Web lookups, `web_facts` cache, merging found values into items, cross-user in-flight dedupe |
@@ -33,7 +37,7 @@ no server build step; `tsc` is used for type checking only.
 ## Data model (SQLite)
 
 - `collections` — one per crawled start URL per user (`user_id`, `is_shared`); stores the detected listing structure (`detection` JSON) so re-crawls skip the LLM.
-- `items` — fixed fields (`title`, `price`, `currency`, `main_image`, `description`, `identity`) + `specs` JSON of dynamic keys + `raw_text` (the page text sent to the LLM) + change tracking (`card_hash`, `content_hash`, `content_text`, `last_seen_at`, `checked_at`, `gone_at`; see [crawling](crawling.md#re-crawls-change-detection)).
+- `items` — fixed fields (`title`, `price`, `currency`, `main_image`, `description`, `identity`) + `specs` JSON of dynamic keys + `raw_text` (the page text sent to the LLM) + change tracking (`card_hash`, `content_hash`, `content_text`, `last_seen_at`, `checked_at`, `gone_at`; see [crawling](crawling.md#re-crawls-change-detection)) + `from_browser` (read in a user's own browser — reused only by that user, see [extension](extension.md#security)).
 - `spec_keys` — **key registry** per collection: key, type, unit, original label, count, origin (`page`/`web`). Extraction is given it so the same attribute keeps one name; query parsing is given it so filters target real keys.
 - `spec_sources` — provenance for values that did not come from the item's page (web lookups): source URL + confidence.
 - `web_facts` — cache of web lookups keyed by product `identity` + key (also caches "not found"), shared by all users.
@@ -45,7 +49,7 @@ no server build step; `tsc` is used for type checking only.
 - `llm_keys` — users' own LLM API keys (AES-256-GCM encrypted, last 4 characters shown), one per provider.
 - `settings` — JSON values: per-user notification channels (`notifications:<userId>`), per-user LLM model picks (`llm-models:<userId>`), generated VAPID keys, the sign-up toggle, who may use the server LLM key (`llm.serverAccess`), the models.dev price list (`llm-prices`), per-collection spec profiles (`attr-profile:<collectionId>`).
 - `push_subscriptions` — browsers that enabled Web Push, per user.
-- `users`, `sessions`, `api_keys` — accounts, login sessions and API keys (tokens stored as sha256 only); see [auth](auth.md).
+- `users`, `sessions`, `api_keys` — accounts, login sessions and API keys (`kind` `api` or `extension` — connected browsers, with `device_name`) (tokens stored as sha256 only); see [auth](auth.md).
 
 LanceDB (`data/lancedb/item_vectors`) holds `{item_id, collection_id, vector}`
 only; SQLite is the source of truth.

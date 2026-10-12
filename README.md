@@ -67,6 +67,8 @@ CI tests, scans and publishes the image on every push to `master`. See
    tiles, *Deep check* every ad page) and marks vanished ads as gone. *Stop* a
    running crawl, or one cut off by a restart, and *Resume* it later — ads
    already read are skipped ([details](docs/crawling.md#stop--resume)).
+   With the [browser extension](docs/extension.md) connected, *Run in my browser*
+   loads the pages in your own Chrome — free, and past most bot checks.
    *Export* downloads a collection (items, specs, web lookup results) as
    `.json`, *Export all* every collection you can see in one file; *Import*
    adds the collection(s) from such a file as new ones of yours
@@ -112,6 +114,7 @@ variable with comments. The essentials:
 | `ADMIN_EMAIL`, `ADMIN_PASSWORD` | First admin, created on boot when no user exists |
 | `SESSION_COOKIE_SECURE` | Session cookie `Secure` flag (default: on when `PUBLIC_URL` is https) |
 | `TRUST_PROXY` | Which proxies may set the client IP (default: loopback and private networks) — see [security settings](docs/deployment.md#security-settings) |
+| `EXTENSION_STORE_URL` | Chrome Web Store page of the [browser extension](docs/extension.md), linked from the crawl form |
 | `ALLOW_PRIVATE_TARGETS` | Let crawls reach private/LAN addresses (default off); also `OUTBOUND_ALLOWED_HOSTS`, `MAX_*_CAP`, `MAX_ACTIVE_JOBS_PER_USER` |
 
 ## Docs
@@ -128,3 +131,4 @@ Browse them as a local site with search: `npm run docs` → http://specharvest-d
 - [Deployment](docs/deployment.md) — CI → GHCR image, tags, Compose host setup, secrets, backups
 - [Notifications](docs/notifications.md) — running jobs, browser/Web Push, ntfy, Telegram, Discord/Slack, webhook, Apprise
 - [Android app](docs/mobile-app.md) — build and install the APK, server choice, sign-in, notifications
+- [Browser extension](docs/extension.md) — crawl in your own Chrome (past bot checks), connect, site permissions, build & publish ([privacy policy](docs/extension-privacy.md))

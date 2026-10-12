@@ -87,7 +87,11 @@ saves LLM calls.
 - **API keys** (`shk_…`, *Account → API keys*) act as their owner. Send them in
   an `X-Api-Key` header. A key is shown only at creation and can be revoked at
   any time.
-- **Storage:** only sha256 hashes of session tokens and API keys are kept.
+- **Extension tokens** (`shx_…`, *Account → Connected browsers*) connect the
+  [browser extension](extension.md). They are made by approving the extension in
+  the web app or by *Create token*, and work only on the few endpoints the
+  extension needs. *Disconnect* revokes one and drops its connection at once.
+- **Storage:** only sha256 hashes of session tokens, API keys and extension tokens are kept.
   Passwords are hashed with salted scrypt (`scrypt$N$r$p$salt$hash`).
 - **Rate limit:** login, sign-up and account changes (which check the current
   password) allow 10 attempts per minute per IP. The client IP comes from

@@ -4,7 +4,7 @@ import fastifyCors from "@fastify/cors";
 import fastifyRateLimit from "@fastify/rate-limit";
 import { env } from "../config.ts";
 import { httpError } from "../lib/http-error.ts";
-import { verifyApiKey } from "./api-keys.ts";
+import { verifyKey, type VerifiedKey } from "./api-keys.ts";
 import type { AuthUser } from "./ownership.ts";
 import { SESSION_TTL_MS, verifySession } from "./sessions.ts";
 import { getUser } from "./users.ts";
@@ -15,6 +15,8 @@ declare module "fastify" {
     user: AuthUser | null;
     /** Raw session token the request was authenticated with — cookie or app bearer token (null for API keys). */
     sessionToken: string | null;
+    /** The API key / extension token the request was authenticated with (null for sessions). */
+    apiKey: VerifiedKey | null;
   }
 }
 
@@ -31,7 +33,30 @@ function bearerToken(req: FastifyRequest): string | null {
 }
 
 /** API routes reachable without signing in. */
-const PUBLIC_ROUTES = new Set(["/api/health", "/api/auth/status", "/api/auth/login", "/api/auth/signup", "/api/auth/logout"]);
+const PUBLIC_ROUTES = new Set([
+  "/api/health",
+  "/api/auth/status",
+  "/api/auth/login",
+  "/api/auth/signup",
+  "/api/auth/logout",
+  // The extension: the socket authenticates with its first message, a claim with the pairing verifier.
+  "/api/extension/ws",
+  "/api/extension/pair/claim",
+]);
+
+/**
+ * All an extension token may do: what the extension's popup and pairing check need. Everything else
+ * (account, keys, admin, LLM settings…) needs a session or a full API key.
+ */
+const EXTENSION_TOKEN_ROUTES: Array<[method: string, path: RegExp]> = [
+  ["GET", /^\/api\/extension\/(whoami|status)$/],
+  ["GET", /^\/api\/config$/],
+  ["GET", /^\/api\/collections$/],
+  ["POST", /^\/api\/crawl(\/inspect)?$/],
+  ["GET", /^\/api\/jobs(\/\d+)?$/],
+  ["POST", /^\/api\/jobs\/\d+\/(stop|resume)$/],
+];
+const extensionTokenAllowed = (method: string, path: string) => EXTENSION_TOKEN_ROUTES.some(([m, re]) => m === method && re.test(path));
 
 /** These set or clear the session cookie, so they get the same cross-site check as signed-in writes. */
 const COOKIE_ROUTES = new Set(["/api/auth/login", "/api/auth/signup", "/api/auth/logout"]);
@@ -80,8 +105,13 @@ async function authenticate(req: FastifyRequest, reply: FastifyReply) {
   } else if (bearer && (userId = verifySession(bearer)) !== null) {
     req.sessionToken = bearer;
   } else {
-    const key = req.headers["x-api-key"];
-    userId = typeof key === "string" ? verifyApiKey(key) : null;
+    const raw = req.headers["x-api-key"];
+    const key = typeof raw === "string" ? verifyKey(raw) : null;
+    if (key?.kind === "extension" && !extensionTokenAllowed(req.method === "HEAD" ? "GET" : req.method, path)) {
+      return reply.status(403).send({ error: "Extension tokens can't use this endpoint" });
+    }
+    req.apiKey = key;
+    userId = key?.userId ?? null;
   }
   const user = userId !== null ? getUser(userId) : null;
   if (!user) return reply.status(401).send({ error: "Sign in, or pass a valid X-Api-Key header" });
@@ -89,11 +119,12 @@ async function authenticate(req: FastifyRequest, reply: FastifyReply) {
 }
 
 export async function registerAuth(app: FastifyInstance) {
-  // Only the Android app's origins, and only with bearer tokens — cookies never go cross-origin.
+  // Only the Android app's and the browser extension's origins, and only with bearer tokens / API keys —
+  // cookies never go cross-origin.
   await app.register(fastifyCors, {
-    origin: (origin, cb) => cb(null, !!origin && env.APP_ORIGINS.includes(origin)),
+    origin: (origin, cb) => cb(null, !!origin && (env.APP_ORIGINS.includes(origin) || origin.startsWith("chrome-extension://"))),
     credentials: false,
-    allowedHeaders: ["Authorization", "Content-Type", "X-SpecHarvest-Client", "Last-Event-ID"],
+    allowedHeaders: ["Authorization", "Content-Type", "X-SpecHarvest-Client", "Last-Event-ID", "X-Api-Key"],
     exposedHeaders: ["Content-Disposition"],
     methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
     maxAge: 600,
@@ -103,6 +134,7 @@ export async function registerAuth(app: FastifyInstance) {
   await app.register(fastifyRateLimit, { global: false });
   app.decorateRequest("user", null);
   app.decorateRequest("sessionToken", null);
+  app.decorateRequest("apiKey", null);
   app.addHook("onRequest", authenticate);
 }
 

@@ -30,7 +30,7 @@ vi.mock("../db/lance.ts", () => ({ upsertVector: vi.fn(async () => {}) }));
 vi.mock("../embedding.ts", () => ({ embed: vi.fn(async () => [0]) }));
 
 const db = await import("../db/sqlite.ts");
-const { startEnrichment } = await import("./web.ts");
+const { startEnrichment, stopEnrichment } = await import("./web.ts");
 
 afterAll(() => fs.rmSync(dataDir, { recursive: true, force: true }));
 
@@ -40,7 +40,7 @@ const addUser = (email: string) =>
 async function finished(jobId: number) {
   for (let i = 0; i < 200; i++) {
     const job = db.getJob(jobId)!;
-    if (job.status === "done" || job.status === "failed") return job;
+    if (job.status === "done" || job.status === "failed" || job.status === "stopped") return job;
     await new Promise((r) => setTimeout(r, 10));
   }
   throw new Error(`job ${jobId} did not finish`);
@@ -86,6 +86,38 @@ describe("web enrichment across users", () => {
     await finished(job.id);
     expect(calls.filter((c) => c.purpose === "web-lookup")).toHaveLength(0);
     expect(db.getItemsByIds([a])[0].specs.max_speed_kmh).toBe(100);
+  });
+});
+
+describe("lookups skip and stop", () => {
+  const user = addUser("carol@example.com");
+  const col = db.createCollection("C", "https://cars.example/c", "cars.example", user);
+  const add = (n: number, specs: Record<string, number> = {}) =>
+    db.upsertItem({ collectionId: col, url: `https://cars.example/c/${n}`, title: `Car ${n}`, price: 1, currency: "EUR", mainImage: null, description: null, identity: `car model ${n}`, specs, rawText: null });
+
+  beforeEach(() => {
+    calls.length = 0;
+  });
+
+  it("doesn't look up a listing that states the value under a synonym", async () => {
+    db.saveKeyAlias("cargo_space_l", "boot_space_l");
+    const id = add(1, { cargo_space_l: 300 });
+    const job = await finished(startEnrichment({ collectionId: col, userId: user, attributes: [{ key: "boot_space_l", type: "number", unit: "l", label: "boot space" }], itemIds: [id] }).id);
+    expect(job.status).toBe("done");
+    expect(calls.filter((c) => c.purpose === "web-lookup")).toHaveLength(0);
+    expect(db.getItemsByIds([id])[0].specs.boot_space_l).toBeUndefined();
+  });
+
+  it("stops before paying when asked right away, leaving the products for next run", async () => {
+    const ids = [add(2), add(3), add(4)];
+    const started = startEnrichment({ collectionId: col, userId: user, attributes: [{ key: "range_km", type: "number", unit: "km", label: "range" }], itemIds: ids });
+    expect(stopEnrichment(started.id)?.message).toBe("Stopping…");
+    const job = await finished(started.id);
+    expect(job.status).toBe("stopped");
+    expect(job.itemsRemaining).toBe(3);
+    expect(job.lookup?.remaining).toBe(3);
+    expect(calls.filter((c) => c.purpose === "web-lookup")).toHaveLength(0);
+    expect(stopEnrichment(started.id)).toBeNull();
   });
 });
 

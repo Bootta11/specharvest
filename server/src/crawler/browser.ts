@@ -1,7 +1,10 @@
 import puppeteer, { type Browser, type BrowserContext, type HTTPRequest, type HTTPResponse, type Page } from "puppeteer-core";
+import { NAME_SHIM, PAGE_SCRIPTS, type PageScriptArgs, type PageScriptName, type PageScriptResult } from "@specharvest/shared/page-scripts";
 import { env } from "../config.ts";
 import { createLogger } from "../lib/logger.ts";
 import { assertPublicUrl, isPublicHost, strictPolicy, type TargetPolicy } from "../lib/net-guard.ts";
+import { withExtensionPage, type WaitOptions } from "../extension/driver.ts";
+import { FatalDriverError, type PageDriver, type Runner } from "./driver.ts";
 
 const log = createLogger("browser");
 
@@ -141,7 +144,41 @@ function requestFilter(policy: TargetPolicy, blockHeavy: boolean) {
   };
 }
 
-export async function withPage<T>(fn: (page: Page) => Promise<T>, opts: PageOptions = {}): Promise<T> {
+/** Today's runner: a tab in the server's puppeteer Chrome. */
+export class PuppeteerDriver implements PageDriver {
+  readonly runner = "server" as const;
+  constructor(readonly page: Page) {}
+
+  async goto(url: string, opts: { timeoutMs: number }) {
+    const response: HTTPResponse | null = await this.page.goto(url, { waitUntil: "load", timeout: opts.timeoutMs });
+    return { status: response?.status() ?? null };
+  }
+
+  run<K extends PageScriptName>(name: K, ...args: PageScriptArgs<K>): Promise<PageScriptResult<K>> {
+    const fn = PAGE_SCRIPTS[name] as (...a: unknown[]) => PageScriptResult<K>;
+    return this.page.evaluate(fn, ...(args as unknown[])) as Promise<PageScriptResult<K>>;
+  }
+
+  async click(selector: string) {
+    // A real mouse click (scrolls the element into view first), not a DOM click — some sites check.
+    await this.page.click(selector);
+  }
+
+  async waitForNetworkIdle(opts: { idleMs: number; timeoutMs: number }) {
+    await this.page.waitForNetworkIdle({ idleTime: opts.idleMs, timeout: opts.timeoutMs }).catch(() => {});
+  }
+}
+
+export interface WithPageOptions extends PageOptions, WaitOptions {
+  /** "browser" runs in the user's own Chrome via the extension (see extension/driver.ts). Default "server". */
+  runner?: Runner;
+  /** runner browser: whose extension. */
+  userId?: number | null;
+}
+
+export async function withPage<T>(fn: (page: PageDriver) => Promise<T>, opts: WithPageOptions = {}): Promise<T> {
+  // The user's Chrome has its own tab limit (set in the extension) and needs no server browser slot.
+  if (opts.runner === "browser") return withExtensionPage(opts.userId ?? null, fn, opts);
   await acquireSlot();
   try {
     const browser = await connect();
@@ -149,7 +186,7 @@ export async function withPage<T>(fn: (page: Page) => Promise<T>, opts: PageOpti
     try {
       // tsx/esbuild (keepNames) wraps named functions inside page.evaluate callbacks
       // in __name(...), which doesn't exist in the page — define a no-op.
-      await page.evaluateOnNewDocument("globalThis.__name = globalThis.__name || ((f) => f);");
+      await page.evaluateOnNewDocument(NAME_SHIM);
       await page.setUserAgent(DESKTOP_USER_AGENT);
       await page.setViewport(DESKTOP_VIEWPORT);
       await page.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9,bs;q=0.8" });
@@ -160,7 +197,7 @@ export async function withPage<T>(fn: (page: Page) => Promise<T>, opts: PageOpti
         await page.setRequestInterception(true);
         page.on("request", requestFilter(policy, !!opts.blockHeavyResources));
       }
-      return await fn(page);
+      return await fn(new PuppeteerDriver(page));
     } finally {
       if (context) await context.close().catch(() => {});
       else await page.close().catch(() => {});
@@ -170,56 +207,23 @@ export async function withPage<T>(fn: (page: Page) => Promise<T>, opts: PageOpti
   }
 }
 
-// ---------- Navigation ----------
+// ---------- Navigation (works on any PageDriver) ----------
 
 export class BlockedPageError extends Error {}
+/** A bot-protection interstitial (Cloudflare, DataDome…) rather than an HTTP error. */
+export class BotWallError extends BlockedPageError {}
 
 const NAVIGATION_TIMEOUT_MS = 60_000;
 
-/**
- * Cloudflare-style interstitial check: page.title() is one cheap round-trip,
- * only a suspicious title pays for page.content().
- */
-async function detectChallenge(page: Page): Promise<boolean> {
-  const title = await page.title().catch(() => "");
-  if (!/just a moment|attention required|access denied|verify you are human/i.test(title)) return false;
-  const html = await page.content();
-  return /challenges\.cloudflare\.com|cf-chl-|cf-turnstile|captcha|perimeterx|datadome/i.test(html);
-}
-
 /** Scrolls to the bottom in steps so lazy content (spec tabs, images, cards) renders, then back to top. */
-export async function scrollFullPage(page: Page, maxSteps = 40) {
+export async function scrollFullPage(page: PageDriver, maxSteps = 40) {
   for (let i = 0; i < maxSteps; i++) {
-    const atBottom = await page.evaluate((step) => {
-      window.scrollBy(0, step);
-      return window.scrollY + window.innerHeight >= document.body.scrollHeight - 2;
-    }, 900);
+    const atBottom = await page.run("scrollStep", { step: 900 });
     await new Promise((r) => setTimeout(r, 150));
     if (atBottom) break;
   }
   await new Promise((r) => setTimeout(r, 400));
-  await page.evaluate(() => window.scrollTo(0, 0));
-}
-
-/** Clones open shadow roots into light DOM so page.content() / selectors see their content. */
-async function flattenShadowDom(page: Page) {
-  await page
-    .evaluate(() => {
-      function flatten(root: Document | ShadowRoot) {
-        for (const el of Array.from(root.querySelectorAll("*"))) {
-          const shadow = (el as HTMLElement).shadowRoot;
-          if (shadow) {
-            const clone = document.createElement("div");
-            clone.setAttribute("data-shadow-flattened", "true");
-            clone.innerHTML = shadow.innerHTML;
-            el.appendChild(clone);
-            flatten(shadow);
-          }
-        }
-      }
-      flatten(document);
-    })
-    .catch(() => {});
+  await page.run("scrollToTop");
 }
 
 /**
@@ -228,23 +232,24 @@ async function flattenShadowDom(page: Page) {
  * one retry on transient failure. Throws BlockedPageError on a bot wall or
  * HTTP error status, since such pages render "successfully" but are useless.
  */
-export async function gotoAndSettle(page: Page, url: string, opts: { scroll?: boolean } = {}): Promise<number | null> {
+export async function gotoAndSettle(page: PageDriver, url: string, opts: { scroll?: boolean } = {}): Promise<number | null> {
   // A clear "private address" error instead of net::ERR_ACCESS_DENIED from the request filter — and never retried (BlockedTargetError).
   await assertPublicUrl(url, strictPolicy());
   let lastError: unknown;
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      const response: HTTPResponse | null = await page.goto(url, { waitUntil: "load", timeout: NAVIGATION_TIMEOUT_MS });
-      await page.waitForNetworkIdle({ idleTime: 700, timeout: 8_000 }).catch(() => {});
-      const status = response?.status() ?? null;
-      if (await detectChallenge(page)) throw new BlockedPageError(`Bot protection challenge on ${new URL(url).host} — try enabling the proxy`);
+      const { status } = await page.goto(url, { timeoutMs: NAVIGATION_TIMEOUT_MS });
+      await page.waitForNetworkIdle({ idleMs: 700, timeoutMs: 8_000 });
+      if (await page.run("isBotChallenge").catch(() => false)) {
+        throw new BotWallError(`Bot protection challenge on ${new URL(url).host} — ${page.runner === "server" ? "try running it in your browser, or the proxy" : "open the site in Chrome once and solve the check"}`);
+      }
       if (status != null && status >= 400) throw new BlockedPageError(`HTTP ${status} from ${url}`);
       if (opts.scroll !== false) await scrollFullPage(page);
-      await flattenShadowDom(page);
+      await page.run("flattenShadowDom").catch(() => {});
       return status;
     } catch (err) {
       lastError = err;
-      if (err instanceof BlockedPageError) throw err;
+      if (err instanceof BlockedPageError || err instanceof FatalDriverError) throw err;
       log.warn(`Navigation attempt ${attempt} failed: ${url}`, String(err));
     }
   }
@@ -256,12 +261,12 @@ export async function gotoAndSettle(page: Page, url: string, opts: { scroll?: bo
  * tables after network idle). Polls the text length and returns once it holds
  * still for two polls in a row, or after `timeoutMs`.
  */
-export async function waitForStableText(page: Page, timeoutMs = 6_000, intervalMs = 500): Promise<void> {
+export async function waitForStableText(page: PageDriver, timeoutMs = 6_000, intervalMs = 500): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let last = -1;
   let steady = 0;
   while (Date.now() < deadline) {
-    const len = await page.evaluate(() => (document.querySelector("main") ?? document.body)?.innerText.length ?? 0).catch(() => -1);
+    const len = await page.run("visibleTextLength").catch(() => -1);
     if (len > 0 && len === last) {
       if (++steady >= 2) return;
     } else steady = 0;

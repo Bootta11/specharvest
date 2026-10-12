@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import { COLLECTION_EXPORT_FORMAT, COLLECTIONS_EXPORT_FORMAT, type Collection, type CollectionExport, type GroupingMode, type CollectionGroup, type CollectionKind, type CollectionsExport, type Item, type Job, type JobKind, type LlmFunding, type LlmPurpose, type LookupStats, type SpecKey, type SpecOrigin, type SpecSource, type SpecType, type SpecValue, type UsageSummary } from "@specharvest/shared";
+import { COLLECTION_EXPORT_FORMAT, COLLECTIONS_EXPORT_FORMAT, type Collection, type CollectionExport, type GroupingMode, type CollectionGroup, type CollectionKind, type CollectionsExport, type Item, type Job, type JobKind, type LlmFunding, type LlmPurpose, type LookupStats, type Runner, type SpecKey, type SpecOrigin, type SpecSource, type SpecType, type SpecValue, type UsageSummary } from "@specharvest/shared";
 import { env } from "../config.ts";
 import { withSafeUrlPattern } from "../crawler/url-pattern.ts";
 
@@ -85,6 +85,15 @@ CREATE TABLE IF NOT EXISTS key_aliases (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS key_aliases_canonical ON key_aliases(canonical);
+-- A searched key that no listing field had, already compared with one collection's fields for synonyms
+-- (search/registry-synonyms.ts). Checked again once the collection's field count changes.
+CREATE TABLE IF NOT EXISTS key_registry_checks (
+  key TEXT NOT NULL,
+  collection_id INTEGER NOT NULL,
+  registry_size INTEGER NOT NULL,
+  checked_at INTEGER NOT NULL,
+  PRIMARY KEY (key, collection_id)
+);
 CREATE TABLE IF NOT EXISTS query_cache (
   collection_id INTEGER NOT NULL DEFAULT 0,
   query TEXT NOT NULL,
@@ -244,6 +253,16 @@ export function getDb(): DatabaseSync {
   addColumnIfMissing("items", "manual", "INTEGER NOT NULL DEFAULT 0");
   // 'items': started from a single item page, so there is no listing to walk.
   addColumnIfMissing("collections", "kind", "TEXT NOT NULL DEFAULT 'listing'");
+  // Read in a user's own browser (the extension): only that user's crawls reuse it — another user's crawls and
+  // lookups don't, since a modified extension could send anything. Cleared once the server reads it itself.
+  addColumnIfMissing("items", "from_browser", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing("collections", "detection_from_browser", "INTEGER NOT NULL DEFAULT 0");
+  // Extension tokens live with the API keys: kind 'extension', the browser's name, and how it was paired.
+  addColumnIfMissing("api_keys", "kind", "TEXT NOT NULL DEFAULT 'api'");
+  addColumnIfMissing("api_keys", "device_name", "TEXT");
+  addColumnIfMissing("api_keys", "via", "TEXT");
+  // A site's bot protection blocked a page of this crawl.
+  addColumnIfMissing("jobs", "bot_wall", "INTEGER NOT NULL DEFAULT 0");
   // Per-user LLM keys: which provider served a call, who paid (own key / server key), and whether the cost is an estimate.
   // Rows from before were all OpenRouter calls on the server's key.
   if (!columnExists("llm_usage", "provider")) {
@@ -394,11 +413,11 @@ export function getCollection(id: number, viewer?: Viewer): (Collection & { dete
 /**
  * Listing structure already detected for another collection on the same host (any owner), newest first.
  * Selectors are site structure, not user data; the caller validates them on the live page before use.
- * Only structures this server detected itself — never one that came from an import file.
+ * Only structures this server detected itself — never one from an import file or a user's browser.
  */
 export function findDetectionForHost(host: string, excludeCollectionId: number): CollectionDetection | null {
   const r = getDb()
-    .prepare("SELECT detection FROM collections WHERE host = ? AND id != ? AND detection IS NOT NULL AND detection_imported = 0 ORDER BY created_at DESC LIMIT 1")
+    .prepare("SELECT detection FROM collections WHERE host = ? AND id != ? AND detection IS NOT NULL AND detection_imported = 0 AND detection_from_browser = 0 ORDER BY created_at DESC LIMIT 1")
     .get(host, excludeCollectionId) as Row | undefined;
   return r ? withSafeUrlPattern(parseJson<CollectionDetection | null>(r.detection, null)) : null;
 }
@@ -424,8 +443,10 @@ export function setCollectionGrouping(id: number, mode: GroupingMode) {
   getDb().prepare("UPDATE collections SET grouping = ? WHERE id = ?").run(mode, id);
 }
 
-export function saveDetection(id: number, detection: CollectionDetection | null) {
-  getDb().prepare("UPDATE collections SET detection = ?, detection_imported = 0 WHERE id = ?").run(detection ? JSON.stringify(detection) : null, id);
+export function saveDetection(id: number, detection: CollectionDetection | null, fromBrowser = false) {
+  getDb()
+    .prepare("UPDATE collections SET detection = ?, detection_imported = 0, detection_from_browser = ? WHERE id = ?")
+    .run(detection ? JSON.stringify(detection) : null, fromBrowser ? 1 : 0, id);
 }
 
 export function renameCollection(id: number, name: string) {
@@ -436,6 +457,7 @@ export function deleteCollection(id: number): number[] {
   const ids = (getDb().prepare("SELECT id FROM items WHERE collection_id = ?").all(id) as Row[]).map((r) => Number(r.id));
   getDb().prepare("DELETE FROM collections WHERE id = ?").run(id);
   getDb().prepare("DELETE FROM query_cache WHERE collection_id = ?").run(id);
+  getDb().prepare("DELETE FROM key_registry_checks WHERE collection_id = ?").run(id);
   getDb().prepare("DELETE FROM search_history WHERE collection_id = ?").run(id);
   deleteSetting(`attr-profile:${id}`);
   return ids;
@@ -682,6 +704,8 @@ export interface ItemInput {
   contentText?: string | null;
   /** Added by hand from its own page; once set it stays (a listing walk never clears it). */
   manual?: boolean;
+  /** Read in the user's own browser (extension) rather than by the server. */
+  fromBrowser?: boolean;
 }
 
 export function upsertItem(input: ItemInput): number {
@@ -701,16 +725,16 @@ export function upsertItem(input: ItemInput): number {
     d.prepare(
       `UPDATE items SET title=?, price=?, currency=?, main_image=?, description=?, identity=?, specs=?, raw_text=?, indexed_at=?,
          card_hash=COALESCE(?, card_hash), content_hash=COALESCE(?, content_hash), content_text=COALESCE(?, content_text), last_seen_at=?, checked_at=?, gone_at=NULL,
-         imported=0, manual=MAX(manual, ?) WHERE id=?`,
-    ).run(input.title, input.price, input.currency, input.mainImage, input.description, input.identity, JSON.stringify(specs), input.rawText, now, input.cardHash ?? null, input.contentHash ?? null, input.contentText ?? null, now, now, input.manual ? 1 : 0, id);
+         imported=0, from_browser=?, manual=MAX(manual, ?) WHERE id=?`,
+    ).run(input.title, input.price, input.currency, input.mainImage, input.description, input.identity, JSON.stringify(specs), input.rawText, now, input.cardHash ?? null, input.contentHash ?? null, input.contentText ?? null, now, now, input.fromBrowser ? 1 : 0, input.manual ? 1 : 0, id);
     return id;
   }
   const res = d
     .prepare(
-      `INSERT INTO items (collection_id, url, title, price, currency, main_image, description, identity, specs, raw_text, indexed_at, card_hash, content_hash, content_text, last_seen_at, checked_at, manual)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO items (collection_id, url, title, price, currency, main_image, description, identity, specs, raw_text, indexed_at, card_hash, content_hash, content_text, last_seen_at, checked_at, manual, from_browser)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(input.collectionId, input.url, input.title, input.price, input.currency, input.mainImage, input.description, input.identity, JSON.stringify(input.specs), input.rawText, now, input.cardHash ?? null, input.contentHash ?? null, input.contentText ?? null, now, now, input.manual ? 1 : 0);
+    .run(input.collectionId, input.url, input.title, input.price, input.currency, input.mainImage, input.description, input.identity, JSON.stringify(input.specs), input.rawText, now, input.cardHash ?? null, input.contentHash ?? null, input.contentText ?? null, now, now, input.manual ? 1 : 0, input.fromBrowser ? 1 : 0);
   return Number(res.lastInsertRowid);
 }
 
@@ -798,13 +822,17 @@ export interface ReusableExtraction {
  * Copying it skips the LLM call. Nothing identifying the donor collection or its owner is returned.
  * Imported items never donate: their values weren't extracted here.
  */
-export function findReusableExtraction(url: string, contentHash: string, excludeCollectionId: number): ReusableExtraction | null {
+export function findReusableExtraction(url: string, contentHash: string, excludeCollectionId: number, userId: number | null = null): ReusableExtraction | null {
   const d = getDb();
+  // Read in someone's browser: only that user's own collections may reuse it.
   const r = d
     .prepare(
-      "SELECT id, collection_id, title, price, currency, main_image, description, identity, specs FROM items WHERE url = ? AND content_hash = ? AND collection_id != ? AND imported = 0 ORDER BY indexed_at DESC LIMIT 1",
+      `SELECT id, collection_id, title, price, currency, main_image, description, identity, specs FROM items
+       WHERE url = ? AND content_hash = ? AND collection_id != ? AND imported = 0
+         AND (from_browser = 0 OR collection_id IN (SELECT id FROM collections WHERE user_id IS ?))
+       ORDER BY indexed_at DESC LIMIT 1`,
     )
-    .get(url, contentHash, excludeCollectionId) as Row | undefined;
+    .get(url, contentHash, excludeCollectionId, userId) as Row | undefined;
   if (!r) return null;
   const webKeys = new Set((d.prepare("SELECT key FROM spec_sources WHERE item_id = ? AND origin = 'web'").all(Number(r.id)) as Row[]).map((x) => String(x.key)));
   const registry = new Map(listSpecKeys(Number(r.collection_id)).map((k) => [k.key, k]));
@@ -1131,7 +1159,7 @@ export function listItemsByIdentities(identities: string[], scope: CollectionSco
 
 /**
  * A value for `key` that a listing of one of these product identities states
- * on its own page (not filled from the web), with that listing's URL. Imported listings don't count.
+ * on its own page (not filled from the web), with that listing's URL. Imported and browser-read listings don't count.
  */
 export function findPageValue(identities: string[], key: string): { value: SpecValue; url: string } | null {
   if (identities.length === 0) return null;
@@ -1140,7 +1168,7 @@ export function findPageValue(identities: string[], key: string): { value: SpecV
       `SELECT i.url, json_extract(i.specs, p.path) AS v, json_type(i.specs, p.path) AS t
        FROM items i, (SELECT '$.' || json_quote(?) AS path) p
        WHERE i.identity IN (${identities.map(() => "?").join(",")})
-         AND i.imported = 0
+         AND i.imported = 0 AND i.from_browser = 0
          AND json_type(i.specs, p.path) NOT IN ('null', 'object', 'array')
          -- 0 / "" on a page is almost always an extraction slip — don't spread it to siblings.
          AND NOT (json_type(i.specs, p.path) IN ('integer', 'real') AND json_extract(i.specs, p.path) = 0)
@@ -1218,6 +1246,32 @@ export function saveKeyAlias(alias: string, canonical: string): boolean {
   d.prepare("INSERT OR REPLACE INTO key_aliases (alias, canonical, created_at) VALUES (?, ?, ?)").run(alias, target, now);
   d.prepare("INSERT OR IGNORE INTO key_aliases (alias, canonical, created_at) VALUES (?, ?, ?)").run(target, target, now);
   return true;
+}
+
+/** Collections in a scope that have any spec keys, with how many (a changed count means new fields to compare). */
+export function registrySizes(scope: CollectionScope): Map<number, number> {
+  const cond = scopeCondition(scope);
+  const rows = getDb()
+    .prepare(`SELECT collection_id, COUNT(*) AS n FROM spec_keys ${cond ? `WHERE ${cond.sql}` : ""} GROUP BY collection_id`)
+    .all(...(cond?.params ?? [])) as Row[];
+  return new Map(rows.map((r) => [Number(r.collection_id), Number(r.n)]));
+}
+
+/** Whether `key` was compared with every one of these collections' fields at their current size. */
+export function registryChecked(key: string, sizes: Map<number, number>): boolean {
+  if (sizes.size === 0) return true;
+  const rows = getDb().prepare("SELECT collection_id, registry_size FROM key_registry_checks WHERE key = ?").all(key) as Row[];
+  const checked = new Map(rows.map((r) => [Number(r.collection_id), Number(r.registry_size)]));
+  return [...sizes].every(([id, n]) => checked.get(id) === n);
+}
+
+export function markRegistryChecked(key: string, sizes: Map<number, number>) {
+  const stmt = getDb().prepare(
+    `INSERT INTO key_registry_checks (key, collection_id, registry_size, checked_at) VALUES (?, ?, ?, ?)
+     ON CONFLICT(key, collection_id) DO UPDATE SET registry_size = excluded.registry_size, checked_at = excluded.checked_at`,
+  );
+  const now = Date.now();
+  for (const [id, n] of sizes) stmt.run(key, id, n, now);
 }
 
 /** Which of these keys have already been checked for synonyms. */
@@ -1328,7 +1382,13 @@ function toJob(r: Row): Job {
     startedAt: Number(r.started_at),
     finishedAt: r.finished_at == null ? null : Number(r.finished_at),
     resumable: r.kind === "crawl" && (status === "stopped" || status === "interrupted") && r.params != null && r.collection_id != null,
+    runner: parseJson<{ runner?: Runner } | null>(r.params, null)?.runner === "browser" ? "browser" : "server",
+    botWall: Number(r.bot_wall ?? 0) === 1,
   };
+}
+
+export function setJobParams(id: number, params: unknown) {
+  getDb().prepare("UPDATE jobs SET params = ? WHERE id = ?").run(JSON.stringify(params), id);
 }
 
 export function createJob(kind: JobKind, collectionId: number | null, params?: unknown, userId: number | null = null): Job {
@@ -1376,6 +1436,7 @@ const JOB_COLUMNS: Record<string, string> = {
   message: "message",
   error: "error",
   finishedAt: "finished_at",
+  botWall: "bot_wall",
 };
 
 export function updateJob(id: number, patch: Partial<Omit<Job, "id" | "kind" | "collectionId" | "startedAt">>): Job {
@@ -1384,7 +1445,7 @@ export function updateJob(id: number, patch: Partial<Omit<Job, "id" | "kind" | "
     const set = entries.map(([k]) => `${JOB_COLUMNS[k]} = ?`).join(", ");
     getDb()
       .prepare(`UPDATE jobs SET ${set} WHERE id = ?`)
-      .run(...entries.map(([, v]) => (v !== null && typeof v === "object" ? JSON.stringify(v) : (v ?? null)) as SQLInputValue), id);
+      .run(...entries.map(([, v]) => (typeof v === "boolean" ? (v ? 1 : 0) : v !== null && typeof v === "object" ? JSON.stringify(v) : (v ?? null)) as SQLInputValue), id);
   }
   return getJob(id)!;
 }

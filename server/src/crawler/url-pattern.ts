@@ -3,7 +3,9 @@
  * of every listing page — server-side too, where a catastrophic pattern would freeze the event loop. Only the
  * shapes our own generators produce are accepted (detect.ts inferItemUrlPattern / heuristic detection):
  * `^`, then escaped literal characters and `[^/?#]+` path segments, then optionally `(?:[/?#]|$)`.
- * Such patterns have no nested quantifiers or alternation, so matching is linear. Anything else — an
+ * Such patterns have no nested quantifiers or alternation: matching is linear, or at worst quadratic within
+ * one path segment when a slug word sits between two `[^/?#]+` (inferSlugWordPattern) — harmless at URL
+ * lengths. Anything else — an
  * imported file, an older row — is dropped, and the listing falls back to the card selector (or re-detection).
  */
 const SAFE_PATTERN = /^\^(?:\\[.*+?^${}()|[\]\\/]|\[\^\/\?#\]\+|[^.*+?^${}()|[\]\\])*(?:\(\?:\[\/\?#\]\|\$\))?$/;

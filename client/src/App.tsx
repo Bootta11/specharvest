@@ -9,7 +9,8 @@ import { UserMenu } from "./components/UserMenu.tsx";
 import { AccountModal } from "./components/AccountModal.tsx";
 import { AdminModal } from "./components/AdminModal.tsx";
 import { LlmSettingsModal } from "./components/LlmSettingsModal.tsx";
-import { LoginView } from "./views/LoginView.tsx";
+import { LoginView, UnreachableView } from "./views/LoginView.tsx";
+import { CONNECT_EXTENSION_PATH, ConnectExtensionView } from "./views/ConnectExtensionView.tsx";
 import { useAuth, type Auth } from "./lib/auth.ts";
 import { isNative } from "./lib/platform.ts";
 import { SHARE_EVENT, hasPendingShare } from "./lib/share.ts";
@@ -36,8 +37,12 @@ function takeJobParam(): boolean {
 
 export default function App() {
   const auth = useAuth();
+  const [path, setPath] = useState(() => location.pathname);
+  if (auth.unreachable) return <UnreachableView auth={auth} />;
   if (auth.user === undefined) return null;
   if (auth.user === null) return <LoginView auth={auth} />;
+  // The browser extension's "approve on the website" page (sign-in above first when needed).
+  if (path === CONNECT_EXTENSION_PATH && !isNative) return <ConnectExtensionView user={auth.user} onDone={() => setPath(location.pathname)} />;
   // Remount on user switch so nothing from the previous account lingers.
   return <Workspace key={auth.user.id} user={auth.user} auth={auth} />;
 }
@@ -182,7 +187,7 @@ function Workspace({ user, auth }: { user: UserSummary; auth: Auth }) {
                 <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
               </svg>
             </button>
-            <UserMenu user={user} onAccount={() => setDialog("account")} onLlm={() => setDialog("llm")} onAdmin={() => setDialog("admin")} onLogout={auth.logout} />
+            <UserMenu user={user} onAccount={() => setDialog("account")} onLlm={() => setDialog("llm")} onAdmin={() => setDialog("admin")} onLogout={auth.logout} onSwitch={auth.switchTo} onAddAccount={auth.addAccount} />
           </div>
           <nav className="order-last flex w-full rounded-lg bg-stone-100 p-1 text-sm md:order-none md:w-auto dark:bg-stone-900" aria-label="Main">
             {(["search", "ingest"] as const).map((t) => (

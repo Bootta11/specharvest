@@ -4,7 +4,8 @@
   "type": "module",
   "version": "0.1.0",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./page-scripts": "./src/page-scripts.ts"
   },
   "dependencies": {
     "zod": "^4.6.5"

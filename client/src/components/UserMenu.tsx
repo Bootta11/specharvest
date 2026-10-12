@@ -1,9 +1,26 @@
 import { useEffect, useRef, useState } from "react";
 import type { UserSummary } from "@specharvest/shared";
-import { isNative, serverUrl } from "../lib/platform.ts";
+import { accounts, activeAccount, isNative, serverUrl } from "../lib/platform.ts";
+import { AccountRow } from "./AccountRow.tsx";
 
-/** Header avatar with the account / admin / sign-out menu. */
-export function UserMenu({ user, onAccount, onLlm, onAdmin, onLogout }: { user: UserSummary; onAccount: () => void; onLlm: () => void; onAdmin: () => void; onLogout: () => void }) {
+/** Header avatar with the account / admin / sign-out menu; in the app also the saved accounts to switch to. */
+export function UserMenu({
+  user,
+  onAccount,
+  onLlm,
+  onAdmin,
+  onLogout,
+  onSwitch,
+  onAddAccount,
+}: {
+  user: UserSummary;
+  onAccount: () => void;
+  onLlm: () => void;
+  onAdmin: () => void;
+  onLogout: () => void;
+  onSwitch: (id: string) => void;
+  onAddAccount: () => void;
+}) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -38,7 +55,7 @@ export function UserMenu({ user, onAccount, onLlm, onAdmin, onLogout }: { user: 
         {user.email.charAt(0)}
       </button>
       {open && (
-        <div role="menu" className="card absolute right-0 top-full z-30 mt-2 w-60 overflow-hidden py-1 shadow-lg">
+        <div role="menu" className="card absolute right-0 top-full z-30 mt-2 w-72 max-w-[calc(100vw-2rem)] overflow-hidden py-1 shadow-lg">
           <div className="border-b border-stone-200 px-4 py-2.5 dark:border-stone-800">
             <div className="truncate text-sm font-medium" title={user.email}>
               {user.email}
@@ -59,8 +76,22 @@ export function UserMenu({ user, onAccount, onLlm, onAdmin, onLogout }: { user: 
               Users & sign-up
             </button>
           )}
+          {isNative && (
+            <div className="border-y border-stone-200 py-1 dark:border-stone-800">
+              <div className="max-h-56 overflow-y-auto">
+                {accounts()
+                  .filter((a) => a.id !== activeAccount()?.id)
+                  .map((a) => (
+                    <AccountRow key={a.id} account={a} onClick={pick(() => onSwitch(a.id))} />
+                  ))}
+              </div>
+              <button role="menuitem" className={item} onClick={pick(onAddAccount)}>
+                Add account
+              </button>
+            </div>
+          )}
           <button role="menuitem" className={`${item} text-red-700 dark:text-red-300`} onClick={pick(onLogout)}>
-            Sign out
+            {isNative && accounts().length > 1 ? "Sign out of this account" : "Sign out"}
           </button>
         </div>
       )}

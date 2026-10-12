@@ -5,7 +5,8 @@
   "workspaces": [
     "shared",
     "server",
-    "client"
+    "client",
+    "extension"
   ],
   "scripts": {
     "dev": "./scripts/dev.sh",
@@ -15,9 +16,11 @@
     "dev:client": "npm run dev --workspace client",
     "build": "npm run build --workspace client",
     "start": "npm run start --workspace server",
-    "typecheck": "npm run typecheck --workspace server && npm run typecheck --workspace client",
+    "typecheck": "npm run typecheck --workspace server && npm run typecheck --workspace client && npm run typecheck --workspace extension",
     "test": "npm test --workspace server",
-    "seed:admin": "npm run seed:admin --workspace server --"
+    "seed:admin": "npm run seed:admin --workspace server --",
+    "build:extension": "npm run build --workspace extension",
+    "zip:extension": "npm run zip --workspace extension"
   },
   "engines": {
     "node": ">=22"

@@ -1,8 +1,8 @@
-import type { Page } from "puppeteer-core";
 import type { CollectionDetection } from "../db/sqlite.ts";
 import { detectListing } from "../llm/detect.ts";
 import { createLogger, errorMessage } from "../lib/logger.ts";
 import { gotoAndSettle } from "./browser.ts";
+import type { PageDriver } from "./driver.ts";
 import { collectItemUrls, withPageParam } from "./paginate.ts";
 import { findRepeatedClassNames, sanitizeForLlm } from "./sanitize.ts";
 
@@ -26,23 +26,48 @@ export function inferItemUrlPattern(urls: string[]): string | null {
     }
   }
   const [best, n] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0] ?? [null, 0];
-  if (!best || n / urls.length < 0.8 || best.endsWith(".")) return null;
   // Only meaningful when the first segment is a real prefix (not every same-origin page).
-  if (new URL(best).pathname === "/") return null;
+  if (!best || n / urls.length < 0.8 || best.endsWith(".") || new URL(best).pathname === "/") return inferSlugWordPattern(urls);
   return "^" + best.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * Items whose URLs share no path prefix but a word in the slug — e.g. tehnomag.com/<name>-proizvod-9357/ next
+ * to /blog/… and filter links: the same path depth, and a `-word-` in the last segment of ≥80% of them.
+ */
+function inferSlugWordPattern(urls: string[]): string | null {
+  const parsed = urls.flatMap((u) => {
+    try {
+      const url = new URL(u);
+      return [{ origin: url.origin, segs: url.pathname.split("/").filter(Boolean) }];
+    } catch {
+      return [];
+    }
+  });
+  const byShape = new Map<string, typeof parsed>();
+  for (const p of parsed) if (p.segs.length) (byShape.get(`${p.origin} ${p.segs.length}`) ?? byShape.set(`${p.origin} ${p.segs.length}`, []).get(`${p.origin} ${p.segs.length}`)!).push(p);
+  const group = [...byShape.values()].sort((a, b) => b.length - a.length)[0];
+  if (!group || group.length / urls.length < 0.8) return null;
+  // Words inside the last segment (not its first or last word, which are the name and the id).
+  const words = new Map<string, number>();
+  for (const p of group) {
+    const inner = new Set(p.segs.at(-1)!.toLowerCase().split("-").slice(1, -1));
+    for (const w of inner) if (/^[a-z]{3,}$/.test(w)) words.set(w, (words.get(w) ?? 0) + 1);
+  }
+  const [word, n] = [...words.entries()].sort((a, b) => b[1] - a[1] || b[0].length - a[0].length)[0] ?? [null, 0];
+  if (!word || n / urls.length < 0.8) return null;
+  const { origin, segs } = group[0]!;
+  return `^${escapeRe(origin)}/${"[^/?#]+/".repeat(segs.length - 1)}[^/?#]+-${word}-[^/?#]+(?:[/?#]|$)`;
 }
 
 /**
  * Fallback when the LLM can't find a working card selector: the most common
  * same-origin link shape outside nav/header/footer (≥5 distinct links).
  */
-async function heuristicDetection(page: Page): Promise<CollectionDetection | null> {
-  const links = await page.evaluate(() =>
-    Array.from(document.querySelectorAll("a[href]"))
-      .filter((a) => !a.closest("nav, header, footer"))
-      .map((a) => (a as HTMLAnchorElement).href)
-      .filter((h) => h.startsWith(location.origin) && h !== location.href),
-  );
+async function heuristicDetection(page: PageDriver): Promise<CollectionDetection | null> {
+  const { origin: pageOrigin, links } = await page.run("sameOriginLinks");
   const shapes = new Map<string, Set<string>>();
   for (const h of links) {
     const u = new URL(h);
@@ -54,7 +79,7 @@ async function heuristicDetection(page: Page): Promise<CollectionDetection | nul
   }
   const best = [...shapes.entries()].sort((a, b) => b[1].size - a[1].size)[0];
   if (!best || best[1].size < 5) return null;
-  const origin = new URL(page.url()).origin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const origin = pageOrigin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const pattern = "^" + origin + "/" + best[0].split("/").map((s) => (s === "*" ? "[^/?#]+" : s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))).join("/") + "(?:[/?#]|$)";
   log.info(`Heuristic link-shape detection: ${best[0]} (${best[1].size} links)`);
   return { listItemSelector: "", paginationType: "pages", nextSelector: null, itemUrlPattern: pattern };
@@ -65,7 +90,7 @@ async function heuristicDetection(page: Page): Promise<CollectionDetection | nul
  * URLs, URL-based paging is the most reliable mechanism (no clicking, works
  * for SPA "next" buttons that don't expose hrefs).
  */
-async function probePageParam(page: Page, startUrl: string, d: CollectionDetection, firstPage: string[], preferred?: string | null): Promise<string | null> {
+async function probePageParam(page: PageDriver, startUrl: string, d: CollectionDetection, firstPage: string[], preferred?: string | null): Promise<string | null> {
   const candidates = [...new Set([preferred, ...PAGE_PARAM_CANDIDATES].filter((x): x is string => !!x))];
   const current = new URL(startUrl);
   for (const param of candidates.slice(0, 5)) {
@@ -89,9 +114,9 @@ export interface DetectResult {
 }
 
 /** detect → verify in the live DOM → one grounded retry → heuristic fallback; then pagination probing. */
-export async function detectListingStructure(page: Page, startUrl: string, report: (msg: string) => void): Promise<DetectResult> {
+export async function detectListingStructure(page: PageDriver, startUrl: string, report: (msg: string) => void): Promise<DetectResult> {
   await gotoAndSettle(page, startUrl);
-  const html = await page.content();
+  const html = await page.run("pageHtml");
   const sanitized = sanitizeForLlm(html);
   let detection: CollectionDetection | null = null;
   let urls: string[] = [];

@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import type { ApiKeyCreated, ApiKeySummary, UserSummary } from "@specharvest/shared";
 import { api } from "../lib/api.ts";
+import { ConnectedBrowsers } from "./ConnectedBrowsers.tsx";
 import { Field, Modal, Notice, OneTimeSecret } from "./Modal.tsx";
 
 const date = (ts: number | null) => (ts ? new Date(ts).toLocaleDateString() : "never");
@@ -126,6 +127,7 @@ export function AccountModal({ user, onUpdated, onClose }: { user: UserSummary; 
   return (
     <Modal title="Account" onClose={onClose}>
       <Profile user={user} onUpdated={onUpdated} />
+      <ConnectedBrowsers />
       <ApiKeys />
     </Modal>
   );

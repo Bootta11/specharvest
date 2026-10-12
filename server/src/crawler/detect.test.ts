@@ -15,6 +15,18 @@ describe("inferItemUrlPattern", () => {
   it("returns null without a clear majority", () => {
     expect(inferItemUrlPattern(["https://a.com/x/1", "https://a.com/y/2", "https://a.com/z/3"])).toBeNull();
   });
+
+  it("falls back to a word shared by the slugs when items sit at the site root", () => {
+    const items = ["dyson-v16-proizvod-9357", "samsung-jet-proizvod-4105", "bosch-bcs-proizvod-5412", "elit-zoomx-proizvod-9200"].map((s) => `https://shop.example/${s}/`);
+    const pattern = inferItemUrlPattern([...items, "https://shop.example/blog/promo/gift/"])!;
+    expect(isSafeItemUrlPattern(pattern)).toBe(true);
+    const re = new RegExp(pattern);
+    expect(items.every((u) => re.test(u))).toBe(true);
+    expect(re.test("https://shop.example/blog/promo/gift/")).toBe(false);
+    expect(re.test("https://shop.example/proizvodi/usisivaci/?page=2")).toBe(false);
+    // No shared word: no pattern.
+    expect(inferItemUrlPattern(["https://a.com/red-shoe-1/", "https://a.com/blue-hat-2/", "https://a.com/green-bag-3/"])).toBeNull();
+  });
 });
 
 describe("normalizeItemUrl", () => {

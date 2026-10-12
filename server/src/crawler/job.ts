@@ -1,5 +1,5 @@
 import PQueue from "p-queue";
-import type { CrawlMode, CrawlRequest, Job, JobEvent, SpecValue } from "@specharvest/shared";
+import type { CrawlMode, CrawlRequest, Job, JobEvent, PageSnapshot, Runner, SpecValue } from "@specharvest/shared";
 import { env } from "../config.ts";
 import * as db from "../db/sqlite.ts";
 import { upsertVector } from "../db/lance.ts";
@@ -14,11 +14,13 @@ import { httpError } from "../lib/http-error.ts";
 import { getUser } from "../auth/users.ts";
 import { notifyJobFinished } from "../notify/index.ts";
 import { publish, retireChannel, reviveChannel } from "../sse/hub.ts";
-import { BlockedPageError, gotoAndSettle, waitForStableText, withPage } from "./browser.ts";
+import { prepareBrowserRunner } from "../extension/driver.ts";
+import { BlockedPageError, BotWallError, gotoAndSettle, waitForStableText, withPage, type WithPageOptions } from "./browser.ts";
+import { FatalDriverError } from "./driver.ts";
 import { detectListingStructure } from "./detect.ts";
 import { changedTokens, fingerprint, removedShare } from "./fingerprint.ts";
 import { collectItemUrls, walkListing } from "./paginate.ts";
-import { snapshotDetail, type DetailSnapshot, type OtherListingHints } from "./sanitize.ts";
+import { snapshotDetail, toDetailSnapshot, type DetailSnapshot, type OtherListingHints } from "./sanitize.ts";
 import { safeItemUrlPattern } from "./url-pattern.ts";
 
 const log = createLogger("job");
@@ -76,7 +78,7 @@ function collectionName(url: string, pageTitle: string | null): string {
  * Renders a detail page. A bot challenge mid-crawl is usually rate limiting,
  * so back off and retry a couple of times before giving up on the item.
  */
-async function loadDetail(url: string, pageOpts: { useProxy: boolean }, hints: OtherListingHints) {
+async function loadDetail(url: string, pageOpts: WithPageOptions, hints: OtherListingHints) {
   const delays = [8_000, 20_000];
   for (let attempt = 0; ; attempt++) {
     try {
@@ -106,17 +108,26 @@ function throwIfStopped(signal: AbortSignal) {
 /** Crawls running in this process, so they can be stopped. */
 const running = new Map<number, AbortController>();
 
-/** Runs (or resumes) a crawl job in the background. `resumeSince` skips items the job already handled. */
-function launch(jobId: number, collectionId: number, req: CrawlRequest, resumeSince?: number) {
+/** Can't go on right now, but resuming later can: a dead LLM key, the user's browser gone, a bot wall. */
+const pausesJob = (err: unknown) => llmBlocked(err) || err instanceof FatalDriverError || err instanceof BotWallError;
+
+/**
+ * Runs (or resumes) a crawl job in the background. `resumeSince` skips items the job already handled;
+ * `snapshot` is the item page as the user's open tab showed it (add-item from the extension).
+ */
+function launch(jobId: number, collectionId: number, req: CrawlRequest, resumeSince?: number, snapshot?: PageSnapshot) {
   const controller = new AbortController();
   running.set(jobId, controller);
   const url = new URL(req.url).toString();
   const userId = db.getJob(jobId)?.userId ?? null;
-  withLlmContext({ jobId, collectionId, userId }, () => runCrawl(jobId, collectionId, url, req, controller.signal, resumeSince))
+  withLlmContext({ jobId, collectionId, userId }, () => runCrawl(jobId, collectionId, url, req, controller.signal, resumeSince, snapshot))
     .catch((err) => {
-      // A rejected / out-of-credit LLM key stops the crawl like the user would: resumable once it's fixed.
-      if (err instanceof StopError || llmBlocked(err)) {
-        const reason = err instanceof StopError ? err.reason : err.message;
+      if (err instanceof BotWallError) patchJob(jobId, { botWall: true });
+      // A rejected / out-of-credit LLM key, a disconnected browser or a bot wall stops the crawl like the user
+      // would: resumable once it's fixed.
+      if (err instanceof StopError || pausesJob(err)) {
+        // Stopped by the user while waiting on their browser: a plain stop, not a failure reason.
+        const reason = err instanceof StopError ? err.reason : controller.signal.aborted ? undefined : err.message;
         const job = db.getJob(jobId)!;
         const handled = `${job.itemsIndexed} of ${job.itemsFound || "?"} items handled`;
         const summary = reason ? `Stopped: ${reason} (${handled})` : `Stopped — ${handled}`;
@@ -151,17 +162,20 @@ export function startCrawl(req: CrawlRequest, userId: number | null, collectionI
   const name = req.name?.trim();
   const targetId = existing?.id ?? db.createCollection(name || host, url, host, userId, addItem ? "items" : "listing");
   if (existing && !addItem && name && name !== existing.name) db.renameCollection(existing.id, name);
+  const runner: Runner = req.runner ?? "server";
+  // Saved as the job's params (resume reuses them) — without the page snapshot, which is used once.
   const params: CrawlRequest = {
     url,
     maxPages: req.maxPages,
     maxItems: req.maxItems,
-    useProxy: req.useProxy,
+    useProxy: runner === "server" ? req.useProxy : undefined,
     mode: req.mode ?? (req.refresh ? "full" : "quick"),
     ...(addItem ? { kind: "item" as const } : {}),
+    ...(runner === "browser" ? { runner } : {}),
   };
   const job = db.createJob("crawl", targetId, params, userId);
   emitJob(job);
-  launch(job.id, targetId, params);
+  launch(job.id, targetId, params, undefined, addItem && runner === "browser" ? req.snapshot : undefined);
   return job;
 }
 
@@ -178,11 +192,18 @@ export function stopCrawl(jobId: number): Job | null {
 
 export class ResumeError extends Error {}
 
-/** Continues a stopped/interrupted crawl in the same job, skipping items it already handled. */
-export function resumeCrawl(jobId: number): Job {
+/**
+ * Continues a stopped/interrupted crawl in the same job, skipping items it already handled. `runner` switches
+ * whose browser loads the pages from here on (e.g. the user's own after a bot wall).
+ */
+export function resumeCrawl(jobId: number, runner?: Runner): Job {
   const job = db.getJob(jobId);
-  const params = db.getJobParams<CrawlRequest>(jobId);
+  let params = db.getJobParams<CrawlRequest>(jobId);
   if (!job || !job.resumable || !params || job.collectionId == null) throw new ResumeError("This job can't be resumed");
+  if (runner && runner !== (params.runner ?? "server")) {
+    params = { ...params, runner: runner === "browser" ? "browser" : undefined, useProxy: runner === "browser" ? undefined : params.useProxy };
+    db.setJobParams(jobId, params);
+  }
   const active = db.activeJobForCollection(job.collectionId, "crawl");
   if (active) throw new ResumeError(`Crawl #${active.id} is already running for this collection`);
   assertJobSlot(job.userId);
@@ -199,11 +220,32 @@ const PARTIAL_RENDER_SHARE = 0.1;
 /** Still missing more than this after the reload: keep the saved data instead of re-extracting from a partial page. */
 const PARTIAL_RENDER_REJECT_SHARE = 0.3;
 
-async function runCrawl(jobId: number, collectionId: number, url: string, req: CrawlRequest, signal: AbortSignal, resumeSince?: number) {
+async function runCrawl(jobId: number, collectionId: number, url: string, req: CrawlRequest, signal: AbortSignal, resumeSince?: number, snapshot?: PageSnapshot) {
   const maxPages = req.maxPages ?? env.MAX_PAGES;
   const maxItems = req.maxItems ?? env.MAX_ITEMS;
-  const pageOpts = { useProxy: !!req.useProxy };
   const target = db.getCollection(collectionId)!;
+  const ownerId = db.getJob(jobId)?.userId ?? null;
+  const inBrowser = req.runner === "browser";
+  const pageOpts: WithPageOptions = inBrowser
+    ? {
+        runner: "browser",
+        userId: ownerId,
+        notice: (message) => {
+          patchJob(jobId, { message });
+          jobLog(jobId, message, "warn");
+        },
+        signal,
+        origin: new URL(url).origin,
+      }
+    : { useProxy: !!req.useProxy };
+  /** The add-item page as the user's tab showed it: read once instead of loading the page again. */
+  const takeSnapshot = (itemUrl: string): DetailSnapshot | null => {
+    if (!snapshot || snapshot.url.split("#")[0] !== itemUrl.split("#")[0]) return null;
+    const s = toDetailSnapshot(snapshot);
+    snapshot = undefined;
+    return s;
+  };
+  const loadItem = async (itemUrl: string) => takeSnapshot(itemUrl) ?? loadDetail(itemUrl, pageOpts, hints);
   // No listing to walk: adding one item page, or re-checking a collection built from item pages.
   const addItem = req.kind === "item";
   const itemsOnly = !addItem && target.kind === "items";
@@ -212,129 +254,47 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
   const mode: CrawlMode = (addItem || itemsOnly) && requested === "quick" ? "deep" : requested;
   patchJob(jobId, { status: "running", message: addItem ? "Opening item page" : itemsOnly ? "Re-checking items" : "Opening listing page" });
   if (resumeSince) jobLog(jobId, "Resuming — skipping items already handled");
+  if (inBrowser) {
+    jobLog(jobId, "Pages load in your own browser (SpecHarvest extension)");
+    await prepareBrowserRunner(ownerId, url, pageOpts);
+    if (!snapshot) patchJob(jobId, { message: addItem ? "Opening item page in your browser" : itemsOnly ? "Re-checking items in your browser" : "Opening listing page in your browser" });
+  }
   if (addItem) jobLog(jobId, `Adding item ${url} to "${target.name}"${req.useProxy ? " (via proxy)" : ""}`);
   else if (itemsOnly) jobLog(jobId, `Re-checking the ${target.itemCount} items of "${target.name}" (${mode} check${req.useProxy ? ", via proxy" : ""})`);
   else jobLog(jobId, `Crawling ${url} (max ${maxPages} pages, ${maxItems} items, ${mode} check${req.useProxy ? ", via proxy" : ""})`);
 
-  // ---- 1. Listing: detect (or reuse) structure, then walk pages ----
-  throwIfStopped(signal);
-  const walk = addItem || itemsOnly ? fixedWalk(target, addItem ? [url] : [...db.getItemFingerprints(collectionId).keys()]) : await withPage(async (page) => {
-    const collection = db.getCollection(collectionId)!;
-    let detection = collection.detection;
-    if (detection) {
-      await gotoAndSettle(page, url);
-      const urls = await collectItemUrls(page, detection);
-      if (urls.length < 2) {
-        jobLog(jobId, "Saved selectors no longer match — re-detecting", "warn");
-        detection = null;
-      } else {
-        jobLog(jobId, `Reusing saved listing structure (${urls.length} items on page 1)`);
-      }
-    }
-    if (!detection) {
-      // Another collection on the same site (anyone's) already taught us its cards and pagination.
-      const fromHost = db.findDetectionForHost(collection.host, collectionId);
-      if (fromHost) {
-        await gotoAndSettle(page, url);
-        const urls = await collectItemUrls(page, fromHost);
-        if (urls.length >= 2) {
-          detection = fromHost;
-          db.saveDetection(collectionId, detection);
-          jobLog(jobId, `Reusing the listing structure already known for ${collection.host} (${urls.length} items on page 1)`);
-        }
-      }
-    }
-    if (!detection) {
-      patchJob(jobId, { message: "Detecting item cards and pagination" });
-      const result = await detectListingStructure(page, url, (m) => jobLog(jobId, m));
-      detection = result.detection;
-      db.saveDetection(collectionId, detection);
-      if (collection.name === collection.host) db.renameCollection(collectionId, collectionName(url, await page.title().catch(() => null)));
-    }
-
-    patchJob(jobId, { message: "Walking listing pages" });
-    const result = await walkListing(page, url, detection, {
-      maxPages,
-      maxItems,
-      onPage: (pageNum, fresh, total) => {
-        throwIfStopped(signal);
-        patchJob(jobId, { pagesSeen: pageNum, itemsFound: total });
-        jobLog(jobId, `Listing page ${pageNum}: +${fresh.length} items (${total} total)`);
-      },
-    });
-    return { ...result, detection };
-  }, pageOpts);
-
-  throwIfStopped(signal);
-  if (walk.items.size === 0) throw new Error(itemsOnly ? "This collection has no items to re-check" : "No item links found on the listing page");
-  const hints: OtherListingHints = { listItemSelector: walk.detection.listItemSelector, itemUrlPattern: safeItemUrlPattern(walk.detection.itemUrlPattern) };
-
-  // ---- 2. Sort walked items: new → extract; existing → change check (no LLM unless changed) ----
+  // Detail pages open while the listing is still being walked: each listing page's cards are sorted
+  // (new → extract; existing → change check, no LLM unless changed) and queued right away.
   const known = db.getItemFingerprints(collectionId);
   // Resumed: items extracted or seen since the job first started were handled before the stop.
   const handled = resumeSince ? db.urlsSeenSince(collectionId, resumeSince) : new Set<string>();
-  const toExtract: Array<{ url: string; cardHash: string }> = [];
-  const toCheck: Array<{ url: string; cardHash: string; fp: db.ItemFingerprint }> = [];
-  let unchanged = 0;
-  let skipped = 0;
-  for (const [itemUrl, cardText] of walk.items) {
-    if (handled.has(itemUrl)) {
-      skipped++;
-      continue;
-    }
-    const cardHash = fingerprint(cardText);
-    const fp = known.get(itemUrl);
-    if (!fp) toExtract.push({ url: itemUrl, cardHash });
-    else if (mode === "full") toExtract.push({ url: itemUrl, cardHash });
-    // No card text (item pages without a listing): keep the stored card hash.
-    else if (mode === "deep") toCheck.push({ url: itemUrl, cardHash: cardText ? cardHash : (fp.cardHash ?? cardHash), fp });
-    // Quick: a card we have never fingerprinted (rows from before change tracking) is adopted as the baseline.
-    else if (fp.cardHash === null || fp.cardHash === cardHash) {
-      db.touchItem(fp.id, { cardHash });
-      unchanged++;
-    } else toCheck.push({ url: itemUrl, cardHash, fp });
-  }
-  // Hand-added items aren't on the listing: open their pages too (LLM only if they changed).
-  let byHand = 0;
-  if (!addItem && !itemsOnly) {
-    for (const [itemUrl, fp] of known) {
-      if (!fp.manual || walk.items.has(itemUrl) || handled.has(itemUrl)) continue;
-      if (mode === "full") toExtract.push({ url: itemUrl, cardHash: fp.cardHash ?? "" });
-      else toCheck.push({ url: itemUrl, cardHash: fp.cardHash ?? "", fp });
-      byHand++;
-    }
-  }
-  const newCount = toExtract.filter((t) => !known.has(t.url)).length;
-  if (resumeSince) jobLog(jobId, `Resuming — ${skipped} items already handled, ${walk.items.size - skipped} left`);
-  patchJob(jobId, {
-    itemsFound: walk.items.size,
-    itemsIndexed: unchanged + skipped,
-    message: `${newCount} new, ${toCheck.length} to check, ${unchanged} unchanged`,
-  });
-  jobLog(
-    jobId,
-    mode === "full"
-      ? `Re-extracting all ${toExtract.length} items`
-      : addItem || itemsOnly
-        ? `${newCount} new · ${toCheck.length} to re-check`
-        : `${newCount} new · ${toCheck.length - byHand} to re-check (${mode === "deep" ? "every detail page" : "listing card changed"})${byHand ? ` · ${byHand} added by hand to re-check` : ""} · ${unchanged} unchanged (skipped)`,
-  );
-
-  // ---- 3. Detail pages: render → (fingerprint) → LLM extract → store → embed ----
-  let indexed = unchanged + skipped;
+  /** Set once the listing structure is known, before the first card is queued. */
+  let hints: OtherListingHints = { listItemSelector: "", itemUrlPattern: null };
+  const hintsFor = (d: db.CollectionDetection): OtherListingHints => ({ listItemSelector: d.listItemSelector, itemUrlPattern: safeItemUrlPattern(d.itemUrlPattern) });
+  let indexed = 0;
   let extracted = 0;
   let reused = 0;
   let changed = 0;
   let failed = 0;
-  const queue = new PQueue({ concurrency: env.SCRAPE_MAX_CONCURRENT_PAGES });
+  let unchanged = 0;
+  let skipped = 0;
+  let newCount = 0;
+  let checkCount = 0;
+  let byHand = 0;
+  // The first extraction runs alone so it seeds the key registry: parallel workers starting from an empty
+  // registry each invent their own names for the same specs. A collection that has keys starts at once.
+  let seeding: Promise<void> | null = null;
+  let seeded = db.listSpecKeys(collectionId).length > 0;
+  const queue = new PQueue({ concurrency: env.SCRAPE_MAX_CONCURRENT_PAGES, autoStart: seeded });
   const emitQueue = () => emit(jobId, { type: "queue", size: queue.size, pending: queue.pending });
 
+  // ---- Detail pages: render → (fingerprint) → LLM extract → store → embed ----
   const extractAndStore = async (itemUrl: string, snapshot: DetailSnapshot, cardHash: string) => {
     if (snapshot.text.length < 50) throw new Error("Page had almost no text");
     const contentHash = fingerprint(snapshot.stableText);
     // The same unchanged ad was already read in another collection: copy it instead of paying the LLM again
     // (a full re-crawl always re-extracts). Nothing about where it came from is stored or shown.
-    const donor = mode === "full" ? null : db.findReusableExtraction(itemUrl, contentHash, collectionId);
+    const donor = mode === "full" ? null : db.findReusableExtraction(itemUrl, contentHash, collectionId, ownerId);
     const extraction = donor ? adoptExtraction(donor, db.listSpecKeys(collectionId)) : await extractItem(snapshot, db.listSpecKeys(collectionId));
     const specs: Record<string, SpecValue> = Object.fromEntries(extraction.specs.map((s) => [s.key, s.value]));
     const itemId = db.upsertItem({
@@ -352,6 +312,7 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
       contentHash,
       contentText: snapshot.stableText,
       manual: addItem || undefined,
+      fromBrowser: inBrowser,
     });
     for (const s of extraction.specs) {
       db.upsertSpecKey(collectionId, { key: s.key, type: s.type, unit: s.unit, label: s.label, example: String(s.value).slice(0, 60), origin: "page" });
@@ -362,8 +323,9 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
     emit(jobId, { type: "item", title: extraction.title, url: itemUrl });
   };
 
-  /** Set when the LLM key stops working: every further item would fail the same way, so the rest is dropped. */
+  /** Set when the LLM key or the user's browser stops working: every further item would fail the same way, so the rest is dropped. */
   let halt = null as Error | null;
+  let botWall = false;
 
   const run = (fn: () => Promise<void>, itemUrl: string) => async () => {
     if (signal.aborted || halt) return;
@@ -373,11 +335,15 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
       indexed++;
       patchJob(jobId, { itemsIndexed: indexed });
     } catch (err) {
-      if (llmBlocked(err)) {
+      if (llmBlocked(err) || err instanceof FatalDriverError) {
         // Not this item's fault — it's picked up again on resume.
         halt ??= err;
         queue.clear();
         return;
+      }
+      if (err instanceof BotWallError && !botWall) {
+        botWall = true;
+        patchJob(jobId, { botWall: true });
       }
       failed++;
       patchJob(jobId, { itemsFailed: failed });
@@ -387,11 +353,11 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
     }
   };
 
-  const extractNew = (t: { url: string; cardHash: string }) => run(async () => extractAndStore(t.url, await loadDetail(t.url, pageOpts, hints), t.cardHash), t.url);
+  const extractNew = (t: { url: string; cardHash: string }) => run(async () => extractAndStore(t.url, await loadItem(t.url), t.cardHash), t.url);
 
-  const check = (t: (typeof toCheck)[number]) =>
+  const check = (t: CheckTarget) =>
     run(async () => {
-      let snapshot = await loadDetail(t.url, pageOpts, hints);
+      let snapshot = await loadItem(t.url);
       // Lots of known text missing usually means the page hadn't finished rendering — look once more
       // rather than re-extracting (and overwriting good specs) from a partial page.
       if (t.fp.contentText && removedShare(t.fp.contentText, snapshot.stableText) > PARTIAL_RENDER_SHARE) {
@@ -416,22 +382,174 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
       await extractAndStore(t.url, snapshot, t.cardHash);
     }, t.url);
 
-  // The first extraction runs alone so it seeds the key registry; parallel workers
-  // starting from an empty registry each invent their own names for the same specs.
+  const enqueueNew = (t: { url: string; cardHash: string }) => {
+    if (signal.aborted || halt) return;
+    if (seeded || seeding) {
+      void queue.add(extractNew(t));
+      return;
+    }
+    seeding = extractNew(t)().finally(() => {
+      seeded = true;
+      if (!signal.aborted && !halt) queue.start();
+    });
+  };
+  const enqueueCheck = (t: CheckTarget) => {
+    if (signal.aborted || halt) return;
+    checkCount++;
+    void queue.add(check(t));
+  };
+
+  /** Sorts one walked card: new → extract; existing → change check (quick mode skips unchanged cards). */
+  const classify = (itemUrl: string, cardText: string) => {
+    if (handled.has(itemUrl)) {
+      skipped++;
+      indexed++;
+      return;
+    }
+    const cardHash = fingerprint(cardText);
+    const fp = known.get(itemUrl);
+    if (!fp) {
+      newCount++;
+      enqueueNew({ url: itemUrl, cardHash });
+    } else if (mode === "full") enqueueNew({ url: itemUrl, cardHash });
+    // No card text (item pages without a listing): keep the stored card hash.
+    else if (mode === "deep") enqueueCheck({ url: itemUrl, cardHash: cardText ? cardHash : (fp.cardHash ?? cardHash), fp });
+    // Quick: a card we have never fingerprinted (rows from before change tracking) is adopted as the baseline.
+    else if (fp.cardHash === null || fp.cardHash === cardHash) {
+      db.touchItem(fp.id, { cardHash });
+      unchanged++;
+      indexed++;
+    } else enqueueCheck({ url: itemUrl, cardHash, fp });
+  };
+
+  /** A walk without a listing (fixed item URLs): everything is known up front. */
+  const queueFixed = (w: ReturnType<typeof fixedWalk>) => {
+    hints = hintsFor(w.detection);
+    patchJob(jobId, { itemsFound: w.items.size });
+    for (const [itemUrl, cardText] of w.items) classify(itemUrl, cardText);
+    return w;
+  };
+
   // On stop, drop what hasn't started; pages already open finish and are saved.
   const onStop = () => {
     queue.clear();
     emitQueue();
   };
   signal.addEventListener("abort", onStop, { once: true });
-  const [first, ...rest] = toExtract;
-  if (first) await extractNew(first)();
-  if (!signal.aborted && !halt) {
-    for (const t of rest) queue.add(extractNew(t));
-    for (const t of toCheck) queue.add(check(t));
+
+  // ---- 1. Listing: detect (or reuse) structure, then walk pages (queuing cards as they're found) ----
+  // Assigned in the try below, which rethrows on any failure.
+  let walk!: { items: Map<string, string>; complete: boolean; detection: db.CollectionDetection };
+  try {
+    throwIfStopped(signal);
+    walk = addItem || itemsOnly ? queueFixed(fixedWalk(target, addItem ? [url] : [...known.keys()])) : await withPage(async (page) => {
+      // The user's browser hides crawl pages by default, and hidden pages don't scroll: check once per site.
+      const scroll = await page.checkScrollLoading?.(url);
+      if (scroll?.message) jobLog(jobId, scroll.message);
+      const collection = db.getCollection(collectionId)!;
+      let detection = collection.detection;
+      if (detection) {
+        await gotoAndSettle(page, url);
+        const urls = await collectItemUrls(page, detection);
+        if (urls.length < 2) {
+          jobLog(jobId, "Saved selectors no longer match — re-detecting", "warn");
+          detection = null;
+        } else {
+          jobLog(jobId, `Reusing saved listing structure (${urls.length} items on page 1)`);
+        }
+      }
+      if (!detection) {
+        // Another collection on the same site (anyone's) already taught us its cards and pagination.
+        const fromHost = db.findDetectionForHost(collection.host, collectionId);
+        if (fromHost) {
+          await gotoAndSettle(page, url);
+          const urls = await collectItemUrls(page, fromHost);
+          if (urls.length >= 2) {
+            detection = fromHost;
+            db.saveDetection(collectionId, detection, inBrowser);
+            jobLog(jobId, `Reusing the listing structure already known for ${collection.host} (${urls.length} items on page 1)`);
+          }
+        }
+      }
+      if (!detection) {
+        patchJob(jobId, { message: "Detecting item cards and pagination" });
+        const result = await detectListingStructure(page, url, (m) => jobLog(jobId, m));
+        detection = result.detection;
+        db.saveDetection(collectionId, detection, inBrowser);
+        if (collection.name === collection.host) db.renameCollection(collectionId, collectionName(url, await page.run("pageInfo").then((i) => i.title, () => null)));
+      }
+
+      // The page itself showed it loads more on scroll; the LLM, reading one snapshot of it, often can't tell.
+      if (scroll?.loadsOnScroll && detection.paginationType === "pages" && !detection.nextSelector) {
+        detection = { ...detection, paginationType: "infiniteScroll" };
+        db.saveDetection(collectionId, detection, inBrowser);
+        jobLog(jobId, "Pagination: more items load as you scroll");
+      }
+
+      patchJob(jobId, { message: "Walking listing pages — indexing items as they're found" });
+      hints = hintsFor(detection);
+      const result = await walkListing(page, url, detection, {
+        maxPages,
+        maxItems,
+        onPage: (pageNum, fresh, total) => {
+          throwIfStopped(signal);
+          if (halt) throw new StopError(halt.message);
+          for (const card of fresh) classify(card.url, card.cardText);
+          patchJob(jobId, { pagesSeen: pageNum, itemsFound: total, itemsIndexed: indexed });
+          jobLog(jobId, `Listing page ${pageNum}: +${fresh.length} items (${total} total)`);
+        },
+        onNotice: (message, warn) => {
+          patchJob(jobId, { message });
+          jobLog(jobId, message, warn ? "warn" : "info");
+        },
+      });
+      return { ...result, detection };
+    }, pageOpts);
+
+    throwIfStopped(signal);
+    if (walk.items.size === 0) throw new Error(itemsOnly ? "This collection has no items to re-check" : "No item links found on the listing page");
+
+    // Hand-added items aren't on the listing: open their pages too (LLM only if they changed).
+    if (!addItem && !itemsOnly) {
+      for (const [itemUrl, fp] of known) {
+        if (!fp.manual || walk.items.has(itemUrl) || handled.has(itemUrl)) continue;
+        if (mode === "full") enqueueNew({ url: itemUrl, cardHash: fp.cardHash ?? "" });
+        else enqueueCheck({ url: itemUrl, cardHash: fp.cardHash ?? "", fp });
+        byHand++;
+      }
+    }
+    if (resumeSince) jobLog(jobId, `Resuming — ${skipped} items already handled, ${walk.items.size - skipped} left`);
+    patchJob(jobId, {
+      itemsFound: walk.items.size,
+      itemsIndexed: indexed,
+      message: `${newCount} new, ${checkCount} to check, ${unchanged} unchanged`,
+    });
+    jobLog(
+      jobId,
+      mode === "full"
+        ? `Re-extracting all ${walk.items.size - skipped + byHand} items`
+        : addItem || itemsOnly
+          ? `${newCount} new · ${checkCount} to re-check`
+          : `${newCount} new · ${checkCount - byHand} to re-check (${mode === "deep" ? "every detail page" : "listing card changed"})${byHand ? ` · ${byHand} added by hand to re-check` : ""} · ${unchanged} unchanged (skipped)`,
+    );
+
+    // Nothing new to seed the registry with: start the checks.
+    if (!seeded && !seeding) {
+      seeded = true;
+      queue.start();
+    }
+    await seeding;
+    await queue.onIdle();
+  } catch (err) {
+    // Stopped or failed mid-walk: let pages already open finish (and be saved) before reporting.
+    queue.clear();
+    await seeding;
+    await queue.onIdle();
+    db.recountSpecKeys(collectionId);
+    throw err;
+  } finally {
+    signal.removeEventListener("abort", onStop);
   }
-  await queue.onIdle();
-  signal.removeEventListener("abort", onStop);
   // An item already in the collection (e.g. from its listing) that didn't change is still "added by hand" now.
   if (addItem && !halt && failed === 0) db.setItemManual(collectionId, url);
   db.recountSpecKeys(collectionId);
@@ -467,6 +585,8 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
   jobLog(jobId, `Done: ${summary} — ${extracted} LLM extractions${reused ? `, ${reused} ads reused from cache (no LLM call)` : ""}`);
   retireChannel(jobChannel(jobId));
 }
+
+type CheckTarget = { url: string; cardHash: string; fp: db.ItemFingerprint };
 
 /** The "walk" of a collection without a listing: just these item URLs (no card text), never complete. */
 function fixedWalk(collection: { host: string; id: number; detection: db.CollectionDetection | null }, urls: string[]) {

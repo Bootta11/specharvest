@@ -51,6 +51,25 @@ The web UI uses the httpOnly session cookie on its own origin. The app runs at
 
 A custom server needs this version of SpecHarvest or later. Older servers refuse the app's sign-in.
 
+### Several accounts
+
+The app remembers every account you sign in to, on any server. Each one is a separate session, kept in
+native storage (Capacitor Preferences, `src/lib/platform.ts`):
+
+- The account menu lists the other saved accounts: tap one to switch (the app reloads for it), or
+  *Add account* to sign in to another server or user. *Sign out of this account* ends only that session and
+  moves on to another signed-in account, if there is one.
+- If a server rejects an account's token (expired, revoked, password changed), the account stays listed as
+  *Signed out*. Picking it fills in its server and email.
+- If the server can't be reached at startup (no network, server down, 5xx), the app shows *Can't reach the
+  server* with *Retry* and keeps the sign-in. Only a real 401 signs you out. It retries when the app comes
+  back to the foreground.
+- Notifications follow the jobs of the active account only.
+- A sign-in saved by an older build carries over as an account on first launch.
+
+Password managers like RoboForm see the app's own origin (`https://localhost`), not the selected server, so
+they can't match a login to the server. Pick it from the manager by hand.
+
 ## Notifications
 
 They work like cursor-agent-remote's: the app follows your jobs while it's open or in the

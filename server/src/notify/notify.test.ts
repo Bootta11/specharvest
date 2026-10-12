@@ -51,6 +51,8 @@ const job = (over: Partial<Job> = {}): Job => ({
   startedAt: 0,
   finishedAt: 5 * 60_000,
   resumable: false,
+  runner: "server",
+  botWall: false,
   ...over,
 });
 

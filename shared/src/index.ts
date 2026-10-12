@@ -258,6 +258,10 @@ export interface Job {
   finishedAt: number | null;
   /** A stopped/interrupted crawl whose start options were saved, so it can pick up where it left off. */
   resumable: boolean;
+  /** Crawls: whose browser loads the pages (see `runners`). */
+  runner: Runner;
+  /** Crawls: a site's bot protection blocked a page — the user's own browser usually gets through. */
+  botWall: boolean;
 }
 
 /** Breakdown of one web lookup job. */
@@ -293,7 +297,9 @@ export type JobEvent =
   | { type: "jobs"; jobs: Job[] }
   | { type: "log"; message: string; level: "info" | "warn" | "error" }
   | { type: "item"; title: string; url: string }
-  | { type: "queue"; size: number; pending: number };
+  | { type: "queue"; size: number; pending: number }
+  /** On /api/jobs/events: the user's browser extension went on/offline (only sent to that user). */
+  | { type: "extension"; userId: number; status: ExtensionStatus };
 
 export const crawlModes = ["quick", "deep", "full"] as const;
 export type CrawlMode = (typeof crawlModes)[number];
@@ -314,6 +320,34 @@ export function isHttpUrl(value: string | null | undefined): value is string {
 }
 
 const httpUrlSchema = z.url({ protocol: /^https?$/ }).max(2048);
+
+/** server = the server's headless Chrome; browser = the user's own Chrome, through the SpecHarvest extension. */
+export const runners = ["server", "browser"] as const;
+export type Runner = (typeof runners)[number];
+
+/** What the extension read from a page the user already has open (the `detailSnapshot` page script). */
+export const pageSnapshotSchema = z.object({
+  url: httpUrlSchema,
+  text: z.string().max(500_000),
+  stableText: z.string().max(500_000),
+  ld: z.object({
+    title: z.string().max(2000).nullable(),
+    price: z.number().nullable(),
+    currency: z.string().max(20).nullable(),
+    image: z.string().max(2048).nullable(),
+    description: z.string().max(5000).nullable(),
+  }),
+  og: z.object({
+    title: z.string().max(2000).nullable(),
+    image: z.string().max(2048).nullable(),
+    description: z.string().max(5000).nullable(),
+    price: z.string().max(100).nullable(),
+    currency: z.string().max(20).nullable(),
+  }),
+  h1: z.string().max(2000).nullable(),
+  images: z.array(z.string().max(2048)).max(12),
+});
+export type PageSnapshot = z.infer<typeof pageSnapshotSchema>;
 
 export const crawlRequestSchema = z.object({
   url: httpUrlSchema,
@@ -340,12 +374,22 @@ export const crawlRequestSchema = z.object({
    * collection named `name` when no collectionId is given.
    */
   kind: z.enum(["listing", "item"]).optional(),
+  /** Whose browser loads the pages (default server). browser needs the user's extension to be connected. */
+  runner: z.enum(runners).optional(),
+  /**
+   * kind item + runner browser: the page as the user's open tab shows it, so it isn't loaded again.
+   * Used once — a re-crawl or resume opens the page.
+   */
+  snapshot: pageSnapshotSchema.optional(),
 });
 export type CrawlRequest = z.infer<typeof crawlRequestSchema>;
 
 // ---------- Page check (before crawling) ----------
 
-export const inspectRequestSchema = z.object({ url: httpUrlSchema });
+export const inspectRequestSchema = z.object({ url: httpUrlSchema, runner: z.enum(runners).optional() });
+
+/** POST /api/jobs/:id/resume — optionally switch whose browser loads the pages. */
+export const resumeRequestSchema = z.object({ runner: z.enum(runners).optional() });
 
 export type PageKind = "listing" | "item" | "other";
 
@@ -766,3 +810,6 @@ export const notificationSettingsSchema = z.object({
 export type NotificationSettings = z.infer<typeof notificationSettingsSchema>;
 export const notificationChannels = ["ntfy", "telegram", "discord", "webhook", "apprise", "push"] as const;
 export type NotificationChannel = (typeof notificationChannels)[number];
+
+export * from "./extension.ts";
+import type { ExtensionStatus } from "./extension.ts";

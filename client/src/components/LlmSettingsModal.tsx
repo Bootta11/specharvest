@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { llmTiers, type LlmModelChoices, type LlmModelList, type LlmModelOption, type LlmProviderInfo, type LlmSettingsResponse, type LlmTestResult, type LlmTier } from "@specharvest/shared";
-import { api, formatUsd } from "../lib/api.ts";
+import { api, autoLookupEnabled, formatUsd, setAutoLookup } from "../lib/api.ts";
 import { Field, Modal, Notice } from "./Modal.tsx";
 
 const TIERS: Record<LlmTier, { title: string; hint: string }> = {
@@ -53,6 +53,7 @@ export function LlmSettingsModal({ onClose, onChanged }: { onClose: () => void; 
           <Status settings={settings} />
           <Keys settings={settings} onSaved={apply} />
           <Models settings={settings} onSaved={apply} />
+          <AutoLookup />
           <p className="text-xs text-stone-500">
             Keys are stored encrypted and only used for your own crawls, searches and lookups. Spend on your keys is shown in the $ menu — estimated from public price lists, exact for
             OpenRouter and Perplexity.
@@ -60,6 +61,32 @@ export function LlmSettingsModal({ onClose, onChanged }: { onClose: () => void; 
         </>
       )}
     </Modal>
+  );
+}
+
+/** Per-device opt-in: off means a search only offers web lookups and waits for a click. */
+function AutoLookup() {
+  const [on, setOn] = useState(autoLookupEnabled);
+  return (
+    <section>
+      <label className="flex cursor-pointer items-start gap-3">
+        <input
+          type="checkbox"
+          className="mt-0.5 size-4 shrink-0 accent-brand-700"
+          checked={on}
+          onChange={(e) => {
+            setAutoLookup(e.target.checked);
+            setOn(e.target.checked);
+          }}
+        />
+        <span className="min-w-0">
+          <span className="block text-sm font-medium">Start web lookups automatically</span>
+          <span className="block text-xs text-stone-500">
+            Off: a search that needs specs listings don't state only offers a lookup — nothing is spent until you click it. Applies to this device.
+          </span>
+        </span>
+      </label>
+    </section>
   );
 }
 

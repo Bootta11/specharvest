@@ -9,6 +9,8 @@
 node_modules
 **/node_modules
 **/dist
+extension/dist-test
+**/.wxt
 
 # Env files: secrets come from the host at runtime
 .env

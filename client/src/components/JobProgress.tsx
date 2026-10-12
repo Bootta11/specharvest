@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { isActiveJob, type Job } from "@specharvest/shared";
+import { isActiveJob, type Job, type Runner } from "@specharvest/shared";
 import { formatUsd, type JobStream } from "../lib/api.ts";
 import { LookupSummary } from "./LookupSummary.tsx";
 
@@ -38,10 +38,13 @@ interface JobProgressProps {
   stream: JobStream;
   title: string;
   onStop?: (job: Job) => Promise<void>;
-  onResume?: (job: Job) => Promise<void>;
+  /** `runner` switches whose browser loads the pages from here on. */
+  onResume?: (job: Job, runner?: Runner) => Promise<void>;
+  /** The user's browser extension is connected (offers "Resume in my browser"). */
+  browserOnline?: boolean;
 }
 
-export function JobProgress({ stream, title, onStop, onResume }: JobProgressProps) {
+export function JobProgress({ stream, title, onStop, onResume, browserOnline }: JobProgressProps) {
   const { job, logs, recentItems, queue } = stream;
   const [showLog, setShowLog] = useState(false);
   const [acting, setActing] = useState(false);
@@ -66,14 +69,34 @@ export function JobProgress({ stream, title, onStop, onResume }: JobProgressProp
   return (
     <div className="card p-4">
       <div className="flex flex-wrap items-center gap-2">
-        <h3 className="mr-auto font-medium">{title}</h3>
-        {onStop && job.kind === "crawl" && job.status === "running" && (
+        <h3 className="mr-auto font-medium">
+          {title}
+          {job.kind === "crawl" && job.runner === "browser" && (
+            <span className="ml-2 rounded-full bg-stone-100 px-2 py-0.5 align-middle text-[11px] font-medium text-stone-600 dark:bg-stone-800 dark:text-stone-300">in your browser</span>
+          )}
+        </h3>
+        {onStop && job.status === "running" && (
           <button className="btn-ghost btn-sm" disabled={acting || stopping} onClick={act(onStop)}>
             {stopping ? "Stopping…" : "Stop"}
           </button>
         )}
+        {onResume && job.resumable && job.runner === "server" && job.botWall && browserOnline && (
+          <button
+            className="btn-primary btn-sm"
+            disabled={acting}
+            onClick={act((j) => onResume(j, "browser"))}
+            title="The site blocked the server's browser — your own Chrome usually gets through"
+          >
+            {acting ? "Resuming…" : "Resume in my browser"}
+          </button>
+        )}
+        {onResume && job.resumable && job.runner === "browser" && !browserOnline && (
+          <button className="btn-ghost btn-sm" disabled={acting} onClick={act((j) => onResume(j, "server"))} title="Your browser isn't connected">
+            Resume on the server
+          </button>
+        )}
         {onResume && job.resumable && (
-          <button className="btn-primary btn-sm" disabled={acting} onClick={act(onResume)}>
+          <button className={job.runner === "server" && job.botWall && browserOnline ? "btn-ghost btn-sm" : "btn-primary btn-sm"} disabled={acting} onClick={act((j) => onResume(j))}>
             {acting ? "Resuming…" : "Resume"}
           </button>
         )}

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { InspectResult } from "@specharvest/shared";
+import type { InspectResult, Runner } from "@specharvest/shared";
 import { api } from "./api.ts";
 
 export type PageCheck = { url: string; status: "checking" } | { url: string; status: "done"; result: InspectResult } | { url: string; status: "failed" };
@@ -18,8 +18,9 @@ const validUrl = (s: string) => {
 /**
  * Checks what the URL in the crawl form is (listing / item / other) while it's typed or shared; null when
  * there's no valid URL or `enabled` is false. Typing is debounced; `immediate` (a shared link) isn't.
+ * `runner` browser checks the page in the user's own Chrome (the extension), like the crawl will load it.
  */
-export function usePageCheck(url: string, enabled: boolean, immediate?: string | null): PageCheck | null {
+export function usePageCheck(url: string, enabled: boolean, immediate?: string | null, runner: Runner = "server"): PageCheck | null {
   const [check, setCheck] = useState<PageCheck | null>(null);
   const seq = useRef(0);
   const target = url.trim();
@@ -34,7 +35,7 @@ export function usePageCheck(url: string, enabled: boolean, immediate?: string |
     const timer = setTimeout(
       () => {
         const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), TIMEOUT_MS));
-        Promise.race([api.inspectUrl(target), timeout]).then(
+        Promise.race([api.inspectUrl(target, runner === "browser" ? runner : undefined), timeout]).then(
           (result) => n === seq.current && setCheck({ url: target, status: "done", result }),
           () => n === seq.current && setCheck({ url: target, status: "failed" }),
         );
@@ -42,7 +43,7 @@ export function usePageCheck(url: string, enabled: boolean, immediate?: string |
       target === immediate ? 0 : DEBOUNCE_MS,
     );
     return () => clearTimeout(timer);
-  }, [target, enabled]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [target, enabled, runner]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return check;
 }

@@ -41,6 +41,21 @@ curl -H "X-Api-Key: shk_…" https://specharvest.example/api/collections
 | `PATCH /api/users/:id` | admin; `{disabled}` | user (disabling signs them out; their data stays) |
 | `GET /api/settings/admin`, `PUT /api/settings/admin` | admin; `{signupEnabled?, serverLlmAccess?: "everyone"\|"admins"\|"nobody", serverLlmDailyLimitUsd?}` | `{signupEnabled, serverLlmAccess, serverLlmDailyLimitUsd, serverLlmConfigured}` (daily limit per non-admin on the server key, USD, 0 = none) |
 
+## Browser extension
+
+See [browser extension](extension.md). Extension tokens (`shx_…`) may only call the endpoints listed [there](extension.md#security).
+
+| Method & path | Body / query | Returns |
+| --- | --- | --- |
+| `GET /api/extension/ws` | WebSocket; first message `{type: "hello", token, protocol, version, concurrency}` | then commands → replies (protocol in `shared/src/extension.ts`) |
+| `POST /api/extension/pair/approve` | session only; `{challenge, deviceName}` | `{ok}` — lets the extension holding the challenge's verifier claim a token (5 min) |
+| `POST /api/extension/pair/claim` | public; `{verifier}` | `{token, email, deviceName}` once approved, else 202 `{status: "pending"}` (rate limited) |
+| `GET /api/extension/whoami` | with the token in `X-Api-Key` | `{email, deviceName}` — checks a pasted token |
+| `GET /api/extension/status` | | `{online, deviceName, version, concurrency}` |
+| `GET /api/extension/devices` | | your connected browsers `[{id, name, via: "approve"\|"token", keyPrefix, createdAt, lastUsedAt, online}]` |
+| `POST /api/extension/devices` | `{name}` | `{token, device}` — the token is shown only once (201) |
+| `DELETE /api/extension/devices/:id` | | `{ok}`; revokes it and drops its connection |
+
 ## LLM provider (your own keys)
 
 See [LLM providers](llm-providers.md). Tiers: `fast`, `smart`, `web`.
@@ -59,7 +74,7 @@ See [LLM providers](llm-providers.md). Tiers: `fast`, `smart`, `web`.
 | Method & path | Body / query | Returns |
 | --- | --- | --- |
 | `GET /api/health` (also `HEAD`) | public | `{ok, status, checks: {database: {ok, latencyMs}}, uptimeSeconds, timestamp}`; 503 with `ok:false` if the DB is down |
-| `GET /api/config` | | `version` (commit), proxy flag, crawl `defaults` and your `limits` (`{maxPages, maxItems}`), and for you: `llmConfigured`, `webSearchEnabled`, `llm: {effective, unavailable}` per tier |
+| `GET /api/config` | | `version` (commit), proxy flag, `extensionStoreUrl`, crawl `defaults` and your `limits` (`{maxPages, maxItems}`), and for you: `llmConfigured`, `webSearchEnabled`, `llm: {effective, unavailable}` per tier |
 | `GET /api/collections` | | readable collections with item counts, `llmCost` (USD), `ownerEmail`, `isShared`, `grouping`, `canEdit` |
 | `PATCH /api/collections/:id` | `{name?, isShared?, grouping?: "strict" \| "loose"}` (owner/admin; switching to `loose` groups waiting single-candidate matches) | collection |
 | `DELETE /api/collections/:id` | | deletes items + vectors |
@@ -73,17 +88,17 @@ See [LLM providers](llm-providers.md). Tiers: `fast`, `smart`, `web`.
 | `POST /api/collections/:id/consolidate` | | `{merges, moved}` — merge duplicate keys now |
 | `GET /api/items` | `?collectionId&limit&offset&includeGone=1` | items (gone listings hidden unless `includeGone`) |
 | `GET /api/items/:id` | | item incl. `rawText` |
-| `POST /api/crawl/inspect` | `{url}` | `{kind: "listing"\|"item"\|"other", title, reason, category: {name, url} \| null}` — what the page is, before crawling ([details](crawling.md#0-page-check)); one page load, at most one small LLM call |
-| `POST /api/crawl` | `{url, collectionId?, name?, maxPages?, maxItems?, useProxy?, mode?: "quick"\|"deep"\|"full", kind?: "listing"\|"item"}` (`kind: "item"` adds the one item page at `url` to `collectionId`, or to a new collection named `name`; `refresh: true` = `full`; `name` sets the collection name instead of deriving it from the page title; `collectionId` re-crawls that collection — owner/admin — otherwise your own collection for the URL is reused or a new one created). `url` must be http(s) on a public host; `maxPages`/`maxItems` at most your `limits` | job (202); 400 for a private/local address or over a limit |
-| `POST /api/search` | `{collectionId? \| groupId?, query? \| plan?, filters?, facets?, limit?, enrich?, includeGone?}`. `filters` (≤ 100) are extra conditions ANDed with the parsed `query` or the given `plan` (a plan condition on the same key wins); with neither, they filter everything. A filter is `{key, op, value}`: `op` is `eq`/`neq`/`gt`/`gte`/`lt`/`lte`/`contains`/`exists`, or `in` with a list `value` (any of them). Besides spec keys, `key` can be a listing field: `price`, `title`, `description`, `product` (normalized brand/model/variant/year, or the title when a listing has none), `currency`, `collection` (an id inside the searched scope) | `{plan, items, unknown, total, keys, enrichJobId, enrichNote, enrichOffer, llmCost, facets?}` (`llmCost` = USD spent parsing the query, 0 when cached). Without `enrich: false` missing/poorly covered specs start a web lookup job (`enrichJobId`); with it, `enrichOffer` = `{attributes, products, listings}` says what one would look up (send the search again with `enrich: true`). `facets: true` adds value counts per field (`missing` = items counted for it without a value): `{key, count, missing, kind: "range", min, max, unit}` \| `{…, kind: "values", values: [{value, count}], more}` \| `{…, kind: "boolean", yes, no}` \| `{…, kind: "text"}` — see [filter panel](search.md#filter-panel) |
+| `POST /api/crawl/inspect` | `{url, runner?: "server"\|"browser"}` | `{kind: "listing"\|"item"\|"other", title, reason, category: {name, url} \| null}` — what the page is, before crawling ([details](crawling.md#0-page-check)); one page load, at most one small LLM call |
+| `POST /api/crawl` | `{url, collectionId?, name?, maxPages?, maxItems?, useProxy?, mode?: "quick"\|"deep"\|"full", kind?: "listing"\|"item"}` (`kind: "item"` adds the one item page at `url` to `collectionId`, or to a new collection named `name`; `refresh: true` = `full`; `name` sets the collection name instead of deriving it from the page title; `collectionId` re-crawls that collection — owner/admin — otherwise your own collection for the URL is reused or a new one created). `url` must be http(s) on a public host; `maxPages`/`maxItems` at most your `limits`. `runner: "browser"` loads the pages in your own Chrome through the [extension](extension.md); with `kind: "item"` it may carry `snapshot` — the page as the extension read it from your open tab | job (202); 400 for a private/local address or over a limit; 409 when `runner: "browser"` and your extension isn't connected |
+| `POST /api/search` | `{collectionId? \| groupId?, query? \| plan?, filters?, facets?, limit?, enrich?, includeGone?}`. `filters` (≤ 100) are extra conditions ANDed with the parsed `query` or the given `plan` (a plan condition on the same key wins); with neither, they filter everything. A filter is `{key, op, value}`: `op` is `eq`/`neq`/`gt`/`gte`/`lt`/`lte`/`contains`/`exists`, or `in` with a list `value` (any of them). Besides spec keys, `key` can be a listing field: `price`, `title`, `description`, `product` (normalized brand/model/variant/year, or the title when a listing has none), `currency`, `collection` (an id inside the searched scope) | `{plan, items, unknown, total, keys, enrichJobId, enrichNote, enrichOffer, llmCost, facets?}` (`llmCost` = USD spent parsing the query, 0 when cached). Without `enrich: false` missing/poorly covered specs start a web lookup job (`enrichJobId`); with it, `enrichOffer` = `{attributes, products, listings}` says what one would look up (send the search again with `enrich: true`). The web UI always sends `enrich: false` unless the device opted in to automatic lookups, so nothing is spent without a click. `facets: true` adds value counts per field (`missing` = items counted for it without a value): `{key, count, missing, kind: "range", min, max, unit}` \| `{…, kind: "values", values: [{value, count}], more}` \| `{…, kind: "boolean", yes, no}` \| `{…, kind: "text"}` — see [filter panel](search.md#filter-panel) |
 | `GET /api/searches` | `?collectionId \| groupId&limit` | your recent searches `[{query, usedAt, hits}]` |
 | `POST /api/enrich` | `{collectionId? \| groupId?, attributes:[{key,type,unit,label}], itemIds?}` | `{job}` (202) |
-| `GET /api/jobs`, `GET /api/jobs/:id` | | jobs (incl. `llmCost` so far, `resumable`) |
-| `POST /api/jobs/:id/stop` | | running crawl → *stopped* once open pages finish; job (202), 409 if not a running crawl |
-| `POST /api/jobs/:id/resume` | | continues a *stopped*/*interrupted* crawl in the same job; job (202), 409 if not resumable or the collection is busy |
+| `GET /api/jobs`, `GET /api/jobs/:id` | | jobs (incl. `llmCost` so far, `resumable`, `runner`, `botWall`) |
+| `POST /api/jobs/:id/stop` | | running crawl → *stopped* once open pages finish; running web lookup → *stopped* once lookups already running finish (values found are kept, `itemsRemaining` = products not looked up); job (202), 409 if not running |
+| `POST /api/jobs/:id/resume` | `{runner?}` switches whose browser loads the pages from here on | continues a *stopped*/*interrupted* crawl in the same job; job (202), 409 if not resumable or the collection is busy |
 | `GET /api/usage` | `?scope=all` (admin: everyone's) | your LLM spend `{today, last30d, allTime, byFunding: {own, platform}, estimated, byPurpose, byModel: [{provider, model, …}], unpricedCalls}` (USD; exact from OpenRouter/Perplexity, estimated for other providers) |
 | `GET /api/usage/credits` | admin | Server key's OpenRouter balance `{provider, key, account, errors, fetchedAt}`: `key` = API key limit/remaining/usage (`/api/v1/key`); `account` = purchased/used/remaining credits, only when `OPENROUTER_MANAGEMENT_KEY` is set. Cached 60 s |
-| `GET /api/jobs/events` | SSE | your jobs (admins: all): `jobs` (active jobs snapshot on connect), then `job` on every change |
+| `GET /api/jobs/events` | SSE | your jobs (admins: all): `jobs` (active jobs snapshot on connect), then `job` on every change; `extension` (`{status: {online, deviceName, version, concurrency}}`) on connect and whenever your extension comes or goes |
 | `GET /api/jobs/:id/events` | SSE | events `job`, `log`, `item`, `queue` (history replayed) |
 | `GET /api/settings/notifications` | | your notification settings, secrets replaced by `********` |
 | `PUT /api/settings/notifications` | settings (a `********` field keeps its stored value) | saved settings (masked); 400 when an enabled channel points somewhere you may not send ([details](notifications.md#server-side-channels)) |

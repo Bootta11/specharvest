@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
-import { isActiveJob, type Collection, type CollectionGroup, type CrawlMode, type CrawlRequest, type Job } from "@specharvest/shared";
+import { isActiveJob, type Collection, type CollectionGroup, type CrawlMode, type CrawlRequest, type Job, type Runner } from "@specharvest/shared";
 import { api, downloadExport, formatUsd, storageGet, storageSet, useJobStream, type AppConfig, type JobsFeed, type SearchScope } from "../lib/api.ts";
 import { JobProgress, StatusBadge, jobPercent } from "../components/JobProgress.tsx";
 import { ProductsModal } from "../components/ProductsModal.tsx";
@@ -7,6 +7,7 @@ import { GroupModal } from "../components/GroupModal.tsx";
 import { clearPendingShare, peekPendingShare, sameUrl } from "../lib/share.ts";
 import { ClearableInput } from "../components/ClearableInput.tsx";
 import { usePageCheck } from "../lib/page-check.ts";
+import { BrowserRunnerToggle } from "../components/BrowserRunnerToggle.tsx";
 
 interface Props {
   config: AppConfig | null;
@@ -60,6 +61,10 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
   const [maxPages, setMaxPages] = useState<number | "">("");
   const [maxItems, setMaxItems] = useState<number | "">("");
   const [useProxy, setUseProxy] = useState(false);
+  /** "Run in my browser"; null = follow the extension (on while it's connected). */
+  const [browserChoice, setBrowserChoice] = useState<boolean | null>(null);
+  const browserOnline = !!feed.extension?.online;
+  const inBrowser = browserOnline && (browserChoice ?? true);
   const [mode, setMode] = useState<CrawlMode>(() => (storageGet("crawlMode") as CrawlMode | null) ?? "quick");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -96,7 +101,7 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
   const sharedMatch = shared ? collections.find((c) => c.canEdit && sameUrl(c.startUrl, shared.url)) : undefined;
 
   // What the URL is (listing / single item / unrelated), checked as soon as it's in the field.
-  const check = usePageCheck(url, config?.llmConfigured !== false, shared?.url);
+  const check = usePageCheck(url, config?.llmConfigured !== false, shared?.url, inBrowser ? "browser" : "server");
   const checked = check?.status === "done" ? check.result : null;
   const isItem = checked?.kind === "item";
   const blocked = checked?.kind === "other" && !override;
@@ -162,6 +167,8 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
     }
   };
 
+  const runnerFields: Pick<CrawlRequest, "runner" | "useProxy"> = inBrowser ? { runner: "browser" } : { useProxy: useProxy || undefined };
+
   const submit = (e: FormEvent) => {
     e.preventDefault();
     if (isItem) {
@@ -169,7 +176,7 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
         url: url.trim(),
         kind: "item",
         ...(itemTarget === "new" ? { name: newCollectionName.trim() } : { collectionId: itemTarget }),
-        useProxy: useProxy || undefined,
+        ...runnerFields,
       });
       return;
     }
@@ -178,7 +185,7 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
       name: name.trim() || undefined,
       maxPages: maxPages || undefined,
       maxItems: maxItems || undefined,
-      useProxy: useProxy || undefined,
+      ...runnerFields,
       mode,
     });
   };
@@ -188,10 +195,10 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
     await api.stopJob(j.id).catch((err) => setError((err as Error).message));
   };
 
-  const resumeJob = async (j: Job) => {
+  const resumeJob = async (j: Job, runner?: Runner) => {
     setError(null);
     try {
-      await api.resumeJob(j.id);
+      await api.resumeJob(j.id, runner);
       selectJob(j.id);
       // Same job id — reconnect its stream to follow the resumed run.
       setStreamNonce((n) => n + 1);
@@ -450,7 +457,14 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
               </fieldset>
             </>
           )}
-          {config?.proxyConfigured && (
+          <BrowserRunnerToggle
+            online={browserOnline}
+            deviceName={feed.extension?.deviceName ?? null}
+            checked={inBrowser}
+            onChange={setBrowserChoice}
+            storeUrl={config?.extensionStoreUrl ?? null}
+          />
+          {config?.proxyConfigured && !inBrowser && (
             <label className="inline-flex items-center gap-2 text-sm">
               <input type="checkbox" className="size-4 accent-brand-700" checked={useProxy} onChange={(e) => setUseProxy(e.target.checked)} />
               Use proxy
@@ -471,6 +485,7 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
             title={[`${stream.job?.kind === "enrich" ? "Web lookup" : "Crawl"} #${jobId}`, collectionName(stream.job?.collectionId ?? null)].filter(Boolean).join(" · ")}
             onStop={stopJob}
             onResume={resumeJob}
+            browserOnline={browserOnline}
           />
         )}
       </section>
@@ -508,8 +523,13 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
                     </div>
                     {j.message && <div className="mt-1 truncate text-xs text-stone-500">{j.message}</div>}
                   </button>
-                  {j.kind === "crawl" && j.status === "running" && (
-                    <button className="btn-ghost btn-sm my-2.5 mr-3 shrink-0" disabled={j.message === "Stopping…"} onClick={() => stopJob(j)} title="Stop — you can resume it later">
+                  {j.status === "running" && (
+                    <button
+                      className="btn-ghost btn-sm my-2.5 mr-3 shrink-0"
+                      disabled={j.message === "Stopping…"}
+                      onClick={() => stopJob(j)}
+                      title={j.kind === "crawl" ? "Stop — you can resume it later" : "Stop — values found so far are kept"}
+                    >
                       {j.message === "Stopping…" ? "Stopping…" : "Stop"}
                     </button>
                   )}

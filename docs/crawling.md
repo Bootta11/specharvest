@@ -61,6 +61,13 @@ Walkers collect item URLs (deduped, tracking params stripped) until
 `maxPages` / `maxItems`, an empty page, or a page with nothing new. A JS-only
 "next" button is clicked and the walker waits for the card set to change.
 
+Items are **indexed while the walk goes on**: each listing page's new cards are
+sorted right away (new → extract, existing → change check) and queued for the
+detail workers, so the first results appear after page 1 instead of after the
+last page. The walk keeps its own browser page, so a crawl has up to
+`SCRAPE_MAX_CONCURRENT_PAGES` + 1 pages open. Hand-added items and gone-marking
+still wait for the whole walk.
+
 ## 3. Item extraction
 
 Per new or changed item (concurrency `SCRAPE_MAX_CONCURRENT_PAGES`; see
@@ -75,8 +82,9 @@ Per new or changed item (concurrency `SCRAPE_MAX_CONCURRENT_PAGES`; see
   and the verbose object form ran past the token limit.
 - A truncated/derailed JSON answer is **salvaged** up to the last complete
   element rather than discarded.
-- The **first item runs alone** to seed the registry before parallel workers
-  start; otherwise each worker invents its own names.
+- In a collection with no keys yet, the **first item runs alone** to seed the
+  registry before parallel workers start; otherwise each worker invents its own
+  names. Re-crawls (registry already filled) start in parallel at once.
 - A bot challenge on a detail page is retried with backoff (8 s, 20 s).
 - **Reuse across collections**: if the same ad (URL) with the same content hash
   was already extracted in another collection — any user's — its page values
@@ -168,8 +176,10 @@ automatically.
 
 ## Stop & resume
 
-*Stop* (`POST /api/jobs/:id/stop`) drops queued item pages; pages already open
-finish and are saved, then the job becomes **stopped**. A server restart leaves
+*Stop* (`POST /api/jobs/:id/stop`) drops queued item pages and ends the listing
+walk; pages already open finish and are saved, then the job becomes **stopped**.
+Web lookup jobs can be stopped the same way (see
+[Search & web lookups](search.md#web-lookups-enrichment)). A server restart leaves
 running crawls **interrupted**. Both show *Resume* (`POST /api/jobs/:id/resume`),
 which continues the **same job** with the options it was started with
 (`jobs.params`) — nothing resumes automatically.
@@ -180,6 +190,25 @@ or confirmed unchanged before the stop. Failed items were never touched, so they
 are retried. Key consolidation and gone-marking only run when a crawl completes,
 so a stopped crawl skips them until it is resumed. Jobs created before params
 were saved can't be resumed — start a new crawl instead.
+
+## Whose browser loads the pages
+
+A crawl's `runner` is `server` (the server's headless Chrome, default) or
+`browser`: the user's own Chrome through the [browser extension](extension.md),
+which gets past most bot checks. Both drive the same `PageDriver` interface
+(`crawler/driver.ts`) and run the same page scripts
+(`shared/src/page-scripts.ts`), so detection, walking, snapshots and change
+detection behave the same way. Differences:
+
+- A browser crawl first asks the extension for access to the site. Until the user
+  allows it, the job waits (up to 5 min, or until *Stop*) and says so in its message.
+- The user's browser going away (Chrome closed, sleep) stops the job as
+  *resumable* instead of failing its items.
+- A bot wall on the server's browser stops the crawl (resumable) with
+  `botWall` set, and the UI offers *Resume in my browser*.
+  `POST /api/jobs/:id/resume {runner}` switches the runner of a stopped job.
+- Items and listing structures read in a browser are only reused by that user's
+  own collections (see [extension security](extension.md#security)).
 
 ## Site notes
 

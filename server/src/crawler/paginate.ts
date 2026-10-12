@@ -1,6 +1,6 @@
-import type { Page } from "puppeteer-core";
 import type { CollectionDetection } from "../db/sqlite.ts";
 import { gotoAndSettle } from "./browser.ts";
+import { waitForScript, type PageDriver } from "./driver.ts";
 import { createLogger } from "../lib/logger.ts";
 import { safeItemUrlPattern } from "./url-pattern.ts";
 
@@ -19,39 +19,10 @@ export interface ItemCard {
  * pattern (card text from its closest card-like container). Filtered by
  * itemUrlPattern (drops ads/promos inside the grid).
  */
-export async function collectItemCards(page: Page, detection: Pick<CollectionDetection, "listItemSelector" | "itemUrlPattern">): Promise<ItemCard[]> {
+export async function collectItemCards(page: PageDriver, detection: Pick<CollectionDetection, "listItemSelector" | "itemUrlPattern">): Promise<ItemCard[]> {
   // Compiled here and in the page for every link — only patterns that can't backtrack (crawler/url-pattern.ts).
   const pattern = safeItemUrlPattern(detection.itemUrlPattern);
-  const cards = await page.evaluate(
-    (selector, pattern) => {
-      const isReal = (href: string | null | undefined) => !!href && /^https?:/.test(href) && href !== location.href && !href.startsWith(location.href + "#");
-      const textOf = (el: Element) => ((el as HTMLElement).innerText ?? el.textContent ?? "").slice(0, 1000);
-      const out: Array<{ url: string; cardText: string }> = [];
-      if (selector) {
-        let els: Element[] = [];
-        try {
-          els = Array.from(document.querySelectorAll(selector));
-        } catch {
-          return [];
-        }
-        for (const card of els) {
-          const self = card.tagName === "A" ? (card as HTMLAnchorElement).href : null;
-          const url = isReal(self) ? self! : Array.from(card.querySelectorAll("a[href]")).map((x) => (x as HTMLAnchorElement).href).find(isReal);
-          if (url) out.push({ url, cardText: textOf(card) });
-        }
-      } else if (pattern) {
-        const re = new RegExp(pattern);
-        for (const a of Array.from(document.querySelectorAll("a[href]"))) {
-          if (a.closest("nav, header, footer")) continue;
-          const href = (a as HTMLAnchorElement).href;
-          if (isReal(href) && re.test(href)) out.push({ url: href, cardText: textOf(a.closest("li, article, [class*=card i], [class*=item i]") ?? a) });
-        }
-      }
-      return out;
-    },
-    detection.listItemSelector || "",
-    pattern || "",
-  );
+  const cards = await page.run("collectCards", { selector: detection.listItemSelector || "", pattern: pattern || "" });
   const re = pattern ? new RegExp(pattern) : null;
   const byUrl = new Map<string, string>();
   for (const c of cards) {
@@ -62,7 +33,7 @@ export async function collectItemCards(page: Page, detection: Pick<CollectionDet
 }
 
 /** Item detail URLs on the current page (see collectItemCards). */
-export async function collectItemUrls(page: Page, detection: Pick<CollectionDetection, "listItemSelector" | "itemUrlPattern">): Promise<string[]> {
+export async function collectItemUrls(page: PageDriver, detection: Pick<CollectionDetection, "listItemSelector" | "itemUrlPattern">): Promise<string[]> {
   return (await collectItemCards(page, detection)).map((c) => c.url);
 }
 
@@ -89,7 +60,10 @@ export function withPageParam(url: string, param: string, pageNum: number): stri
 export interface WalkOptions {
   maxPages: number;
   maxItems: number;
-  onPage: (pageNum: number, newUrls: string[], totalSoFar: number) => void;
+  /** Called after each listing page with the cards it added (within maxItems), so they can be processed at once. */
+  onPage: (pageNum: number, added: ItemCard[], totalSoFar: number) => void;
+  /** A line for the job log (e.g. the crawl tab moved to a visible window). */
+  onNotice?: (message: string, warn: boolean) => void;
 }
 
 export interface WalkResult {
@@ -108,15 +82,17 @@ export interface WalkResult {
  * item cards in discovery order. Stops on maxPages/maxItems, an empty page,
  * a page with nothing new, or a missing next control.
  */
-export async function walkListing(page: Page, startUrl: string, d: CollectionDetection, opts: WalkOptions): Promise<WalkResult> {
+export async function walkListing(page: PageDriver, startUrl: string, d: CollectionDetection, opts: WalkOptions): Promise<WalkResult> {
   const items = new Map<string, string>();
   const take = (cards: ItemCard[]) => {
-    const fresh = cards.filter((c) => !items.has(c.url));
-    for (const c of fresh) {
+    const added: ItemCard[] = [];
+    for (const c of cards) {
       if (items.size >= opts.maxItems) break;
+      if (items.has(c.url)) continue;
       items.set(c.url, c.cardText);
+      added.push(c);
     }
-    return fresh.map((c) => c.url);
+    return added;
   };
   const full = () => items.size >= opts.maxItems;
   const done = (complete: boolean): WalkResult => ({ items, complete: complete && !full() });
@@ -125,6 +101,7 @@ export async function walkListing(page: Page, startUrl: string, d: CollectionDet
 
   if (d.paginationType === "urlPage" && d.pageParam) {
     const startNum = Number(new URL(startUrl).searchParams.get(d.pageParam)) || 1;
+    let stale = 0;
     for (let i = 0; i < opts.maxPages; i++) {
       const pageNum = startNum + i;
       if (i > 0) {
@@ -135,50 +112,59 @@ export async function walkListing(page: Page, startUrl: string, d: CollectionDet
           return done(false);
         }
       }
-      const fresh = take(await collectItemCards(page, d));
+      const cards = await collectItemCards(page, d);
+      const fresh = take(cards);
       opts.onPage(pageNum, fresh, items.size);
-      if (fresh.length === 0) return done(true);
+      if (cards.length === 0) return done(true);
+      // Nothing new can just be overlap — scrolling an earlier page may have loaded this one's items already —
+      // so only a second such page in a row ends the walk (sites past their last page repeat it).
+      stale = fresh.length === 0 ? stale + 1 : 0;
+      if (stale >= 2) return done(true);
       if (full()) return done(false);
     }
     return done(false);
   }
 
   if (d.paginationType === "loadMore" || d.paginationType === "infiniteScroll") {
+    // A page that can't render can't scroll: an empty "next batch" then says nothing about the listing's end.
+    let cantScroll = false;
+    if (d.paginationType === "infiniteScroll") {
+      const note = await page.ensureVisible?.("infiniteScroll");
+      if (note) opts.onNotice?.(note.message, note.warn);
+      cantScroll = !!note?.warn;
+    }
     for (let step = 1; step <= opts.maxPages; step++) {
       const fresh = take(await collectItemCards(page, d));
       opts.onPage(step, fresh, items.size);
-      if (step > 1 && fresh.length === 0) return done(true);
+      if (step > 1 && fresh.length === 0) return done(!cantScroll);
       if (full()) return done(false);
       if (d.paginationType === "loadMore") {
         if (!d.loadMoreSelector) return done(true);
         const clicked = await page.click(d.loadMoreSelector).then(() => true, () => false);
         if (!clicked) return done(true);
       } else {
-        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        await page.run("scrollToBottom");
       }
-      await page.waitForNetworkIdle({ idleTime: 700, timeout: 10_000 }).catch(() => {});
+      await page.waitForNetworkIdle({ idleMs: 700, timeoutMs: 10_000 });
       await new Promise((r) => setTimeout(r, 800));
     }
     return done(false);
   }
 
   // "pages": follow the next link's href, or click a JS-only next button and wait for new items.
+  let stale = 0;
   for (let pageNum = 1; pageNum <= opts.maxPages; pageNum++) {
     const current = await collectItemCards(page, d);
     const fresh = take(current);
     opts.onPage(pageNum, fresh, items.size);
-    if (pageNum > 1 && fresh.length === 0) return done(true);
+    if (pageNum > 1 && current.length === 0) return done(true);
+    // As above: one page of nothing new may be overlap; two in a row is the end.
+    stale = pageNum > 1 && fresh.length === 0 ? stale + 1 : 0;
+    if (stale >= 2) return done(true);
     if (full() || pageNum === opts.maxPages) return done(false);
     if (!d.nextSelector) return done(true);
 
-    const nextHref = await page
-      .evaluate((sel) => {
-        const el = document.querySelector(sel);
-        if (!el || el.hasAttribute("disabled") || el.getAttribute("aria-disabled") === "true") return { found: false, href: null };
-        const a = (el.tagName === "A" ? el : el.closest("a")) as HTMLAnchorElement | null;
-        return { found: true, href: a?.href && /^https?:/.test(a.href) ? a.href : null };
-      }, d.nextSelector)
-      .catch(() => ({ found: false, href: null }));
+    const nextHref = await page.run("nextControl", { selector: d.nextSelector }).catch(() => ({ found: false, href: null }));
     if (!nextHref.found) return done(true);
 
     if (nextHref.href) {
@@ -186,20 +172,10 @@ export async function walkListing(page: Page, startUrl: string, d: CollectionDet
     } else {
       await page.click(d.nextSelector).catch(() => {});
       const before = current.map((c) => c.url);
-      const changed = await page
-        .waitForFunction(
-          (sel, prev) => {
-            const hrefs = Array.from(document.querySelectorAll(sel)).map((c) => (c.tagName === "A" ? (c as HTMLAnchorElement).href : (c.querySelector("a[href]") as HTMLAnchorElement | null)?.href));
-            return hrefs.some((h) => h && !prev.includes(h));
-          },
-          { timeout: 10_000 },
-          d.listItemSelector,
-          before,
-        )
-        .then(() => true, () => false);
+      const changed = await waitForScript(page, 10_000, "cardsChangedSince", { selector: d.listItemSelector, prev: before });
       // Unclear whether that was the last page or a slow one — don't claim completeness.
       if (!changed) return done(false);
-      await page.waitForNetworkIdle({ idleTime: 500, timeout: 5_000 }).catch(() => {});
+      await page.waitForNetworkIdle({ idleMs: 500, timeoutMs: 5_000 });
     }
   }
   return done(false);

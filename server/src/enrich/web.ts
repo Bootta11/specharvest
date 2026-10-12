@@ -116,8 +116,19 @@ function siblingValue(identity: string, key: string): { value: SpecValue; url: s
   return null;
 }
 
+/** The item states this attribute already — under the key or any synonym of it (key_aliases). */
+export function hasSpec(item: Item, key: string, names: string[] = db.keyAliasesOf(key)): boolean {
+  return item.specs[key] !== undefined || names.some((k) => item.specs[k] !== undefined);
+}
+
+/** `hasSpec` for many items: looks the synonyms of each key up once. */
+function specChecker(attrs: MissingAttribute[]): (item: Item, key: string) => boolean {
+  const names = new Map(attrs.map((a) => [a.key, db.keyAliasesOf(a.key)]));
+  return (item, key) => hasSpec(item, key, names.get(key));
+}
+
 function applyFact(item: Item, attr: MissingAttribute, fact: db.WebFact): boolean {
-  if (!fact.found || fact.value === null || item.specs[attr.key] !== undefined) return false;
+  if (!fact.found || fact.value === null || hasSpec(item, attr.key)) return false;
   db.setItemSpec(item.id, attr.key, fact.value, { origin: "web", sourceUrl: fact.sourceUrl, confidence: fact.confidence });
   db.upsertSpecKey(item.collectionId, { key: attr.key, type: attr.type, unit: attr.unit ?? fact.unit, label: attr.label, example: String(fact.value), origin: "web" }, 0);
   item.specs[attr.key] = fact.value;
@@ -132,10 +143,11 @@ export function applyCachedFacts(items: Item[], attrs: MissingAttribute[]): { ap
   let applied = 0;
   const needLookup: Item[] = [];
   const touched = new Set<Item>();
+  const has = specChecker(attrs);
   for (const item of items) {
     let needs = false;
     for (const attr of attrs) {
-      if (item.specs[attr.key] !== undefined) continue;
+      if (has(item, attr.key)) continue;
       const fact = cachedFact(resolvedIdentity(item), attr.key);
       if (!fact) needs = true;
       else if (applyFact(item, attr, fact)) (applied++, touched.add(item));
@@ -162,6 +174,9 @@ export interface EnrichInput {
 }
 
 const activeByScope = new Map<string, number>();
+
+/** Lookup jobs running in this process, so they can be stopped. */
+const runningJobs = new Map<number, AbortController>();
 
 /** Paid lookups running right now, by product + key — shared by every user's jobs so nobody pays twice. */
 const inflight = new Map<string, Promise<void>>();
@@ -201,27 +216,43 @@ export function startEnrichment(input: EnrichInput): Job {
   assertJobSlot(input.userId);
   const job = db.createJob("enrich", input.collectionId, undefined, input.userId);
   activeByScope.set(scope, job.id);
+  const controller = new AbortController();
+  runningJobs.set(job.id, controller);
   emitJob(job);
-  withLlmContext({ jobId: job.id, collectionId: input.collectionId, userId: input.userId }, () => runEnrichment(job.id, input))
+  withLlmContext({ jobId: job.id, collectionId: input.collectionId, userId: input.userId }, () => runEnrichment(job.id, input, controller.signal))
     .catch((err) => {
       patchJob(job.id, { status: "failed", error: errorMessage(err), finishedAt: Date.now() });
       jobLog(job.id, `Enrichment failed: ${errorMessage(err)}`, "error");
     })
     .finally(() => {
       activeByScope.delete(scope);
+      runningJobs.delete(job.id);
       retireChannel(jobChannel(job.id));
     });
   return job;
 }
 
-async function runEnrichment(jobId: number, input: EnrichInput) {
+/** Asks a running lookup job to stop: queued products are dropped, lookups already running finish and are kept. */
+export function stopEnrichment(jobId: number): Job | null {
+  const controller = runningJobs.get(jobId);
+  if (!controller) return null;
+  if (!controller.signal.aborted) {
+    controller.abort();
+    jobLog(jobId, "Stop requested — finishing lookups already running");
+  }
+  return patchJob(jobId, { message: "Stopping…" });
+}
+
+async function runEnrichment(jobId: number, input: EnrichInput, signal: AbortSignal) {
   const items = db.getItemsByIds(input.itemIds);
   const labels = input.attributes.map((a) => a.label).join(", ");
   patchJob(jobId, { status: "running", message: `Looking up ${labels}` });
   await reviewWebKeys(jobId, input.attributes);
 
   // Spelling variants of the same product share one lookup (one LLM call for identities never grouped before).
-  const needing = items.filter((item) => input.attributes.some((a) => item.specs[a.key] === undefined));
+  // A value stored under a synonym counts as present: those listings never cost a lookup.
+  const has = specChecker(input.attributes);
+  const needing = items.filter((item) => input.attributes.some((a) => !has(item, a.key)));
   const grouping = await canonicalizeIdentities(needing);
   if (grouping.calls) jobLog(jobId, `Grouped product names: ${grouping.merged} variant${grouping.merged === 1 ? "" : "s"} merged into the same product`);
   for (const m of grouping.merges) jobLog(jobId, `Same product: "${m.from}" → "${m.to}"`);
@@ -233,7 +264,7 @@ async function runEnrichment(jobId: number, input: EnrichInput) {
   // Group items needing any attribute by canonical product identity → one web call per product.
   const groups = new Map<string, { items: Item[]; attrs: Map<string, MissingAttribute> }>();
   for (const item of needing) {
-    const need = input.attributes.filter((a) => item.specs[a.key] === undefined);
+    const need = input.attributes.filter((a) => !has(item, a.key));
     const id = resolvedIdentity(item);
     const g = groups.get(id) ?? { items: [] as Item[], attrs: new Map<string, MissingAttribute>() };
     g.items.push(item);
@@ -325,7 +356,7 @@ async function runEnrichment(jobId: number, input: EnrichInput) {
   const queue = new PQueue({ concurrency: 3 });
   for (const [identity, g] of capped) {
     queue.add(async () => {
-      if (halt) return;
+      if (halt || signal.aborted) return;
       let release = () => {};
       const claimed: string[] = [];
       try {
@@ -385,7 +416,12 @@ async function runEnrichment(jobId: number, input: EnrichInput) {
       }
     });
   }
+  // On stop, drop the products that haven't started; lookups already running finish and are saved.
+  const onStop = () => queue.clear();
+  if (signal.aborted) onStop();
+  else signal.addEventListener("abort", onStop, { once: true });
   await queue.onIdle();
+  signal.removeEventListener("abort", onStop);
 
   for (const item of changed) {
     await upsertVector(item.id, item.collectionId, await embed(embeddingText(item))).catch((err) => log.warn("re-embed failed", errorMessage(err)));
@@ -393,6 +429,20 @@ async function runEnrichment(jobId: number, input: EnrichInput) {
   for (const cid of new Set(items.map((i) => i.collectionId))) db.recountSpecKeys(cid);
   // Values found before the key stopped working are kept; the job fails with what to fix.
   if (halt) throw halt;
+
+  if (signal.aborted) {
+    // Products never started (dropped from the queue or over the cap): "Look up N more" picks them up; what was found is cached.
+    const notLookedUp = groups.size - done;
+    patchJob(jobId, {
+      status: "stopped",
+      itemsRemaining: notLookedUp,
+      lookup: { ...lookupStats, remaining: notLookedUp, ...(prefetched ? { prefetched } : {}) },
+      message: `Stopped — filled ${applied} values from ${lookups} web lookups (${webSearches} searches), ${notLookedUp} products not looked up`,
+      finishedAt: Date.now(),
+    });
+    jobLog(jobId, `Stopped: ${applied} values filled, ${lookups} lookups, ${notLookedUp} products not looked up`, "warn");
+    return;
+  }
 
   patchJob(jobId, {
     status: "done",

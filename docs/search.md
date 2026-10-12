@@ -118,11 +118,19 @@ available manually ("Look up on the web" under the unknown bucket,
 `POST /api/enrich`; shown only when an item there lacks a spec — price and
 other listing fields can't be looked up).
 
-In the UI only a **typed request** starts lookups by itself. Every other re-run
-(removing a chip, the filter panel, an empty Search with panel filters, the
-sold/removed toggle) sends `enrich: false`; the server then returns
-`enrichOffer` and the banner offers **Look up N products on the web**, so
-nothing is spent until it's pressed.
+In the UI, searches **never start a paid lookup by themselves**: every search
+(typed requests too) sends `enrich: false`. The server then returns
+`enrichOffer`, and the banner offers **Look up N products on the web**
+(about one paid search per product, on your key or the server's), so nothing is
+spent until it's pressed. A device can opt back in under *Settings → LLM
+provider → Start web lookups automatically* (stored in that browser only). With
+it on, a typed request starts lookups as before.
+
+A running lookup can be **stopped** (Stop in the search banner, on the job card
+or in *Running now*; `POST /api/jobs/:id/stop`). Products that haven't started
+are dropped, and lookups already running finish. Every value found so far is
+kept and cached. The job ends as *stopped* with `itemsRemaining` set, so
+"Look up N more products" continues where it left off.
 
 - Items are grouped by `identity` (normalized brand/model/variant/year from
   extraction), so **one lookup answers every listing of the same model**.
@@ -174,7 +182,7 @@ nothing is spent until it's pressed.
 - Each lookup job stores a breakdown on `job.lookup` (listings → products,
   name variants merged, already known, copied from siblings, looked up,
   left for next run, plus the merged names). It is shown in the search banner,
-  the "Web lookup finished" line and the job card on the Ingest view.
+  the "Web lookup finished/stopped" line and the job card on the Ingest view.
 - **Predicted extras (prefetch)**: the search fee is per search, not per
   attribute, so each paid lookup also asks for up to `ENRICH_PREFETCH_MAX`
   (12) likely-wanted specs nobody requested yet — keys already looked up for
@@ -193,6 +201,14 @@ nothing is spent until it's pressed.
   once for synonyms of known ones (`trunk_volume_liters` = `boot_capacity_liters`,
   one `consolidate` call) and saved in `key_aliases`. Cache reads, sibling
   copies and query plans treat synonyms as one key.
+- **Fields the listings already have**: when a search asks for a key the
+  collection doesn't have (`missingAttributes`), it is first checked against
+  the scope's **own fields** of the same type. This is one small `consolidate`
+  call per key and collection, remembered in `key_registry_checks` and checked
+  again when the collection gains new fields. A match is saved as a key alias,
+  and the plan uses the existing field, so e.g. "boot space" sorts by a crawled
+  `trunk_volume_l` instead of offering a web lookup. Coverage counts and lookups
+  also treat a value stored under any synonym as present.
 - "Not found" answers are retried after `ENRICH_NOT_FOUND_TTL_DAYS` (30, `0` =
   never); found facts don't expire.
 - Each lookup is one chat completion with the OpenRouter server tool

@@ -126,6 +126,9 @@ const envSchema = z.object({
   // (https://localhost) is always allowed — see docs/mobile-app.md.
   APP_ORIGINS: optionalNonEmpty(),
 
+  // Chrome Web Store page of the SpecHarvest extension, linked from the crawl form (docs/extension.md).
+  EXTENSION_STORE_URL: optionalNonEmpty(),
+
   // Commit the image was built from (set by the Dockerfile's GIT_SHA build arg).
   APP_GIT_SHA: optionalNonEmpty(),
 });

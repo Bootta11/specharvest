@@ -9,6 +9,7 @@ import {
   CRAWL_MAX_PAGES,
   crawlRequestSchema,
   inspectRequestSchema,
+  resumeRequestSchema,
   enrichRequestSchema,
   groupInputSchema,
   groupingModes,
@@ -25,10 +26,13 @@ import { deleteVectors, upsertVector } from "./db/lance.ts";
 import { embed } from "./embedding.ts";
 import { proxyConfigured } from "./crawler/browser.ts";
 import { inspectUrl } from "./crawler/inspect.ts";
+import { FatalDriverError } from "./crawler/driver.ts";
+import { connectionFor, extensionStatus, registerExtensionGateway } from "./extension/gateway.ts";
+import { registerExtensionRoutes } from "./extension/routes.ts";
 import { embeddingText, emitJob, jobChannel, JOBS_CHANNEL, ResumeError, resumeCrawl, startCrawl, stopCrawl } from "./crawler/job.ts";
 import { getNotificationSettings, maskSettings, saveNotificationSettings, sendTest } from "./notify/index.ts";
 import { vapidKeys } from "./notify/push.ts";
-import { startEnrichment } from "./enrich/web.ts";
+import { startEnrichment, stopEnrichment } from "./enrich/web.ts";
 import { autoConfirmMatches, groupForCollection, lookupIdentity, matchSuggestions, productGroups, sameProductOf, ungroupedCount } from "./enrich/group.ts";
 import { search } from "./search/hybrid.ts";
 import { proposeKeyMerges } from "./llm/consolidate.ts";
@@ -86,6 +90,8 @@ const notFound = (reply: FastifyReply) => reply.status(404).send({ error: "Not f
 
 registerAuthRoutes(app);
 registerLlmRoutes(app);
+await registerExtensionGateway(app);
+registerExtensionRoutes(app);
 
 // ---------- Health / config ----------
 
@@ -127,6 +133,7 @@ app.get("/api/config", async (req) => {
     defaults: { maxPages: Math.min(env.MAX_PAGES, limits.maxPages), maxItems: Math.min(env.MAX_ITEMS, limits.maxItems) },
     limits,
     llm,
+    extensionStoreUrl: env.EXTENSION_STORE_URL ?? null,
   };
 });
 
@@ -315,7 +322,12 @@ app.post("/api/crawl", userLimit(10), async (req, reply) => {
   const user = currentUser(req);
   requireLlm(user.id, "fast");
   const body = crawlRequestSchema.parse(req.body);
-  if (body.useProxy && !proxyConfigured()) return reply.status(400).send({ error: "PROXY_SERVER is not configured" });
+  if (body.runner === "browser") {
+    if (!connectionFor(user.id)) return reply.status(409).send({ error: "Your browser isn't connected — open Chrome with the SpecHarvest extension, or run it on the server" });
+  } else if (body.useProxy && !proxyConfigured()) return reply.status(400).send({ error: "PROXY_SERVER is not configured" });
+  if (body.snapshot && (body.kind !== "item" || body.runner !== "browser" || body.snapshot.url.split("#")[0] !== body.url.split("#")[0])) {
+    throw httpError(400, "A page snapshot is only for adding that same item from your browser");
+  }
   if (body.collectionId) requireCollection(body.collectionId, user, "write");
   const limits = crawlLimits(user);
   if (body.maxPages !== undefined && body.maxPages > limits.maxPages) throw httpError(400, `At most ${limits.maxPages} listing pages per crawl`);
@@ -335,9 +347,16 @@ app.post("/api/crawl", userLimit(10), async (req, reply) => {
 app.post("/api/crawl/inspect", userLimit(30), async (req) => {
   const user = currentUser(req);
   requireLlm(user.id, "fast");
-  const { url } = inspectRequestSchema.parse(req.body);
+  const { url, runner } = inspectRequestSchema.parse(req.body);
   await assertPublicUrl(url, strictPolicy());
-  return inspectUrl(new URL(url).toString(), user.id);
+  if (runner === "browser" && !connectionFor(user.id)) throw httpError(409, "Your browser isn't connected");
+  try {
+    return await inspectUrl(new URL(url).toString(), user.id, { runner });
+  } catch (err) {
+    // The user's browser can't do it right now (disconnected, site not allowed yet) — not a server fault.
+    if (err instanceof FatalDriverError) throw httpError(409, err.message);
+    throw err;
+  }
 });
 
 app.post("/api/enrich", userLimit(10), async (req, reply) => {
@@ -385,15 +404,18 @@ app.get("/api/jobs/events", async (req, reply) => {
   hijackForStream(reply);
   subscribe(JOBS_CHANNEL, reply.raw, undefined, {
     replay: false,
-    initial: [{ type: "jobs", jobs: db.listActiveJobs(user) }],
-    filter: (e) => e.type !== "job" || db.canSeeJob(e.job, user),
+    initial: [
+      { type: "jobs", jobs: db.listActiveJobs(user) },
+      { type: "extension", userId: user.id, status: extensionStatus(user.id) },
+    ],
+    filter: (e) => (e.type === "extension" ? e.userId === user.id : e.type !== "job" || db.canSeeJob(e.job, user)),
   });
 });
 
 app.post("/api/jobs/:id/stop", async (req, reply) => {
-  const id = requireJob(idParam(req.params), currentUser(req)).id;
-  const job = stopCrawl(id);
-  if (!job) return reply.status(409).send({ error: "This job isn't a running crawl" });
+  const target = requireJob(idParam(req.params), currentUser(req));
+  const job = target.kind === "enrich" ? stopEnrichment(target.id) : stopCrawl(target.id);
+  if (!job) return reply.status(409).send({ error: "This job isn't running" });
   return reply.status(202).send(job);
 });
 
@@ -404,7 +426,11 @@ app.post("/api/jobs/:id/resume", async (req, reply) => {
   // The crawl keeps running on its starter's keys.
   requireLlm(job.userId ?? currentUser(req).id, "fast");
   try {
-    return reply.status(202).send(resumeCrawl(id));
+    const { runner } = resumeRequestSchema.parse(req.body ?? {});
+    if (runner === "browser" && !connectionFor(job.userId ?? currentUser(req).id)) {
+      return reply.status(409).send({ error: "Your browser isn't connected — open Chrome with the SpecHarvest extension" });
+    }
+    return reply.status(202).send(resumeCrawl(id, runner));
   } catch (err) {
     if (err instanceof ResumeError) return reply.status(409).send({ error: err.message });
     throw err;

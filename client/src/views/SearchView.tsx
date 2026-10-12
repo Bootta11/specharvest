@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type { Collection, CollectionGroup, Filter, Item, QueryPlan, RecentSearch, SearchResponse, SpecKey } from "@specharvest/shared";
 import { formatSpecValue, humanizeKey, isListingField, specLabel } from "@specharvest/shared";
-import { api, ApiError, formatUsd, parseScope, scopeParams, storageGet, storageSet, useJobStream, type AppConfig, type SearchScope } from "../lib/api.ts";
+import { api, ApiError, autoLookupEnabled, formatUsd, parseScope, scopeParams, storageGet, storageSet, useJobStream, type AppConfig, type SearchScope } from "../lib/api.ts";
 import { LookupSummary } from "../components/LookupSummary.tsx";
 import { GlobeIcon, ItemCard, formatPrice } from "../components/ItemCard.tsx";
 import { ItemModal } from "../components/ItemModal.tsx";
@@ -93,6 +93,7 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [enrichJobId, setEnrichJobId] = useState<number | null>(null);
+  const [stoppingLookup, setStoppingLookup] = useState(false);
   const [open, setOpen] = useState<Item | null>(null);
   const [showUnknown, setShowUnknown] = useState(false);
   const [includeGone, setIncludeGoneState] = useState(() => storageGet("specharvest.includeGone") === "1");
@@ -149,8 +150,8 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
       const mySeq = ++seq.current;
       setLoading(true);
       setError(null);
-      // Only a typed request (or a button saying so) may start paid web lookups; other re-runs get an offer instead.
-      const enrich = body.enrich ?? !!body.query?.trim();
+      // Paid web lookups start only from a button — or from a typed request on a device that opted in. Otherwise an offer.
+      const enrich = body.enrich ?? (!!body.query?.trim() && autoLookupEnabled());
       try {
         const res = await api.search({ ...scopeParams(scope), includeGone, facets: true, ...body, enrich });
         if (mySeq !== seq.current) return;
@@ -197,7 +198,7 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
   };
 
   // When a web lookup finishes, re-run the same plan (without starting another lookup).
-  const enrichDone = enrich.job?.status === "done" || enrich.job?.status === "failed";
+  const enrichDone = enrich.job?.status === "done" || enrich.job?.status === "failed" || enrich.job?.status === "stopped";
   useEffect(() => {
     if (enrichDone && result?.plan) run({ plan: result.plan, enrich: false });
   }, [enrichDone]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -273,6 +274,18 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
     ...(item.price === null && plan?.filters.some((f) => f.key === "price") ? ["price"] : []),
     ...new Set(plan?.filters.filter((f) => item.specs[f.key] === undefined && !isListingField(f.key)).map((f) => humanizeKey(f.key).toLowerCase())),
   ];
+
+  const stopLookup = async () => {
+    if (enrichJobId === null) return;
+    setStoppingLookup(true);
+    try {
+      await api.stopJob(enrichJobId);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setStoppingLookup(false);
+    }
+  };
 
   const lookUpUnknown = async () => {
     if (!result || unknownAttrs.length === 0) return;
@@ -469,6 +482,11 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
                   result?.enrichNote
                 )}
               </div>
+              {enriching && (
+                <button type="button" className="btn-ghost btn-sm" disabled={stoppingLookup || enrich.job!.message === "Stopping…"} onClick={stopLookup} title="Stop — values found so far are kept">
+                  {stoppingLookup || enrich.job!.message === "Stopping…" ? "Stopping…" : "Stop"}
+                </button>
+              )}
             </div>
           )}
           {retryIn !== null && !loading && (
@@ -484,6 +502,9 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
                 {humanizeKey(result.enrichOffer.attributes.map((a) => (plan?.missingAttributes.some((m) => m.key === a.key) ? a.label : specLabel(a.key).toLowerCase())).join(", "))}{" "}
                 {result.enrichOffer.attributes.length === 1 ? "isn’t" : "aren’t"} stated for{" "}
                 {result.enrichOffer.listings} listing{result.enrichOffer.listings === 1 ? "" : "s"}
+                <span className="block text-xs opacity-80">
+                  Paid: about one web search per product, on {config?.llm.effective.web?.funding === "own" ? "your API key" : "the server's key"}. Nothing runs until you click.
+                </span>
               </span>
               <button type="button" className="btn-ghost btn-sm" onClick={() => run({ plan: result.plan, enrich: true })}>
                 <GlobeIcon /> Look up {result.enrichOffer.products} product{result.enrichOffer.products === 1 ? "" : "s"} on the web
@@ -494,7 +515,7 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-stone-500">
               <span className="min-w-0">
                 <GlobeIcon className="mr-1 inline size-3.5 text-sky-600" />
-                Web lookup finished: {enrich.job.message ?? enrich.job.error}
+                {enrich.job.status === "stopped" ? "Web lookup stopped" : "Web lookup finished"}: {enrich.job.message ?? enrich.job.error}
                 {enrich.job.llmCost > 0 && ` · ${formatUsd(enrich.job.llmCost)}`}
               </span>
               {enrich.job.itemsRemaining > 0 && result?.plan && !result.enrichOffer && (
