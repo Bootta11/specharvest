@@ -6,10 +6,18 @@ updates:
     groups:
       minor-and-patch:
         update-types: [minor, patch]
+    # Node types track the runtime's major (.nvmrc); bump it together with Node.
+    ignore:
+      - dependency-name: "@types/node"
+        update-types: [version-update:semver-major]
   # Base image digests pinned in the Dockerfile
   - package-ecosystem: docker
     directory: /
     schedule: { interval: weekly }
+    # Stay on the Node LTS major from .nvmrc; bump it deliberately with the runtime image.
+    ignore:
+      - dependency-name: node
+        update-types: [version-update:semver-major]
   - package-ecosystem: docker-compose
     directory: /
     schedule: { interval: weekly }

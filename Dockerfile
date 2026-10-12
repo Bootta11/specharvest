@@ -4,11 +4,11 @@
 # The runtime is distroless (no shell, no npm, no apt). Both are pinned by digest in the
 # FROM lines so Dependabot can bump them.
 
-FROM node:26-trixie-slim@sha256:193fe51b64e77981119c98c2002c9e32a70e2f006fb4d25068ce0558998917f0 AS builder
+FROM node:24-trixie-slim@sha256:173f125896c3b47ddf056734c7ea789d04595a6a08769a8f78e0df642781fb66 AS builder
 RUN apt-get update && apt-get upgrade -y \
   && apt-get install -y --no-install-recommends binutils \
   && rm -rf /var/lib/apt/lists/*
-# npm 10 (bundled with node:22) hits an arborist bug on this dependency tree; use npm 11.
+# npm 10 hits an arborist bug on this dependency tree; pin npm 11 regardless of the bundled npm.
 RUN npm install -g npm@11 --no-audit --no-fund
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -35,7 +35,7 @@ RUN npm run build --workspace client \
   # LanceDB's Linux binary ships with debug symbols (~390 MB -> ~255 MB stripped).
   && strip --strip-unneeded node_modules/@lancedb/lancedb-linux-*/*.node
 
-FROM gcr.io/distroless/nodejs22-debian13:nonroot@sha256:ec2313763dd43931543bd03830466e0c409ce73a487e8d46f10db72d3b816c1c
+FROM gcr.io/distroless/nodejs24-debian13:nonroot@sha256:9eeb7f5887d0e239e78264b06f7f11d2e14be534050481803a9e4728fcdd278e
 WORKDIR /app
 ARG GIT_SHA=""
 ENV NODE_ENV=production \

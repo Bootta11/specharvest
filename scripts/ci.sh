@@ -25,7 +25,7 @@ if [[ "$have" != "$want" ]]; then
   echo "warning: Node $have locally, CI uses Node $want (.nvmrc)" >&2
 fi
 
-# npm 10 (bundled with Node 22) hits an arborist bug on this dependency tree; CI uses npm 11.
+# npm 10 hits an arborist bug on this dependency tree; CI pins npm 11.
 npm11=(npx -y npm@11)
 
 step() { echo; echo "==> $*"; }

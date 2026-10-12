@@ -165,7 +165,7 @@ docker compose start app
 
 ## Image
 
-- **Builder:** `node:22-trixie-slim`. **Runtime:** `gcr.io/distroless/nodejs22-debian13:nonroot`, with no shell, npm or apt, running as uid 65532. Both are pinned by digest.
+- **Builder:** `node:24-trixie-slim`. **Runtime:** `gcr.io/distroless/nodejs24-debian13:nonroot`, with no shell, npm or apt, running as uid 65532. Both are pinned by digest.
 - **No Alpine:** `onnxruntime-node`, used for embeddings, has no musl build.
 - **Size, about 590 MB:** mostly the LanceDB native binary (~255 MB after stripping debug symbols) and the Node runtime (~120 MB). The builder drops onnxruntime binaries for other platforms and the unused browser WASM of `onnxruntime-web`.
 - **Hardening:** the container runs with `read_only`, `cap_drop: ALL`, `no-new-privileges`, `init`, memory and PID limits, and log rotation.

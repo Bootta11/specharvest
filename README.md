@@ -8,7 +8,7 @@ up on the web once per product model and cached.
 
 ## Requirements
 
-- Node.js 22.13+ (uses the built-in `node:sqlite`)
+- Node.js 24+ (uses the built-in `node:sqlite`)
 - npm 11 (`npx npm@11 install` — npm 10 hits a resolver bug on this tree)
 - An LLM API key: the server's [OpenRouter](https://openrouter.ai/keys) key, and/or each user's own key
   (OpenRouter, OpenAI, Anthropic, Google, Mistral, DeepSeek, … — see [LLM providers](docs/llm-providers.md))

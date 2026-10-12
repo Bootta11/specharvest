@@ -28,7 +28,7 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
-      # npm 10 (bundled with Node 22) hits an arborist bug on this dependency tree.
+      # npm 10 hits an arborist bug on this dependency tree; pin npm 11 regardless of the bundled npm.
       - run: npm install -g npm@11 --no-audit --no-fund
       - run: npm ci --no-audit --no-fund
       # Known vulnerabilities in what ships (dev tools excluded) fail the build.

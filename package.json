@@ -24,7 +24,7 @@
     "test:ci": "./scripts/ci.sh"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   },
   "allowScripts": {
     "onnxruntime-node@1.30.0": true,
