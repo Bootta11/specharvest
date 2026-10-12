@@ -20,7 +20,8 @@
     "test": "npm test --workspace server",
     "seed:admin": "npm run seed:admin --workspace server --",
     "build:extension": "npm run build --workspace extension",
-    "zip:extension": "npm run zip --workspace extension"
+    "zip:extension": "npm run zip --workspace extension",
+    "test:ci": "./scripts/ci.sh"
   },
   "engines": {
     "node": ">=22"

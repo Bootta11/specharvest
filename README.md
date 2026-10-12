@@ -32,6 +32,7 @@ scripts/dev.sh          # API on :3100 + UI on :5180 (background, logs in .run/)
 scripts/kill.sh         # stop them
 npm test                # unit tests
 npm run typecheck
+npm run test:ci         # same steps as the CI test job (clean install, audit, typecheck, tests)
 ```
 
 Local Chrome instead of a remote browser:
