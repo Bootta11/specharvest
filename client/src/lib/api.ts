@@ -164,6 +164,12 @@ export const api = {
       if (account) await forgetAccount(account.id);
     }
   },
+  /** Deletes the account and everything it owns; in the app, also forgets that saved account. */
+  deleteAccount: async (currentPassword: string) => {
+    const account = activeAccount();
+    await request<null>("DELETE", "/api/auth/me", { currentPassword });
+    if (account) await forgetAccount(account.id);
+  },
   updateAccount: (body: { currentPassword: string; email?: string; newPassword?: string }) => request<UserSummary>("PATCH", "/api/auth/me", body),
   apiKeys: () => request<ApiKeySummary[]>("GET", "/api/api-keys"),
   createApiKey: (label: string) => request<ApiKeyCreated>("POST", "/api/api-keys", { label }),

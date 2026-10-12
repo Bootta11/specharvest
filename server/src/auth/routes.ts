@@ -1,15 +1,19 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { createUserSchema, loginSchema, serverLlmAccessModes, signupSchema, updateAccountSchema, type AdminSettings, type AuthStatus, type UserCreated, type UserSummary } from "@specharvest/shared";
+import { createUserSchema, deleteAccountSchema, loginSchema, serverLlmAccessModes, signupSchema, updateAccountSchema, type AdminSettings, type AuthStatus, type UserCreated, type UserSummary } from "@specharvest/shared";
 import { env } from "../config.ts";
+import { stopCrawl } from "../crawler/job.ts";
+import { deleteVectors } from "../db/lance.ts";
 import * as db from "../db/sqlite.ts";
+import { stopEnrichment } from "../enrich/web.ts";
+import { disconnectKey } from "../extension/gateway.ts";
 import { httpError } from "../lib/http-error.ts";
 import { serverDailyLimitUsd, serverLlmAccess, setServerDailyLimitUsd, setServerLlmAccess } from "../llm/resolve.ts";
-import { createApiKey, listApiKeys, revokeApiKey } from "./api-keys.ts";
+import { createApiKey, listApiKeys, listExtensionTokens, revokeApiKey } from "./api-keys.ts";
 import { hashToken, temporaryPassword } from "./crypto.ts";
 import { currentUser, isAppClient, requireAdmin, SESSION_COOKIE, sessionCookieOptions } from "./plugin.ts";
 import { createSession, revokeSession } from "./sessions.ts";
-import { createUser, getUser, listUsers, setUserDisabled, toSummary, updateOwnAccount, verifyLogin } from "./users.ts";
+import { activeJobsOf, assertCanDeleteOwnAccount, createUser, deleteUser, getUser, listUsers, setUserDisabled, toSummary, updateOwnAccount, verifyLogin } from "./users.ts";
 
 const SIGNUP_KEY = "auth.signupEnabled";
 const signupEnabled = () => db.getSetting<boolean>(SIGNUP_KEY) === true;
@@ -77,6 +81,18 @@ export function registerAuthRoutes(app: FastifyInstance) {
     const body = updateAccountSchema.parse(req.body);
     if (!body.email && !body.newPassword) throw httpError(400, "Nothing to change");
     return updateOwnAccount(currentUser(req).id, body, req.sessionToken ? hashToken(req.sessionToken) : undefined);
+  });
+
+  // Deletes the account and everything it owns (Google Play requires this in the app; see docs/auth.md).
+  app.delete("/api/auth/me", credentialLimit, async (req, reply) => {
+    const { currentPassword } = deleteAccountSchema.parse(req.body);
+    const user = await assertCanDeleteOwnAccount(currentUser(req).id, currentPassword);
+    for (const job of activeJobsOf(user.id)) (job.kind === "enrich" ? stopEnrichment : stopCrawl)(job.id);
+    for (const device of listExtensionTokens(user.id)) disconnectKey(device.id);
+    await deleteVectors(deleteUser(user.id));
+    req.log.info(`user ${user.id} deleted their account`);
+    reply.clearCookie(SESSION_COOKIE, { path: "/" });
+    return reply.status(204).send();
   });
 
   app.get("/api/api-keys", async (req) => listApiKeys(currentUser(req).id));

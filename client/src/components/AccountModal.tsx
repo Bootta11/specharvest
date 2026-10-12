@@ -123,12 +123,75 @@ function ApiKeys() {
   );
 }
 
-export function AccountModal({ user, onUpdated, onClose }: { user: UserSummary; onUpdated: (u: UserSummary) => void; onClose: () => void }) {
+/** Self-service deletion (Google Play requires it in the app). Asks for the password and a second tap. */
+function DeleteAccount({ user, onDelete }: { user: UserSummary; onDelete: (currentPassword: string) => Promise<void> }) {
+  const [open, setOpen] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await onDelete(currentPassword);
+    } catch (err) {
+      setError((err as Error).message);
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="space-y-3 border-t border-stone-200 pt-4 dark:border-stone-800">
+      <div>
+        <h3 className="text-sm font-semibold text-red-700 dark:text-red-300">Delete account</h3>
+        <p className="text-xs text-stone-500">
+          Deletes {user.email} and everything it owns: your collections and their items (shared ones too), groups, searches, API keys, LLM keys,
+          connected browsers and notification settings. This can't be undone. Export collections you want to keep first.
+        </p>
+      </div>
+      {!open ? (
+        <button type="button" className="btn-ghost text-red-700 dark:text-red-300" onClick={() => setOpen(true)}>
+          Delete my account…
+        </button>
+      ) : (
+        <form onSubmit={submit} className="space-y-3">
+          {error && <Notice kind="error">{error}</Notice>}
+          <Field label="Current password" hint="Needed to delete your account.">
+            <input className="input" type="password" autoComplete="current-password" required value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} />
+          </Field>
+          <div className="flex flex-wrap justify-end gap-2">
+            <button type="button" className="btn-ghost" disabled={busy} onClick={() => setOpen(false)}>
+              Cancel
+            </button>
+            <button className="btn-danger" disabled={busy || !currentPassword}>
+              {busy ? "Deleting…" : "Delete forever"}
+            </button>
+          </div>
+        </form>
+      )}
+    </section>
+  );
+}
+
+export function AccountModal({
+  user,
+  onUpdated,
+  onDelete,
+  onClose,
+}: {
+  user: UserSummary;
+  onUpdated: (u: UserSummary) => void;
+  onDelete: (currentPassword: string) => Promise<void>;
+  onClose: () => void;
+}) {
   return (
     <Modal title="Account" onClose={onClose}>
       <Profile user={user} onUpdated={onUpdated} />
       <ConnectedBrowsers />
       <ApiKeys />
+      <DeleteAccount user={user} onDelete={onDelete} />
     </Modal>
   );
 }

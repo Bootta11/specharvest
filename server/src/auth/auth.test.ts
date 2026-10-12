@@ -256,3 +256,48 @@ describe("search rate limits", async () => {
     expect((await search({})).statusCode).toBe(429);
   });
 });
+
+describe("deleting your own account", () => {
+  it("needs the current password", async () => {
+    const u = await users.createUser("wrongpw@example.com", "password1");
+    await expect(users.assertCanDeleteOwnAccount(u.id, "nope")).rejects.toMatchObject({ statusCode: 401 });
+    expect((await users.assertCanDeleteOwnAccount(u.id, "password1")).id).toBe(u.id);
+  });
+
+  it("refuses the last active admin", async () => {
+    const boss = await users.createUser("boss@example.com", "password1", "admin");
+    const others = users.listUsers().filter((u) => u.role === "admin" && u.id !== boss.id && u.disabledAt === null);
+    for (const o of others) users.setUserDisabled(o.id, true);
+    await expect(users.assertCanDeleteOwnAccount(boss.id, "password1")).rejects.toMatchObject({ statusCode: 409 });
+    for (const o of others) users.setUserDisabled(o.id, false);
+    if (others.length) expect((await users.assertCanDeleteOwnAccount(boss.id, "password1")).id).toBe(boss.id);
+  });
+
+  it("removes the user and what they own, and leaves other users alone", async () => {
+    const erin = await users.createUser("erin@example.com", "password1");
+    const frank = await users.createUser("frank@example.com", "password1");
+    const own = db.createCollection("erin", "https://shop.example/e", "shop.example", erin.id);
+    const item = db.upsertItem({ collectionId: own, url: "https://shop.example/e/1", title: "Thing", price: null, currency: null, mainImage: null, description: null, identity: null, specs: {}, rawText: null });
+    const franks = db.createCollection("frank", "https://shop.example/f", "shop.example", frank.id);
+    const jobOnFranks = db.createJob("enrich", franks, {}, erin.id);
+    db.recordLlmUsage({ purpose: "extract", provider: "openrouter", model: "m", funding: "platform", promptTokens: 1, completionTokens: 1, cost: 0.25, webSearches: 0, jobId: null, collectionId: null, userId: erin.id });
+    db.createGroup(erin.id, "mine", [own]);
+    db.setSetting(`notifications:${erin.id}`, { ntfy: { enabled: true, topic: "erin" } });
+    const key = apiKeys.createApiKey(erin.id, "script");
+    const { rawToken } = sessions.createSession(erin.id);
+
+    expect(users.deleteUser(erin.id)).toEqual([item]);
+
+    expect(users.getUser(erin.id)).toBeNull();
+    expect(db.getCollection(own)).toBeNull();
+    expect(sessions.verifySession(rawToken)).toBeNull();
+    expect(apiKeys.verifyApiKey(key.key)).toBeNull();
+    expect(db.getSetting(`notifications:${erin.id}`)).toBeNull();
+    expect(db.getDb().prepare("SELECT COUNT(*) AS n FROM collection_groups WHERE user_id = ?").get(erin.id)).toMatchObject({ n: 0 });
+    // History stays under the deleted-user id, so startup doesn't hand it to the first admin.
+    expect(db.getJob(jobOnFranks.id)?.userId).toBe(users.DELETED_USER_ID);
+    expect(db.getDb().prepare("SELECT COUNT(*) AS n FROM llm_usage WHERE user_id = ?").get(users.DELETED_USER_ID)).toMatchObject({ n: 1 });
+    expect(db.getCollection(franks)?.ownerId).toBe(frank.id);
+    expect(users.getUser(frank.id)).not.toBeNull();
+  });
+});

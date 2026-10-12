@@ -33,6 +33,7 @@ curl -H "X-Api-Key: shk_…" https://specharvest.example/api/collections
 | `POST /api/auth/logout` | | 204, revokes the session |
 | `GET /api/auth/me` | | `{id, email, role, disabledAt, createdAt}` |
 | `PATCH /api/auth/me` | `{currentPassword, email?, newPassword?}` | user; a new password signs out your other sessions |
+| `DELETE /api/auth/me` | `{currentPassword}` | 204, deletes your account and everything it owns ([details](auth.md#accounts)); 401 wrong password, 409 last admin |
 | `GET /api/api-keys` | | your active keys `[{id, label, keyPrefix, createdAt, lastUsedAt}]` |
 | `POST /api/api-keys` | `{label}` | key incl. the full `key` — shown only once (201) |
 | `DELETE /api/api-keys/:id` | | `{ok}` |

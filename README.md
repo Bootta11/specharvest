@@ -131,4 +131,5 @@ Browse them as a local site with search: `npm run docs` → http://specharvest-d
 - [Deployment](docs/deployment.md) — CI → GHCR image, tags, Compose host setup, secrets, backups
 - [Notifications](docs/notifications.md) — running jobs, browser/Web Push, ntfy, Telegram, Discord/Slack, webhook, Apprise
 - [Android app](docs/mobile-app.md) — build and install the APK, server choice, sign-in, notifications
+- [Google Play](docs/google-play.md) — publish the Android app: developer account, signing, store listing, testing, release
 - [Browser extension](docs/extension.md) — crawl in your own Chrome (past bot checks), connect, site permissions, build & publish ([privacy policy](docs/extension-privacy.md))

@@ -54,6 +54,14 @@
       "path": "/docs/notifications"
     },
     {
+      "title": "Android app",
+      "path": "/docs/mobile-app"
+    },
+    {
+      "title": "Google Play",
+      "path": "/docs/google-play"
+    },
+    {
       "title": "Browser extension",
       "path": "/docs/extension"
     }

@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SpecHarvest privacy policy</title>
+    <meta name="description" content="What the SpecHarvest app and website store, who sees it, and how to delete your account." />
+    <link rel="icon" href="/favicon.png" />
+    <link rel="stylesheet" href="/legal.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <img src="/icon-192.png" alt="" />
+        <h1>SpecHarvest privacy policy</h1>
+      </header>
+      <p class="muted">Applies to the SpecHarvest Android app and website. Last updated: 12 October 2026.</p>
+
+      <p>
+        SpecHarvest reads product listings from online shops you choose, turns them into a searchable collection of products and their
+        specifications, and lets you search and compare them. This page explains what data that takes and what happens to it.
+      </p>
+
+      <h2 id="who">Who runs it</h2>
+      <p>
+        The app connects to a SpecHarvest server. By default that's <a href="https://specharvest.bootta.dev">specharvest.bootta.dev</a>, run by the
+        app's developer. You can also enter another server on the sign-in screen. Then that server's operator holds your data, under their own
+        terms, and this policy only covers the app itself.
+      </p>
+      <p>Questions or requests: <a href="mailto:CONTACT_EMAIL">CONTACT_EMAIL</a>.</p>
+
+      <h2 id="what">What we store</h2>
+      <ul>
+        <li><strong>Account</strong>: your email address and your password, stored only as a salted hash.</li>
+        <li>
+          <strong>Your content</strong>: the shop pages you ask it to read, and the collections, products, specifications, groups and searches made
+          from them.
+        </li>
+        <li><strong>Keys and settings</strong>: AI provider API keys you add (encrypted), API keys you create, and your notification settings (for example an ntfy topic or a Telegram chat).</li>
+        <li><strong>Usage</strong>: which jobs you ran and what the AI calls cost, so you can see your spending and the server can enforce limits.</li>
+        <li><strong>Security logs</strong>: request logs with IP addresses, kept only as long as needed to run and protect the service.</li>
+      </ul>
+      <p>
+        On your phone, the app keeps your sign-in tokens and the server address in its own storage. It asks for permission to show notifications,
+        so it can tell you when a crawl or lookup finishes.
+      </p>
+
+      <h2 id="use">How it's used and shared</h2>
+      <ul>
+        <li>Your data is used only to provide SpecHarvest to you: crawl, extract, search and notify.</li>
+        <li>
+          To read product details, page text is sent to the AI provider in use (for example OpenRouter, OpenAI or Google), with your own key or the
+          server's. Web lookups you start send search queries to a search provider. They process it to answer that request.
+        </li>
+        <li>Notifications go to the channels you set up yourself.</li>
+        <li>Collections are private unless you mark one as shared. Then other users of the same server can search it.</li>
+        <li>No ads, no tracking or analytics SDKs, and your data is never sold.</li>
+        <li>All traffic between the app and the server is encrypted (HTTPS).</li>
+      </ul>
+
+      <h2 id="delete-account">Delete your account</h2>
+      <div class="box">
+        <p><strong>In the app or on the website:</strong></p>
+        <ol>
+          <li>Sign in, then tap the round account button (your initial, top right) → <strong>Account &amp; API keys</strong>.</li>
+          <li>Scroll to <strong>Delete account</strong> and tap <strong>Delete my account…</strong></li>
+          <li>Enter your current password and tap <strong>Delete forever</strong>.</li>
+        </ol>
+      </div>
+      <p>
+        This deletes, right away and for good: your account, your collections and their products (shared ones too), groups, search history, API
+        keys, AI provider keys, connected browsers, notification settings and sign-ins. Export collections you want to keep first.
+      </p>
+      <p>
+        Cost records of AI calls are kept without your email or account, for the server's own accounting. Copies in server backups go away as
+        old backups are replaced.
+      </p>
+      <p>
+        Can't sign in any more, or uninstalled the app? Email <a href="mailto:CONTACT_EMAIL">CONTACT_EMAIL</a> from the address of your account and
+        we'll delete it for you.
+      </p>
+
+      <h2 id="children">Children</h2>
+      <p>SpecHarvest is not meant for children under 13 and doesn't knowingly collect their data.</p>
+
+      <h2 id="changes">Changes</h2>
+      <p>If this policy changes, the date at the top changes too. Big changes are announced in the app.</p>
+    </main>
+  </body>
+</html>

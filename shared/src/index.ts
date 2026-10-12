@@ -635,6 +635,7 @@ export const updateAccountSchema = z.object({
   email: z.string().trim().toLowerCase().pipe(z.email()).optional(),
   newPassword: z.string().min(8).max(200).optional(),
 });
+export const deleteAccountSchema = z.object({ currentPassword: z.string().min(1).max(200) });
 export const createUserSchema = z.object({ email: z.string().trim().toLowerCase().pipe(z.email()), role: z.enum(["admin", "user"]).default("user") });
 
 // ---------- LLM spend ----------

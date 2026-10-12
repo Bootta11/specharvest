@@ -61,6 +61,15 @@ saves LLM calls.
   *Create one*, and new accounts are regular users.
 - **Changing your email or password** needs the current password. A new
   password signs out your other devices.
+- **Deleting your own account** (*Account & API keys* → *Delete account*, needs
+  the current password) removes the user and everything they own: collections
+  with their items (shared ones too), groups, search history, sessions, API
+  keys, LLM keys, connected browsers, push subscriptions and notification
+  settings. Running jobs are stopped first. Spend history and jobs on other
+  users' collections stay, under user id 0 (not NULL, which startup would hand
+  to the first admin). The last active admin can't delete themselves. Google
+  Play requires this ([Google Play](google-play.md#data-safety)); the public
+  steps are at `/privacy.html#delete-account`.
 - **Disabling** a user ends their sessions and blocks sign-in and API keys
   until they are re-enabled. Their collections stay. Admins can't disable
   themselves.

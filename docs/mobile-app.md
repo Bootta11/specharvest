@@ -30,6 +30,14 @@ Needs JDK 21 and the Android SDK (Android Studio installs both).
 
 `npm run android --workspace client` opens the project in Android Studio instead.
 
+### Release build
+
+Google Play needs a signed App Bundle: `npm run android:bundle --workspace client` builds
+`client/android/app/build/outputs/bundle/release/app-release.aab`, signed with the upload key from
+`client/android/keystore.properties` (git-ignored; see `keystore.properties.example`). Without that file the
+release build is unsigned. The whole process, from the developer account to the store listing, is in
+[Google Play](google-play.md).
+
 The app id is `dev.bootta.specharvest`. Every icon (Android launcher, notification silhouette, splash
 screens, and the website's favicon, logo and touch icon) is generated from `client/assets/icon-source.png`
 by `node scripts/make-icons.mjs`, run in `client/`.

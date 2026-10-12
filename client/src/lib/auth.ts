@@ -12,6 +12,8 @@ export interface Auth {
   login: (email: string, password: string) => Promise<void>;
   signup: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
+  /** Deletes the account (throws on a wrong password), then signs out like logout. */
+  deleteAccount: (currentPassword: string) => Promise<void>;
   setUser: (user: UserSummary) => void;
   /** App: makes a saved account the active one and reloads, so every view and stream starts over for it. */
   switchTo: (id: string) => Promise<void>;
@@ -82,13 +84,23 @@ export function useAuth(): Auth {
     setUser(await api.signup(email, password));
     setAddingFrom(null);
   }, []);
-  const logout = useCallback(async () => {
-    await api.logout().catch(() => {});
-    // The app moves on to another signed-in account, if there is one.
+  // The app moves on to another signed-in account, if there is one.
+  const leave = useCallback(async () => {
     const next = isNative ? accounts().find((a) => a.token) : undefined;
     if (next) await switchTo(next.id);
     else setUser(null);
   }, []);
+  const logout = useCallback(async () => {
+    await api.logout().catch(() => {});
+    await leave();
+  }, [leave]);
+  const deleteAccount = useCallback(
+    async (currentPassword: string) => {
+      await api.deleteAccount(currentPassword);
+      await leave();
+    },
+    [leave],
+  );
 
   const addAccount = useCallback(async () => {
     setAddingFrom(activeAccount()?.id ?? null);
@@ -99,5 +111,5 @@ export function useAuth(): Auth {
 
   const cancelAdd = addingFrom ? () => void switchTo(addingFrom) : null;
 
-  return { user, unreachable, retry: check, login, signup, logout, setUser, switchTo, addAccount, cancelAdd };
+  return { user, unreachable, retry: check, login, signup, logout, deleteAccount, setUser, switchTo, addAccount, cancelAdd };
 }

@@ -94,3 +94,56 @@ export async function updateOwnAccount(userId: number, input: UpdateOwnAccountIn
   }
   return toSummary(getUser(userId)!);
 }
+
+/**
+ * Checks that the signed-in user may delete their own account: the right current password, and not the last
+ * active admin (the server would be left with nobody to manage it).
+ */
+export async function assertCanDeleteOwnAccount(userId: number, currentPassword: string): Promise<UserRow> {
+  const user = getUser(userId);
+  if (!user) throw httpError(404, "User not found");
+  if (!(await verifyPassword(currentPassword, user.passwordHash))) throw httpError(401, "Current password is incorrect");
+  if (user.role === "admin") {
+    const others = db.getDb().prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND disabled_at IS NULL AND id != ?").get(userId) as Row;
+    if (Number(others.n) === 0) throw httpError(409, "You're the only admin — make another user an admin first");
+  }
+  return user;
+}
+
+/** Owner id left on a deleted user's jobs and spend history (real ids start at 1). */
+export const DELETED_USER_ID = 0;
+
+/** The user's queued/running jobs, to stop before their account goes. */
+export function activeJobsOf(userId: number): { id: number; kind: string }[] {
+  return (db.getDb().prepare("SELECT id, kind FROM jobs WHERE user_id = ? AND status IN ('queued','running')").all(userId) as Row[]).map((r) => ({
+    id: Number(r.id),
+    kind: String(r.kind),
+  }));
+}
+
+/**
+ * Removes a user and everything they own: their collections (with items, jobs and caches), per-user settings
+ * and push subscriptions. Sessions, API keys, LLM keys, groups and search history go by ON DELETE CASCADE.
+ * Spend history (llm_usage) and jobs on other users' collections stay under DELETED_USER_ID — not NULL, which
+ * getDb() would hand to the first admin (assignOrphansTo) and count against their daily server-key limit.
+ * Returns the deleted item ids, whose vectors the caller removes from LanceDB.
+ */
+export function deleteUser(userId: number): number[] {
+  const d = db.getDb();
+  const itemIds: number[] = [];
+  d.exec("BEGIN");
+  try {
+    for (const r of d.prepare("SELECT id FROM collections WHERE user_id = ?").all(userId) as Row[]) itemIds.push(...db.deleteCollection(Number(r.id)));
+    db.deleteSetting(`notifications:${userId}`);
+    db.deleteSetting(`llm-models:${userId}`);
+    d.prepare("DELETE FROM push_subscriptions WHERE user_id = ?").run(userId);
+    d.prepare("UPDATE jobs SET user_id = ? WHERE user_id = ?").run(DELETED_USER_ID, userId);
+    d.prepare("UPDATE llm_usage SET user_id = ? WHERE user_id = ?").run(DELETED_USER_ID, userId);
+    d.prepare("DELETE FROM users WHERE id = ?").run(userId);
+    d.exec("COMMIT");
+  } catch (err) {
+    d.exec("ROLLBACK");
+    throw err;
+  }
+  return itemIds;
+}

@@ -75,3 +75,20 @@ describe("Android app sign-in (bearer token)", () => {
     expect((await preflight("https://evil.example")).headers["access-control-allow-origin"]).toBeUndefined();
   });
 });
+
+describe("deleting the account from the app", () => {
+  it("needs the current password, then signs out everywhere and frees the email", async () => {
+    await users.createUser("leaving@example.com", "password1");
+    const signIn = () =>
+      app.inject({ method: "POST", url: "/api/auth/login", headers: { "content-type": "application/json", "x-specharvest-client": "app" }, payload: { email: "leaving@example.com", password: "password1" } });
+    const { token } = (await signIn()).json() as { token: string };
+    const auth = { authorization: `Bearer ${token}`, origin: APP_ORIGIN, "sec-fetch-site": "cross-site", "content-type": "application/json" };
+    const del = (currentPassword: string) => app.inject({ method: "DELETE", url: "/api/auth/me", headers: auth, payload: { currentPassword } });
+
+    expect((await del("wrong-password")).statusCode).toBe(401);
+    expect((await del("password1")).statusCode).toBe(204);
+    expect((await app.inject({ method: "GET", url: "/api/whoami", headers: auth })).statusCode).toBe(401);
+    expect((await signIn()).statusCode).toBe(401);
+    expect(users.getUserByEmail("leaving@example.com")).toBeNull();
+  });
+});

@@ -249,7 +249,7 @@ function Workspace({ user, auth }: { user: UserSummary; auth: Auth }) {
         )}
       </main>
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
-      {dialog === "account" && <AccountModal user={user} onUpdated={auth.setUser} onClose={() => setDialog(null)} />}
+      {dialog === "account" && <AccountModal user={user} onUpdated={auth.setUser} onDelete={auth.deleteAccount} onClose={() => setDialog(null)} />}
       {dialog === "llm" && <LlmSettingsModal onClose={() => setDialog(null)} onChanged={refreshConfig} />}
       {dialog === "admin" && <AdminModal me={user} onClose={() => setDialog(null)} />}
     </div>

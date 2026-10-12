@@ -10,7 +10,8 @@
     "typecheck": "tsc -p tsconfig.json",
     "cap:sync": "npm run build && cap sync android",
     "android": "npm run cap:sync && cap open android",
-    "android:debug": "npm run cap:sync && cd android && ./gradlew assembleDebug"
+    "android:debug": "npm run cap:sync && cd android && ./gradlew assembleDebug",
+    "android:bundle": "npm run cap:sync && cd android && ./gradlew bundleRelease"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.3",
