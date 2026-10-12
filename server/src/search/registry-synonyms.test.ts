@@ -35,12 +35,14 @@ describe("searched keys vs the collection's own fields", () => {
 
   it("compares again once the collection gains fields", async () => {
     const range = { key: "range_km", type: "number" as const, unit: "km", label: "range" };
+    // Count this test's calls only (Vitest 5 clears mocks between tests anyway).
+    proposeKeyMerges.mockClear();
     proposeKeyMerges.mockResolvedValueOnce([]);
     await matchRegistrySynonyms([range], db.listSpecKeys(col), col);
     db.upsertSpecKey(col, { key: "autonomy_km", type: "number", unit: "km", label: "Autonomija", example: "400", origin: "page" });
     proposeKeyMerges.mockResolvedValueOnce([]);
     await matchRegistrySynonyms([range], db.listSpecKeys(col), col);
-    expect(proposeKeyMerges).toHaveBeenCalledTimes(3);
+    expect(proposeKeyMerges).toHaveBeenCalledTimes(2);
   });
 
   it("ignores merges with a unit conversion and keeps going when the LLM fails", async () => {
