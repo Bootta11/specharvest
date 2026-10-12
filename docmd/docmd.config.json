@@ -50,6 +50,10 @@
       "path": "/docs/deployment"
     },
     {
+      "title": "Load testing",
+      "path": "/docs/load-testing"
+    },
+    {
       "title": "Notifications",
       "path": "/docs/notifications"
     },

@@ -33,6 +33,7 @@ scripts/kill.sh         # stop them
 npm test                # unit tests
 npm run typecheck
 npm run test:ci         # same steps as the CI test job (clean install, audit, typecheck, tests)
+npm run loadtest -- run # simulate N users crawling and searching (see docs/load-testing.md)
 ```
 
 Local Chrome instead of a remote browser:
@@ -130,6 +131,7 @@ Browse them as a local site with search: `npm run docs` → http://specharvest-d
 - [Users & access](docs/auth.md) — roles, sharing, sessions, API keys, first admin
 - [LLM providers](docs/llm-providers.md) — your own API keys, supported providers, server key access, cost, credits roadmap
 - [Deployment](docs/deployment.md) — CI → GHCR image, tags, Compose host setup, secrets, backups
+- [Load testing](docs/load-testing.md) — simulate N users crawling and searching, locally or against a deployment
 - [Notifications](docs/notifications.md) — running jobs, browser/Web Push, ntfy, Telegram, Discord/Slack, webhook, Apprise
 - [Android app](docs/mobile-app.md) — build and install the APK, server choice, sign-in, notifications
 - [Google Play](docs/google-play.md) — publish the Android app: developer account, signing, store listing, testing, release

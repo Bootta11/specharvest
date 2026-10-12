@@ -21,7 +21,9 @@
     "seed:admin": "npm run seed:admin --workspace server --",
     "build:extension": "npm run build --workspace extension",
     "zip:extension": "npm run zip --workspace extension",
-    "test:ci": "./scripts/ci.sh"
+    "test:ci": "./scripts/ci.sh",
+    "loadtest": "node scripts/load-test.mjs",
+    "loadtest:server": "./scripts/loadtest-server.sh"
   },
   "engines": {
     "node": ">=24"
