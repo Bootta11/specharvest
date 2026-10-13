@@ -54,9 +54,17 @@ The result is saved on the collection; a re-crawl reuses it and only
 re-detects when it stops matching. A new collection on a host another
 collection (anyone's) already detected tries that structure first and keeps
 it when it yields an item on the live page — no LLM call. A structure verified on
-the site this way also accepts a listing with a single card; fresh detection needs ≥ 2
-to verify a selector, so a one-item listing on a site we don't know yet asks you to add
-that item on its own instead.
+the site this way also accepts a listing with a single card.
+
+Fresh detection needs ≥ 2 cards to verify a selector. On a site we don't know yet, a
+listing with one card still gets crawled: its one item is indexed, but the selector is
+not saved, since one card proves too little to reuse it on the site's other listings
+(a re-crawl detects again, or reuses a structure the site has learned since).
+
+Crawls of the same site that start together (server crawls without a saved structure)
+don't each detect it: the first one detects, and the others wait for it, up to 2 min,
+then reuse its structure. That saves the LLM calls, and lets a one-card listing reuse a
+proper structure.
 
 ## 2. Listing walk
 

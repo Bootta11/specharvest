@@ -136,5 +136,6 @@ to ~5 s per page on shops like IKEA) don't show here.
 - What grows with the slot count is the browser's own work (creating the tab, goto), not SpecHarvest's: the browser
   host is out of CPU. More capacity needs more CPU for the browser (a dedicated or second browser host), not more slots.
 - 1-book categories can fail when every crawl on a site starts at once and none has saved the site's structure yet;
-  see the results above.
+  see the results above. Fixed since: same-site crawls wait for one detection, and a first crawl on a one-card
+  listing crawls its item ([crawling.md](crawling.md#1-listing-detection-once-per-collection)).
 - Cost: $0.17 for the three runs.

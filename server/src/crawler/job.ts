@@ -115,6 +115,35 @@ function logJobTiming(jobId: number) {
 /** Crawls running in this process, so they can be stopped. */
 const running = new Map<number, AbortController>();
 
+/**
+ * Sites whose listing structure a server crawl is detecting right now. A crawl of the same site that starts
+ * meanwhile waits for it and reuses the result, instead of paying for its own detection (or failing on a listing
+ * too small to detect from).
+ */
+const detectingHosts = new Map<string, Promise<void>>();
+const HOST_DETECTION_WAIT_MS = 120_000;
+
+/** Waits (bounded) while another crawl detects `host`; then claims it if `claim`. Returns the claim's release. */
+async function awaitHostDetection(host: string, jobId: number, signal: AbortSignal, claim: boolean): Promise<() => void> {
+  const deadline = Date.now() + HOST_DETECTION_WAIT_MS;
+  for (let pending = detectingHosts.get(host); pending && Date.now() < deadline && !signal.aborted; pending = detectingHosts.get(host)) {
+    patchJob(jobId, { message: `Waiting for another crawl to learn the structure of ${host}` });
+    jobLog(jobId, `Another crawl is detecting the listing structure of ${host} — waiting to reuse it`);
+    let timer: NodeJS.Timeout | undefined;
+    const aborted = new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+    await Promise.race([pending, aborted, new Promise((resolve) => (timer = setTimeout(resolve, deadline - Date.now())))]);
+    clearTimeout(timer);
+  }
+  if (!claim || detectingHosts.has(host)) return () => {};
+  let done!: () => void;
+  const mine = new Promise<void>((r) => (done = r));
+  detectingHosts.set(host, mine);
+  return () => {
+    if (detectingHosts.get(host) === mine) detectingHosts.delete(host);
+    done();
+  };
+}
+
 /** Can't go on right now, but resuming later can: a dead LLM key, the user's browser gone, a bot wall. */
 const pausesJob = (err: unknown) => llmBlocked(err) || err instanceof FatalDriverError || err instanceof BotWallError;
 
@@ -454,8 +483,15 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
   // ---- 1. Listing: detect (or reuse) structure, then walk pages (queuing cards as they're found) ----
   // Assigned in the try below, which rethrows on any failure.
   let walk!: { items: Map<string, string>; complete: boolean; detection: db.CollectionDetection };
+  // Held while this crawl learns the site's listing structure (see detectingHosts).
+  let releaseHost = () => {};
   try {
     throwIfStopped(signal);
+    if (!addItem && !itemsOnly && !target.detection) {
+      // Structures found in the user's browser aren't shared between collections, so only server crawls claim.
+      releaseHost = await awaitHostDetection(target.host, jobId, signal, !inBrowser);
+      throwIfStopped(signal);
+    }
     // Detection and the walk go before item pages other crawls have queued: they produce the first results.
     walk = addItem || itemsOnly ? queueFixed(fixedWalk(target, addItem ? [url] : [...known.keys()])) : await withPage(async (page) => {
       // The user's browser hides crawl pages by default, and hidden pages don't scroll: check once per site.
@@ -487,20 +523,24 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
           }
         }
       }
+      // A selector verified on a single card only is used for this crawl, but not saved.
+      let save = true;
       if (!detection) {
         patchJob(jobId, { message: "Detecting item cards and pagination" });
         const result = await detectListingStructure(page, url, (m) => jobLog(jobId, m));
         detection = result.detection;
-        db.saveDetection(collectionId, detection, inBrowser);
+        save = result.verified;
+        if (save) db.saveDetection(collectionId, detection, inBrowser);
         if (collection.name === collection.host) db.renameCollection(collectionId, collectionName(url, await page.run("pageInfo").then((i) => i.title, () => null)));
       }
 
       // The page itself showed it loads more on scroll; the LLM, reading one snapshot of it, often can't tell.
       if (scroll?.loadsOnScroll && detection.paginationType === "pages" && !detection.nextSelector) {
         detection = { ...detection, paginationType: "infiniteScroll" };
-        db.saveDetection(collectionId, detection, inBrowser);
+        if (save) db.saveDetection(collectionId, detection, inBrowser);
         jobLog(jobId, "Pagination: more items load as you scroll");
       }
+      releaseHost();
 
       patchJob(jobId, { message: "Walking listing pages — indexing items as they're found" });
       hints = hintsFor(detection);
@@ -564,6 +604,7 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
     db.recountSpecKeys(collectionId);
     throw err;
   } finally {
+    releaseHost();
     signal.removeEventListener("abort", onStop);
   }
   // An item already in the collection (e.g. from its listing) that didn't change is still "added by hand" now.
