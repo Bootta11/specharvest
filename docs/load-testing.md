@@ -119,3 +119,22 @@ of a 20-user run. Each run drew different categories, so compare per page rather
   page, user agent, viewport, request interception). goto is ~1.5 s vs ~1 s locally, partly because with request
   interception on, every request makes a round trip to the server.
 - Cost: $0.12 for both runs.
+
+### After the speed changes, 4–6 slots (2026-10-13, evening)
+
+Same 20-user test after the faster page opening, cached request checks, real network idle and tracker blocking were
+deployed. Books.toscrape has no trackers or prefetches and already reached network idle quickly, so those gains (up
+to ~5 s per page on shops like IKEA) don't show here.
+
+| Page slots | Pages | Per page: open + load | of which *new page* | Throughput |
+| --- | --- | --- | --- | --- |
+| 4 | 208 | 1.13 + 4.28 s | 0.93 s | ≈ 44 pages/min |
+| 5 | 152 | 1.55 + 4.39 s | 1.28 s | ≈ 50 pages/min |
+| 6 | 135 | 2.25 + 4.68 s | 1.89 s | ≈ 52 pages/min |
+
+- From 5 to 6 slots, throughput gains only ~3%, while each page gets ~17% slower. The live instance runs 5 slots.
+- What grows with the slot count is the browser's own work (creating the tab, goto), not SpecHarvest's: the browser
+  host is out of CPU. More capacity needs more CPU for the browser (a dedicated or second browser host), not more slots.
+- 1-book categories can fail when every crawl on a site starts at once and none has saved the site's structure yet;
+  see the results above.
+- Cost: $0.17 for the three runs.
