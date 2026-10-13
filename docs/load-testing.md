@@ -95,9 +95,27 @@ specharvest.bootta.dev, sharing one remote Chromium with other apps on a 6 vCPU 
 | 3 | 50 | 48/50 | 598 s | 162 s | 33 s | 141 ms |
 
 - The API was never the limit: no 5xx or 429, and reads stayed under ~250 ms p99 at 50 users.
-- Going from 3 to 4 slots gained nothing. The shared browser is saturated, so pages just load more slowly. The live
-  instance runs with `SCRAPE_MAX_CONCURRENT_PAGES=3`.
+- Going from 3 to 4 slots gained nothing in crawl totals (but see the per-page measurement below). The live
+  instance ran with `SCRAPE_MAX_CONCURRENT_PAGES=3` until then.
 - The 50-user run is a burst: 50 page checks arrive within 30 s, so they queue behind each other even with priority.
 - Before the fix, 1-book categories failed. They now reuse the structure already known for the site. Only the very
   first crawl on an unknown site still needs a listing with ≥ 2 cards.
 - LLM cost was about $0.003 per user and $0.0004 per item. All runs together cost $0.76.
+
+### With per-page timing and shorter waits (2026-10-13)
+
+The server's `Timing` lines (see [Where the time goes](crawling.md#where-the-time-goes)) are averaged over all pages
+of a 20-user run. Each run drew different categories, so compare per page rather than crawl totals.
+
+| Page slots | Crawl p50 | Per page: open + load | goto / idle / scroll / settle | Slot wait avg | Throughput |
+| --- | --- | --- | --- | --- | --- |
+| 3 | 280 s (188 items) | 0.79 + 3.66 s | 1.50 / 0.75 / 0.71 / 0.62 s | 61 s | ≈ 40 pages/min |
+| 4 | 171 s (133 items) | 1.05 + 4.02 s | 1.62 / 0.84 / 0.82 / 0.63 s | 42 s | ≈ 47 pages/min |
+
+- Crawls spend most of their time waiting for a free slot. It's capacity, not slow pages.
+- Each page gets ~14% slower at 4 slots, because the host is shared. Total capacity still grows by ~17%, so the
+  live instance now runs 4 slots.
+- Opening a page takes 0.8–1 s live vs ~0.2 s locally. These are CDP round trips to the remote browser (context,
+  page, user agent, viewport, request interception). goto is ~1.5 s vs ~1 s locally, partly because with request
+  interception on, every request makes a round trip to the server.
+- Cost: $0.12 for both runs.
