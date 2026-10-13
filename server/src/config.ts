@@ -75,6 +75,8 @@ const envSchema = z.object({
   PROXY_PASSWORD: optionalNonEmpty(),
 
   SCRAPE_MAX_CONCURRENT_PAGES: z.coerce.number().int().min(1).default(2),
+  // Abort ad/analytics requests in crawled pages (crawler/trackers.ts): less browser CPU, quicker network idle.
+  SCRAPE_BLOCK_TRACKERS: bool(true),
   MAX_PAGES: z.coerce.number().int().min(1).default(10),
   MAX_ITEMS: z.coerce.number().int().min(1).default(200),
   // Most a non-admin may ask one crawl for (admins: 200 pages / 5000 items).

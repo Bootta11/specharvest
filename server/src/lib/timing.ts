@@ -74,6 +74,11 @@ const PAGE_PHASES: Array<[string, string]> = [
   ["scroll", "scroll"],
   ["settle", "text settle"],
 ];
+const OPEN_PHASES: Array<[string, string]> = [
+  ["context", "context"],
+  ["newPage", "new page"],
+  ["setup", "setup"],
+];
 
 /** The job's timing summary (and forgets it); null when nothing was timed. */
 export function finishJobTiming(jobId: number): string | null {
@@ -86,12 +91,28 @@ export function finishJobTiming(jobId: number): string | null {
   const pages = b("page.work");
   if (pages.count) {
     const wait = b("page.wait");
-    const phases = PAGE_PHASES.map(([k, label]) => [label, b(`page.${k}`).ms] as const)
-      .filter(([, ms]) => ms > 0)
-      .map(([label, ms]) => `${label} ${fmtMs(ms)}`);
+    const list = (items: Array<[string, string]>) =>
+      items
+        .map(([k, label]) => [label, b(k).ms] as const)
+        .filter(([, ms]) => ms > 0)
+        .map(([label, ms]) => `${label} ${fmtMs(ms)}`);
+    const phases = list(PAGE_PHASES.map(([k, label]) => [`page.${k}`, label]));
+    const open = b("page.open");
+    const openPhases = list(OPEN_PHASES.map(([k, label]) => [`page.open.${k}`, label]));
+    const checks = b("page.filter");
+    const blocked = [
+      [b("page.trackers").count, "trackers"],
+      [b("page.prefetches").count, "prefetches"],
+    ]
+      .filter(([n]) => n)
+      .map(([n, what]) => `${n} ${what}`)
+      .join(" + ");
+    const blockedPart = blocked ? `${blocked} blocked` : "";
     parts.push(
       `${pages.count} pages: waited for a free browser page ${fmtMs(wait.ms)} (avg ${fmtMs(wait.ms / pages.count)}), ` +
-        `opening ${fmtMs(b("page.open").ms)}, loading ${fmtMs(pages.ms)} (avg ${fmtMs(pages.ms / pages.count)}${phases.length ? `: ${phases.join(", ")}` : ""})`,
+        `opening ${fmtMs(open.ms)} (avg ${fmtMs(open.ms / pages.count)}${openPhases.length ? `: ${openPhases.join(", ")}` : ""}), ` +
+        `loading ${fmtMs(pages.ms)} (avg ${fmtMs(pages.ms / pages.count)}${phases.length ? `: ${phases.join(", ")}` : ""})` +
+        (checks.count ? `, request checks ${fmtMs(checks.ms)} (${[`${checks.count} requests`, blockedPart].filter(Boolean).join(", ")})` : ""),
     );
   }
 

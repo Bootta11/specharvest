@@ -1,9 +1,11 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 delete process.env.ALLOW_PRIVATE_TARGETS;
-const { assertPublicUrl, BlockedTargetError, guardedFetch, guardedLookup, isPrivateAddress, setResolver } = await import("./net-guard.ts");
+const { assertPublicUrl, BlockedTargetError, cachedIsPublicHost, clearVerdictCache, guardedFetch, guardedLookup, isPrivateAddress, setResolver } = await import(
+  "./net-guard.ts"
+);
 type TargetPolicy = import("./net-guard.ts").TargetPolicy;
 
 const strict: TargetPolicy = { allowPrivate: false, allowHosts: [] };
@@ -58,6 +60,67 @@ describe("assertPublicUrl", () => {
     await expect(assertPublicUrl("http://apprise:8000/notify/", { allowPrivate: false, allowHosts: ["apprise"] })).resolves.toBeInstanceOf(URL);
     await expect(assertPublicUrl("http://10.0.0.5/hook", { allowPrivate: true, allowHosts: [] })).resolves.toBeInstanceOf(URL);
     await expect(assertPublicUrl("https://nowhere.example/", strict)).rejects.toThrow("Can't resolve nowhere.example");
+  });
+});
+
+describe("cachedIsPublicHost", () => {
+  let lookups: string[] = [];
+  const answers: Record<string, string[]> = { "shop.example": ["93.184.216.34"], "intranet.example": ["10.0.0.5"] };
+  const useResolver = () => {
+    lookups = [];
+    clearVerdictCache();
+    setResolver(async (host) => {
+      lookups.push(host);
+      return answers[host] ?? [];
+    });
+  };
+  afterEach(() => {
+    setResolver(null);
+    clearVerdictCache();
+    vi.useRealTimers();
+  });
+
+  it("looks a host up once, and answers later checks without waiting", async () => {
+    useResolver();
+    const first = cachedIsPublicHost("shop.example", strict);
+    expect(first.settled).toBeUndefined();
+    expect(await first.promise).toBe(true);
+    expect(cachedIsPublicHost("shop.example", strict).settled).toBe(true);
+    expect(lookups).toEqual(["shop.example"]);
+  });
+
+  it("shares one lookup between concurrent checks", async () => {
+    useResolver();
+    const results = await Promise.all([1, 2, 3].map(() => cachedIsPublicHost("shop.example", strict).promise));
+    expect(results).toEqual([true, true, true]);
+    expect(lookups).toEqual(["shop.example"]);
+  });
+
+  it("keeps private and unresolvable hosts blocked", async () => {
+    useResolver();
+    expect(await cachedIsPublicHost("intranet.example", strict).promise).toBe(false);
+    expect(cachedIsPublicHost("intranet.example", strict).settled).toBe(false);
+    expect(await cachedIsPublicHost("nowhere.example", strict).promise).toBe(false);
+    expect(await cachedIsPublicHost("127.0.0.1", strict).promise).toBe(false);
+  });
+
+  it("forgets public verdicts after 5 minutes and blocked ones after 30 s", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    useResolver();
+    await cachedIsPublicHost("shop.example", strict).promise;
+    await cachedIsPublicHost("intranet.example", strict).promise;
+    vi.advanceTimersByTime(31_000);
+    expect(cachedIsPublicHost("shop.example", strict).settled).toBe(true);
+    expect(cachedIsPublicHost("intranet.example", strict).settled).toBeUndefined();
+    vi.advanceTimersByTime(5 * 60_000);
+    expect(cachedIsPublicHost("shop.example", strict).settled).toBeUndefined();
+    expect(lookups).toEqual(["shop.example", "intranet.example", "intranet.example", "shop.example"]);
+  });
+
+  it("keeps verdicts per policy", async () => {
+    useResolver();
+    expect(await cachedIsPublicHost("intranet.example", strict).promise).toBe(false);
+    expect(await cachedIsPublicHost("intranet.example", { allowPrivate: false, allowHosts: ["intranet.example"] }).promise).toBe(true);
   });
 });
 

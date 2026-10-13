@@ -2,10 +2,12 @@ import puppeteer, { type Browser, type BrowserContext, type HTTPRequest, type HT
 import { NAME_SHIM, PAGE_SCRIPTS, type PageScriptArgs, type PageScriptName, type PageScriptResult } from "@specharvest/shared/page-scripts";
 import { env } from "../config.ts";
 import { createLogger } from "../lib/logger.ts";
-import { assertPublicUrl, isPublicHost, strictPolicy, type TargetPolicy } from "../lib/net-guard.ts";
+import { assertPublicUrl, cachedIsPublicHost, strictPolicy, type TargetPolicy } from "../lib/net-guard.ts";
 import { withExtensionPage, type WaitOptions } from "../extension/driver.ts";
 import { FatalDriverError, type PageDriver, type Runner } from "./driver.ts";
 import { createSlotPool, type SlotPriority } from "./slots.ts";
+import { InFlightRequests } from "./network-idle.ts";
+import { isTracker } from "./trackers.ts";
 import { addTiming, fmtMs, notePagePhase, notePageUrl, takePagePhases } from "../lib/timing.ts";
 
 const log = createLogger("browser");
@@ -86,20 +88,27 @@ export interface PageOptions {
   blockHeavyResources?: boolean;
 }
 
-async function openPage(browser: Browser, opts: PageOptions): Promise<{ page: Page; context: BrowserContext | null }> {
+/** `lap` marks the end of creating the context (and connecting) and of opening the page, for the page's timing. */
+async function openPage(browser: Browser, opts: PageOptions, lap: (phase: string) => void): Promise<{ page: Page; context: BrowserContext | null }> {
   if (opts.useProxy) {
     if (!env.PROXY_SERVER) throw new Error("Proxy requested but PROXY_SERVER is not configured");
     if ((env.PROXY_USERNAME == null) !== (env.PROXY_PASSWORD == null)) {
       throw new Error("PROXY_USERNAME and PROXY_PASSWORD must both be set, or both blank");
     }
     const context = await browser.createBrowserContext({ proxyServer: env.PROXY_SERVER });
+    lap("context");
     const page = await context.newPage();
+    // Authentication turns on request handling itself, so it runs before the rest of the setup.
     if (env.PROXY_USERNAME) await page.authenticate({ username: env.PROXY_USERNAME, password: env.PROXY_PASSWORD! });
+    lap("newPage");
     return { page, context };
   }
   // A fresh incognito context per page keeps cookies/state isolated between jobs on a shared remote browser.
   const context = await browser.createBrowserContext();
-  return { page: await context.newPage(), context };
+  lap("context");
+  const page = await context.newPage();
+  lap("newPage");
+  return { page, context };
 }
 
 const HEAVY_RESOURCES = new Set(["image", "media", "font"]);
@@ -109,38 +118,72 @@ const LOCAL_SCHEMES = new Set(["data:", "blob:", "about:"]);
 /**
  * Every request the page makes (navigations, redirects, subresources, XHR): http(s) to a public host only —
  * a crawled page must not get the browser to read the server's network (its text is stored and shown).
- * Hosts are resolved once per page. Chrome resolves names itself, so this can't catch DNS rebinding;
- * network-level isolation of the browser is the full fix (docs/deployment.md).
+ * Ad/analytics hosts (SCRAPE_BLOCK_TRACKERS, crawler/trackers.ts) and the site's link prefetches are aborted: the
+ * crawl needs neither, and they keep the network busy. Host verdicts are shared across pages for a few minutes
+ * (cachedIsPublicHost), so a known host is answered at once. Chrome resolves names itself, so this can't catch DNS
+ * rebinding; network-level isolation of the browser is the full fix (docs/deployment.md).
  */
-function requestFilter(policy: TargetPolicy, blockHeavy: boolean) {
-  const hosts = new Map<string, Promise<boolean>>();
-  const allowed = async (req: HTTPRequest): Promise<boolean> => {
-    if (blockHeavy && HEAVY_RESOURCES.has(req.resourceType())) return false;
+function requestFilter(policy: TargetPolicy, opts: { blockHeavy: boolean; blockTrackers: boolean }) {
+  const stats = { requests: 0, ms: 0, trackers: 0, prefetches: 0 };
+  /** The verdict now when it's known without waiting, else a promise of it. */
+  const allowed = (req: HTTPRequest, url: URL): boolean | Promise<boolean> => {
+    if (opts.blockHeavy && HEAVY_RESOURCES.has(req.resourceType())) return false;
+    if (LOCAL_SCHEMES.has(url.protocol)) return true;
+    if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+    if (policy.allowPrivate) return true;
+    const verdict = cachedIsPublicHost(url.hostname, policy);
+    return verdict.settled ?? verdict.promise;
+  };
+  /** Ad/analytics request — never the page's own navigation (crawling a tracker's site still works). */
+  const ownNavigation = (req: HTTPRequest) => req.isNavigationRequest() && req.frame()?.parentFrame() == null;
+  const tracker = (req: HTTPRequest, url: URL) => opts.blockTrackers && isTracker(url) && !ownNavigation(req);
+  /** Links the site preloads for a visitor's next click (Sec-Purpose: prefetch); a crawl never follows them. */
+  const prefetch = (req: HTTPRequest) => /^prefetch/i.test(req.headers()["sec-purpose"] ?? req.headers()["purpose"] ?? "") && !ownNavigation(req);
+  const handle = (req: HTTPRequest) => {
+    const t0 = performance.now();
+    const answer = (ok: boolean, reason: "failed" | "accessdenied" | "blockedbyclient") => {
+      stats.requests++;
+      stats.ms += performance.now() - t0;
+      void (ok ? req.continue() : req.abort(reason)).catch(() => {});
+    };
+    const deny = () => (opts.blockHeavy && HEAVY_RESOURCES.has(req.resourceType()) ? "failed" : "accessdenied");
     let url: URL;
     try {
       url = new URL(req.url());
     } catch {
-      return false;
+      return answer(false, "accessdenied");
     }
-    if (LOCAL_SCHEMES.has(url.protocol)) return true;
-    if (url.protocol !== "http:" && url.protocol !== "https:") return false;
-    if (policy.allowPrivate) return true;
-    let ok = hosts.get(url.hostname);
-    if (!ok) hosts.set(url.hostname, (ok = isPublicHost(url.hostname, policy)));
-    return ok;
+    if (tracker(req, url)) {
+      stats.trackers++;
+      return answer(false, "blockedbyclient");
+    }
+    if (prefetch(req)) {
+      stats.prefetches++;
+      return answer(false, "blockedbyclient");
+    }
+    let verdict: boolean | Promise<boolean>;
+    try {
+      verdict = allowed(req, url);
+    } catch {
+      verdict = false;
+    }
+    if (typeof verdict === "boolean") answer(verdict, deny());
+    else
+      void verdict
+        .catch(() => false)
+        .then((ok) => answer(ok, deny()));
   };
-  return (req: HTTPRequest) => {
-    void allowed(req)
-      .catch(() => false)
-      .then((ok) => (ok ? req.continue() : req.abort(blockHeavy && HEAVY_RESOURCES.has(req.resourceType()) ? "failed" : "accessdenied")))
-      .catch(() => {});
-  };
+  return { handle, stats };
 }
 
 /** Today's runner: a tab in the server's puppeteer Chrome. */
 export class PuppeteerDriver implements PageDriver {
   readonly runner = "server" as const;
-  constructor(readonly page: Page) {}
+  /** `requests`: the page's requests from the browser's Network events (trackRequests); without it, puppeteer's count. */
+  constructor(
+    readonly page: Page,
+    private readonly requests: InFlightRequests | null = null,
+  ) {}
 
   async goto(url: string, opts: { timeoutMs: number }) {
     const response: HTTPResponse | null = await this.page.goto(url, { waitUntil: "load", timeout: opts.timeoutMs });
@@ -158,8 +201,27 @@ export class PuppeteerDriver implements PageDriver {
   }
 
   async waitForNetworkIdle(opts: { idleMs: number; timeoutMs: number }) {
-    await this.page.waitForNetworkIdle({ idleTime: opts.idleMs, timeout: opts.timeoutMs }).catch(() => {});
+    if (this.requests) await this.requests.waitForIdle({ ...opts, longMs: LONG_REQUEST_MS });
+    else await this.page.waitForNetworkIdle({ idleTime: opts.idleMs, timeout: opts.timeoutMs }).catch(() => {});
   }
+}
+
+/** A request open this long no longer keeps the page "busy" (beacons, long polls, streams). */
+const LONG_REQUEST_MS = 2_000;
+
+/**
+ * Follows the page's requests on a CDP session of its own, so request interception can't hide finished ones
+ * (see network-idle.ts). Cross-site iframes are separate targets and not counted, as with puppeteer's own count.
+ */
+async function trackRequests(page: Page): Promise<InFlightRequests> {
+  const requests = new InFlightRequests();
+  const cdp = await page.createCDPSession();
+  cdp.on("Network.requestWillBeSent", (e) => requests.started(e.requestId));
+  cdp.on("Network.loadingFinished", (e) => requests.finished(e.requestId));
+  cdp.on("Network.loadingFailed", (e) => requests.finished(e.requestId));
+  cdp.on("Network.requestServedFromCache", (e) => requests.finished(e.requestId));
+  await cdp.send("Network.enable");
+  return requests;
 }
 
 export interface WithPageOptions extends PageOptions, WaitOptions {
@@ -181,58 +243,109 @@ export async function withPage<T>(fn: (page: PageDriver) => Promise<T>, opts: Wi
   const t0 = performance.now();
   await slots.acquire(opts.priority);
   const waited = performance.now() - t0;
-  let opened = 0;
-  let worked = 0;
+  // The slot goes to the next page as soon as this one's work is done; closing the tab doesn't need it.
+  let released = false;
+  const release = () => {
+    if (!released) slots.release();
+    released = true;
+  };
+  const timing: PageTiming = { priority: opts.priority ?? "detail", queuedBehind, waited, opened: 0, openPhases: {}, worked: 0, closed: 0, filter: null };
   let driver: PuppeteerDriver | null = null;
   try {
+    let t = performance.now();
+    const lap = (phase: string) => {
+      const now = performance.now();
+      timing.openPhases[phase] = now - t;
+      t = now;
+    };
     const browser = await connect();
-    const { page, context } = await openPage(browser, opts);
+    const { page, context } = await openPage(browser, opts, lap);
     try {
-      // tsx/esbuild (keepNames) wraps named functions inside page.evaluate callbacks
-      // in __name(...), which doesn't exist in the page — define a no-op.
-      await page.evaluateOnNewDocument(NAME_SHIM);
-      await page.setUserAgent(DESKTOP_USER_AGENT);
-      await page.setViewport(DESKTOP_VIEWPORT);
-      await page.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9,bs;q=0.8" });
+      // The setup calls don't depend on each other: send them together instead of waiting for each answer
+      // (on a busy remote browser every answer is slow). All of them are done before the page navigates.
+      const setup: Array<Promise<unknown>> = [
+        // tsx/esbuild (keepNames) wraps named functions inside page.evaluate callbacks
+        // in __name(...), which doesn't exist in the page — define a no-op.
+        page.evaluateOnNewDocument(NAME_SHIM),
+        page.setUserAgent(DESKTOP_USER_AGENT),
+        page.setViewport(DESKTOP_VIEWPORT),
+        page.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9,bs;q=0.8" }),
+      ];
+      let requests: InFlightRequests | null = null;
+      setup.push(
+        trackRequests(page).then(
+          (r) => (requests = r),
+          (err) => log.debug("Request tracking unavailable, using puppeteer's network idle", String(err)),
+        ),
+      );
       const policy = strictPolicy();
-      if (!policy.allowPrivate || opts.blockHeavyResources) {
+      if (!policy.allowPrivate || opts.blockHeavyResources || env.SCRAPE_BLOCK_TRACKERS) {
+        const filter = requestFilter(policy, { blockHeavy: !!opts.blockHeavyResources, blockTrackers: env.SCRAPE_BLOCK_TRACKERS });
+        timing.filter = filter.stats;
+        page.on("request", filter.handle);
         // A service worker's own requests aren't intercepted — make the page go to the network instead.
-        await page.setBypassServiceWorker(true);
-        await page.setRequestInterception(true);
-        page.on("request", requestFilter(policy, !!opts.blockHeavyResources));
+        setup.push(page.setBypassServiceWorker(true), page.setRequestInterception(true));
       }
-      opened = performance.now() - t0 - waited;
-      driver = new PuppeteerDriver(page);
+      await Promise.all(setup);
+      lap("setup");
+      timing.opened = performance.now() - t0 - waited;
+      driver = new PuppeteerDriver(page, requests);
       const t1 = performance.now();
       try {
         return await fn(driver);
       } finally {
-        worked = performance.now() - t1;
+        timing.worked = performance.now() - t1;
+        release();
       }
     } finally {
+      const t2 = performance.now();
       if (context) await context.close().catch(() => {});
       else await page.close().catch(() => {});
+      timing.closed = performance.now() - t2;
     }
   } finally {
-    slots.release();
-    logPage(driver, opts.priority ?? "detail", queuedBehind, waited, opened, worked, performance.now() - t0);
+    release();
+    if (!timing.opened) timing.opened = performance.now() - t0 - waited - timing.closed;
+    logPage(driver, timing);
   }
 }
 
+interface PageTiming {
+  priority: string;
+  queuedBehind: number;
+  waited: number;
+  opened: number;
+  /** context (incl. connecting), newPage, setup */
+  openPhases: Record<string, number>;
+  worked: number;
+  closed: number;
+  /** Requests the filter answered (trackers: aborted as ad/analytics) and the time they waited; null when nothing is intercepted. */
+  filter: { requests: number; ms: number; trackers: number; prefetches: number } | null;
+}
+
 /** One line per page (DEBUG=1, or always when slow) and the page's share of its job's timing summary. */
-function logPage(driver: PuppeteerDriver | null, priority: string, queuedBehind: number, waited: number, opened: number, worked: number, total: number) {
+function logPage(driver: PuppeteerDriver | null, t: PageTiming) {
   const { url, phases } = driver ? takePagePhases(driver) : { url: null, phases: {} };
-  addTiming("page.wait", waited);
-  addTiming("page.open", opened);
-  if (driver) addTiming("page.work", worked);
-  const closed = total - waited - opened - worked;
-  const detail = Object.entries(phases)
-    .map(([k, ms]) => `${k} ${fmtMs(ms)}`)
-    .join(", ");
+  addTiming("page.wait", t.waited);
+  addTiming("page.open", t.opened);
+  for (const [phase, ms] of Object.entries(t.openPhases)) addTiming(`page.open.${phase}`, ms);
+  if (t.filter) {
+    addTiming("page.filter", t.filter.ms, t.filter.requests);
+    if (t.filter.trackers) addTiming("page.trackers", 0, t.filter.trackers);
+    if (t.filter.prefetches) addTiming("page.prefetches", 0, t.filter.prefetches);
+  }
+  if (driver) addTiming("page.work", t.worked);
+  const list = (o: Record<string, number>) =>
+    Object.entries(o)
+      .map(([k, ms]) => `${k} ${fmtMs(ms)}`)
+      .join(", ");
+  const openDetail = list(t.openPhases);
+  const workDetail = [list(phases), t.filter ? `${t.filter.requests} requests checked in ${fmtMs(t.filter.ms)}, ${t.filter.trackers} trackers + ${t.filter.prefetches} prefetches blocked` : ""].filter(Boolean).join(", ");
   const line =
-    `page ${url ?? "(no navigation)"} [${priority}]: ${fmtMs(total)} — waited ${fmtMs(waited)} for a slot (${queuedBehind} queued ahead, ` +
-    `${slots.active}/${env.SCRAPE_MAX_CONCURRENT_PAGES} busy now), open ${fmtMs(opened)}, work ${fmtMs(worked)}${detail ? ` (${detail})` : ""}, close ${fmtMs(closed)}`;
-  if (worked + opened >= SLOW_PAGE_MS) log.info(`slow ${line}`);
+    `page ${url ?? "(no navigation)"} [${t.priority}]: ${fmtMs(t.waited + t.opened + t.worked + t.closed)} — waited ${fmtMs(t.waited)} for a slot ` +
+    `(${t.queuedBehind} queued ahead, ${slots.active}/${env.SCRAPE_MAX_CONCURRENT_PAGES} busy now), open ${fmtMs(t.opened)}${openDetail ? ` (${openDetail})` : ""}, ` +
+    `work ${fmtMs(t.worked)}${workDetail ? ` (${workDetail})` : ""}, close ${fmtMs(t.closed)}`;
+  if (t.worked + t.opened >= SLOW_PAGE_MS) log.info(`slow ${line}`);
   else log.debug(line);
 }
 

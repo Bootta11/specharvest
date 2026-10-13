@@ -165,6 +165,44 @@ export function isPublicHost(host: string, policy: TargetPolicy): Promise<boolea
   );
 }
 
+/** How long the browser filter trusts a verdict: like a short DNS TTL; a refusal (or failed lookup) is retried sooner. */
+const VERDICT_TTL_MS = { public: 5 * 60_000, blocked: 30_000 };
+const VERDICT_CACHE_MAX = 5_000;
+
+interface Verdict {
+  promise: Promise<boolean>;
+  /** Set once the lookup settled, so a hit can answer without waiting. */
+  value?: boolean;
+  expiresAt: number;
+}
+const verdicts = new Map<string, Verdict>();
+
+/**
+ * isPublicHost shared across pages: a crawl's site and its third-party hosts are looked up once, not on every
+ * page, and concurrent pages asking for the same host share one lookup. `settled` is the cached answer when there
+ * is one, so the browser's request filter can continue a request at once.
+ */
+export function cachedIsPublicHost(host: string, policy: TargetPolicy): { settled?: boolean; promise: Promise<boolean> } {
+  const key = `${policyKey(policy)}|${host}`;
+  const now = Date.now();
+  const hit = verdicts.get(key);
+  if (hit && hit.expiresAt > now) return { settled: hit.value, promise: hit.promise };
+  verdicts.delete(key);
+  if (verdicts.size >= VERDICT_CACHE_MAX) verdicts.delete(verdicts.keys().next().value!);
+  const entry: Verdict = { promise: isPublicHost(host, policy), expiresAt: Infinity };
+  entry.promise.then((ok) => {
+    entry.value = ok;
+    entry.expiresAt = Date.now() + (ok ? VERDICT_TTL_MS.public : VERDICT_TTL_MS.blocked);
+  });
+  verdicts.set(key, entry);
+  return { promise: entry.promise };
+}
+
+/** Test hook: forget cached verdicts. */
+export function clearVerdictCache() {
+  verdicts.clear();
+}
+
 // ---------- Guarded connections ----------
 
 /**

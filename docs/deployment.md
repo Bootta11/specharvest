@@ -128,6 +128,11 @@ and some CPU, and a remote browser (`PUPPETEER_WS_ENDPOINT`) may be shared with 
 it step by step and measure each step with the [load test](load-testing.md). Stop when crawl
 times stop improving or the browser host runs short of memory.
 
+Crawled pages don't load ad and analytics requests (Google Ads/Tag Manager, ad exchanges, social pixels, session
+recorders; the list is in `server/src/crawler/trackers.ts`) or the links a site prefetches for a visitor's next click.
+This saves browser CPU and gets pages quiet sooner. Set `SCRAPE_BLOCK_TRACKERS=false` if a site you crawl needs one
+of those scripts to show its content. Prefetches are always skipped.
+
 ## Security settings
 
 | Variable | Default | Purpose |
@@ -143,7 +148,9 @@ The daily limit on the server's LLM key is set in the app (*Users & sign-up*).
 
 **Outbound requests.** The app refuses to crawl loopback, private, link-local
 (cloud metadata) and other non-public addresses. That covers the start URL and
-every request the crawled pages make, including redirects. Notification
+every request the crawled pages make, including redirects. The browser's
+check keeps each host's answer for up to 5 minutes (30 s for a refused one),
+so pages don't look the same hosts up again. Notification
 webhooks from non-admins get the same check at connect time, so DNS tricks
 don't get around it, and redirects aren't followed. Chrome resolves names
 itself, though, so a hostile site could still try DNS rebinding against the
