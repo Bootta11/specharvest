@@ -117,6 +117,7 @@ variable with comments. The essentials:
 | `SESSION_COOKIE_SECURE` | Session cookie `Secure` flag (default: on when `PUBLIC_URL` is https) |
 | `TRUST_PROXY` | Which proxies may set the client IP (default: loopback and private networks) — see [security settings](docs/deployment.md#security-settings) |
 | `EXTENSION_STORE_URL` | Chrome Web Store page of the [browser extension](docs/extension.md), linked from the crawl form |
+| `DEBUG` | `1` logs every page load and LLM call with timings ([where the time goes](docs/crawling.md#where-the-time-goes)) |
 | `ALLOW_PRIVATE_TARGETS` | Let crawls reach private/LAN addresses (default off); also `OUTBOUND_ALLOWED_HOSTS`, `MAX_*_CAP`, `MAX_ACTIVE_JOBS_PER_USER` |
 
 ## Docs

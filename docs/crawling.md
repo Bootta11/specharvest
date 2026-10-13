@@ -185,6 +185,30 @@ If more than half of a collection would be marked gone at once, the job
 assumes a glitch and marks nothing. An item that reappears is un-gone
 automatically.
 
+## Where the time goes
+
+Every crawl ends with a `Timing` line in its job log (and the server log). It is written before the final status, so
+the UI and the [load test](load-testing.md) see it:
+
+```
+Timing (summed over parallel work): 37s total · 7 pages: waited for a free browser page 13s (avg 1.9s),
+opening 1.2s, loading 33s (avg 4.8s: goto 8.0s, network idle 10s, scroll 8.2s, text settle 6.1s) ·
+LLM 9 calls 11s (detect 1× 749ms, extract 6× 6.7s, …) · embedding 6× 53ms · key merging 1.0s
+```
+
+How to read it (from `lib/timing.ts`; the parts are summed over pages that ran in parallel):
+
+- **waited for a free browser page**: the shared page slots were full, so there are too few slots for the load
+  (`SCRAPE_MAX_CONCURRENT_PAGES`).
+- **loading**: time with a page open. *goto* is the site and the browser rendering. *network idle*, *scroll* and
+  *text settle* are the crawler's own waits (≈ 2.5 s per page even on a static site). If the average climbs when
+  slots are raised, the browser host is out of CPU.
+- **LLM**: time per purpose. Slow calls point at the provider or model.
+
+With `DEBUG=1` the server also logs one line per page (URL, priority, slot wait, pages queued ahead, busy slots,
+each phase) and per LLM call (purpose, model, duration, tokens). Pages that take ≥ 20 s and LLM calls ≥ 20 s are
+logged without `DEBUG`. While pages wait for a slot, `page slots: n/N busy, m pages waiting` is logged every 30 s.
+
 ## Stop & resume
 
 *Stop* (`POST /api/jobs/:id/stop`) drops queued item pages and ends the listing

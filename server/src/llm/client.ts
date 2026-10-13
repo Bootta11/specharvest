@@ -3,6 +3,7 @@ import type { LlmPurpose } from "@specharvest/shared";
 import type { z } from "zod";
 import { env } from "../config.ts";
 import { createLogger, errorMessage } from "../lib/logger.ts";
+import { addTiming, fmtMs } from "../lib/timing.ts";
 import { markKeyWorking, setKeyError } from "./keys.ts";
 import { estimateCost } from "./pricing.ts";
 import { LlmUnavailableError, resolveModel, SETTINGS_PATH, type ResolvedModel } from "./resolve.ts";
@@ -242,7 +243,12 @@ function record(purpose: LlmPurpose, r: ResolvedModel, result: AnyResult, webSea
 // ---------- The call ----------
 
 /** One completion through the resolved provider. Credential failures become LlmCredentialError (and are noted on the key). */
+/** A call that took this long is logged even without DEBUG. */
+const SLOW_CALL_MS = 20_000;
+
 async function complete(r: ResolvedModel, system: string, prompt: string, options: AskOptions): Promise<AnyResult> {
+  const t0 = performance.now();
+  let tokens = "";
   try {
     const result = (await generateText({
       model: options.jsonMode && r.jsonMode ? wrapLanguageModel({ model: r.model, middleware: jsonModeMiddleware }) : r.model,
@@ -256,6 +262,7 @@ async function complete(r: ResolvedModel, system: string, prompt: string, option
       ...(r.providerOptions ? { providerOptions: r.providerOptions } : {}),
     })) as unknown as AnyResult;
     if (r.keyOwner !== null) markKeyWorking(r.keyOwner, r.provider.id);
+    tokens = `, ${result.usage?.inputTokens ?? "?"} in / ${result.usage?.outputTokens ?? "?"} out`;
     return result;
   } catch (err) {
     const { kind, detail } = classifyLlmError(err);
@@ -264,7 +271,14 @@ async function complete(r: ResolvedModel, system: string, prompt: string, option
       throw new LlmCredentialError(credentialMessage(kind, r), r.funding);
     }
     if (kind === "model" && r.keyOwner !== null) setKeyError(r.keyOwner, r.provider.id, `Model ${r.modelId}: ${detail}`);
+    tokens = ", failed";
     throw err;
+  } finally {
+    const ms = performance.now() - t0;
+    addTiming(`llm.${options.purpose}`, ms);
+    const line = `${options.purpose} on ${r.provider.id}/${r.modelId}: ${fmtMs(ms)}${tokens}`;
+    if (ms >= SLOW_CALL_MS) log.info(`slow call ${line}`);
+    else log.debug(line);
   }
 }
 

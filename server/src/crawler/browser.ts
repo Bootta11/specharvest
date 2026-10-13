@@ -6,6 +6,7 @@ import { assertPublicUrl, isPublicHost, strictPolicy, type TargetPolicy } from "
 import { withExtensionPage, type WaitOptions } from "../extension/driver.ts";
 import { FatalDriverError, type PageDriver, type Runner } from "./driver.ts";
 import { createSlotPool, type SlotPriority } from "./slots.ts";
+import { addTiming, fmtMs, notePagePhase, notePageUrl, takePagePhases } from "../lib/timing.ts";
 
 const log = createLogger("browser");
 
@@ -67,6 +68,11 @@ export function connect(): Promise<Browser> {
 
 // Every crawl and page check shares SCRAPE_MAX_CONCURRENT_PAGES pages; see slots.ts for who goes first.
 const slots = createSlotPool(() => env.SCRAPE_MAX_CONCURRENT_PAGES);
+
+// While pages queue for a slot, say so every 30 s: a growing backlog means too few slots (or a slow browser).
+setInterval(() => {
+  if (slots.waiting > 0) log.info(`page slots: ${slots.active}/${env.SCRAPE_MAX_CONCURRENT_PAGES} busy, ${slots.waiting} pages waiting`);
+}, 30_000).unref();
 
 export const proxyConfigured = () => !!env.PROXY_SERVER;
 
@@ -165,10 +171,19 @@ export interface WithPageOptions extends PageOptions, WaitOptions {
   priority?: SlotPriority;
 }
 
+/** A page whose load took this long is logged even without DEBUG. */
+const SLOW_PAGE_MS = 20_000;
+
 export async function withPage<T>(fn: (page: PageDriver) => Promise<T>, opts: WithPageOptions = {}): Promise<T> {
   // The user's Chrome has its own tab limit (set in the extension) and needs no server browser slot.
   if (opts.runner === "browser") return withExtensionPage(opts.userId ?? null, fn, opts);
+  const queuedBehind = slots.waiting;
+  const t0 = performance.now();
   await slots.acquire(opts.priority);
+  const waited = performance.now() - t0;
+  let opened = 0;
+  let worked = 0;
+  let driver: PuppeteerDriver | null = null;
   try {
     const browser = await connect();
     const { page, context } = await openPage(browser, opts);
@@ -186,14 +201,39 @@ export async function withPage<T>(fn: (page: PageDriver) => Promise<T>, opts: Wi
         await page.setRequestInterception(true);
         page.on("request", requestFilter(policy, !!opts.blockHeavyResources));
       }
-      return await fn(new PuppeteerDriver(page));
+      opened = performance.now() - t0 - waited;
+      driver = new PuppeteerDriver(page);
+      const t1 = performance.now();
+      try {
+        return await fn(driver);
+      } finally {
+        worked = performance.now() - t1;
+      }
     } finally {
       if (context) await context.close().catch(() => {});
       else await page.close().catch(() => {});
     }
   } finally {
     slots.release();
+    logPage(driver, opts.priority ?? "detail", queuedBehind, waited, opened, worked, performance.now() - t0);
   }
+}
+
+/** One line per page (DEBUG=1, or always when slow) and the page's share of its job's timing summary. */
+function logPage(driver: PuppeteerDriver | null, priority: string, queuedBehind: number, waited: number, opened: number, worked: number, total: number) {
+  const { url, phases } = driver ? takePagePhases(driver) : { url: null, phases: {} };
+  addTiming("page.wait", waited);
+  addTiming("page.open", opened);
+  if (driver) addTiming("page.work", worked);
+  const closed = total - waited - opened - worked;
+  const detail = Object.entries(phases)
+    .map(([k, ms]) => `${k} ${fmtMs(ms)}`)
+    .join(", ");
+  const line =
+    `page ${url ?? "(no navigation)"} [${priority}]: ${fmtMs(total)} — waited ${fmtMs(waited)} for a slot (${queuedBehind} queued ahead, ` +
+    `${slots.active}/${env.SCRAPE_MAX_CONCURRENT_PAGES} busy now), open ${fmtMs(opened)}, work ${fmtMs(worked)}${detail ? ` (${detail})` : ""}, close ${fmtMs(closed)}`;
+  if (worked + opened >= SLOW_PAGE_MS) log.info(`slow ${line}`);
+  else log.debug(line);
 }
 
 // ---------- Navigation (works on any PageDriver) ----------
@@ -227,14 +267,24 @@ export async function gotoAndSettle(page: PageDriver, url: string, opts: { scrol
   let lastError: unknown;
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
+      notePageUrl(page, url);
+      let t = performance.now();
+      const lap = (phase: string) => {
+        const now = performance.now();
+        notePagePhase(page, phase, now - t);
+        t = now;
+      };
       const { status } = await page.goto(url, { timeoutMs: NAVIGATION_TIMEOUT_MS });
+      lap("goto");
       await page.waitForNetworkIdle({ idleMs: 700, timeoutMs: 8_000 });
+      lap("idle");
       if (await page.run("isBotChallenge").catch(() => false)) {
         throw new BotWallError(`Bot protection challenge on ${new URL(url).host} — ${page.runner === "server" ? "try running it in your browser, or the proxy" : "open the site in Chrome once and solve the check"}`);
       }
       if (status != null && status >= 400) throw new BlockedPageError(`HTTP ${status} from ${url}`);
       if (opts.scroll !== false) await scrollFullPage(page);
       await page.run("flattenShadowDom").catch(() => {});
+      lap("scroll");
       return status;
     } catch (err) {
       lastError = err;
@@ -251,6 +301,15 @@ export async function gotoAndSettle(page: PageDriver, url: string, opts: { scrol
  * still for two polls in a row, or after `timeoutMs`.
  */
 export async function waitForStableText(page: PageDriver, timeoutMs = 6_000, intervalMs = 500): Promise<void> {
+  const t0 = performance.now();
+  try {
+    await pollStableText(page, timeoutMs, intervalMs);
+  } finally {
+    notePagePhase(page, "settle", performance.now() - t0);
+  }
+}
+
+async function pollStableText(page: PageDriver, timeoutMs: number, intervalMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let last = -1;
   let steady = 0;

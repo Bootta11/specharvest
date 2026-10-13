@@ -316,6 +316,7 @@ async function followJob(auth, jobId, acceptedAt, timeoutMs) {
               out.items++;
               out.firstItemMs ??= performance.now() - acceptedAt;
             } else if (ev.type === "queue") out.maxQueue = Math.max(out.maxQueue, ev.size + ev.pending);
+            else if (ev.type === "log" && ev.message.startsWith("Timing")) out.timing = ev.message;
             else if (ev.type === "log" && ev.level !== "info") out.warnings++;
             else if (ev.type === "job") {
               out.job = ev.job;
@@ -402,6 +403,7 @@ async function virtualUser(n, user, category, o) {
     result.maxQueue = followed.maxQueue;
     result.warnings = followed.warnings;
     result.reconnects = followed.reconnects;
+    result.timing = followed.timing ?? null;
     if (job?.error) result.errors.push(`job: ${job.error}`);
     else if (job && job.status !== "done" && job.message) result.errors.push(`job ${job.status}: ${job.message}`);
     result.collectionId ??= job?.collectionId ?? null;
@@ -466,6 +468,12 @@ function summarize(stage) {
       : `LLM spend: ${usd(c.llmCost)} (crawls only; set admin credentials to include page checks and searches)`,
   );
   if (stage.server) lines.push(`Server process: peak RSS ${stage.server.peakRssMb} MB, CPU avg ${stage.server.avgCpu}% / peak ${stage.server.peakCpu}%`);
+  // The server's own breakdown (lib/timing.ts) of the fastest, median and slowest finished crawl.
+  const timed = stage.results.filter((r) => r.timing && r.status === "done").sort((a, b) => a.totalMs - b.totalMs);
+  if (timed.length) {
+    lines.push("Where crawl time went (server timing: fastest / median / slowest):");
+    for (const r of [...new Set([timed[0], timed[Math.floor(timed.length / 2)], timed.at(-1)])]) lines.push(`  ${r.category}: ${r.timing.replace(/^Timing \(summed over parallel work\): /, "")}`);
+  }
   const errs = stage.results.filter((r) => r.errors.length);
   if (errs.length) {
     lines.push(`Users with errors (${errs.length}):`);

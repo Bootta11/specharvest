@@ -4,6 +4,7 @@ import { env } from "../config.ts";
 import * as db from "../db/sqlite.ts";
 import { upsertVector } from "../db/lance.ts";
 import { embed } from "../embedding.ts";
+import { finishJobTiming, startJobTiming, timed } from "../lib/timing.ts";
 import { coerceToType, extractItem, type Extraction } from "../llm/extract.ts";
 import { llmBlocked } from "../llm/client.ts";
 import { proposeKeyMerges } from "../llm/consolidate.ts";
@@ -105,6 +106,12 @@ function throwIfStopped(signal: AbortSignal) {
   if (signal.aborted) throw new StopError();
 }
 
+/** Where the crawl's time went (lib/timing.ts) — logged before its final status, while clients still listen. */
+function logJobTiming(jobId: number) {
+  const timing = finishJobTiming(jobId);
+  if (timing) jobLog(jobId, timing);
+}
+
 /** Crawls running in this process, so they can be stopped. */
 const running = new Map<number, AbortController>();
 
@@ -120,8 +127,10 @@ function launch(jobId: number, collectionId: number, req: CrawlRequest, resumeSi
   running.set(jobId, controller);
   const url = new URL(req.url).toString();
   const userId = db.getJob(jobId)?.userId ?? null;
+  startJobTiming(jobId);
   withLlmContext({ jobId, collectionId, userId }, () => runCrawl(jobId, collectionId, url, req, controller.signal, resumeSince, snapshot))
     .catch((err) => {
+      logJobTiming(jobId);
       if (err instanceof BotWallError) patchJob(jobId, { botWall: true });
       // A rejected / out-of-credit LLM key, a disconnected browser or a bot wall stops the crawl like the user
       // would: resumable once it's fixed.
@@ -139,7 +148,10 @@ function launch(jobId: number, collectionId: number, req: CrawlRequest, resumeSi
       }
       retireChannel(jobChannel(jobId));
     })
-    .finally(() => running.delete(jobId));
+    .finally(() => {
+      running.delete(jobId);
+      finishJobTiming(jobId);
+    });
 }
 
 /**
@@ -319,7 +331,7 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
     for (const s of extraction.specs) {
       db.upsertSpecKey(collectionId, { key: s.key, type: s.type, unit: s.unit, label: s.label, example: String(s.value).slice(0, 60), origin: "page" });
     }
-    await upsertVector(itemId, collectionId, await embed(embeddingText({ ...extraction, specs })));
+    await upsertVector(itemId, collectionId, await timed("embed", () => embed(embeddingText({ ...extraction, specs }))));
     if (donor) reused++;
     else extracted++;
     emit(jobId, { type: "item", title: extraction.title, url: itemUrl });
@@ -560,8 +572,8 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
   // Key merging and gone-marking need the whole listing handled — they run when the resumed crawl completes.
   if (halt) throw new StopError(halt.message);
   throwIfStopped(signal);
-  if (extracted + reused > 0) await consolidateKeys(jobId, collectionId);
-  if (extracted + reused > 0) await groupProducts(jobId, collectionId);
+  if (extracted + reused > 0) await timed("consolidate", () => consolidateKeys(jobId, collectionId));
+  if (extracted + reused > 0) await timed("group", () => groupProducts(jobId, collectionId));
 
   // ---- 4. Listings missing from a complete walk are gone (sold/removed) ----
   let gone = 0;
@@ -580,6 +592,7 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
 
   const summary = `${newCount} new, ${changed} changed, ${unchanged} unchanged, ${gone} gone, ${failed} failed${skipped ? `, ${skipped} handled before the stop` : ""}`;
   const status = indexed === 0 && walk.items.size > 0 ? "failed" : "done";
+  logJobTiming(jobId);
   patchJob(jobId, {
     status,
     message: summary,
