@@ -243,15 +243,23 @@ export class BlockedPageError extends Error {}
 export class BotWallError extends BlockedPageError {}
 
 const NAVIGATION_TIMEOUT_MS = 60_000;
+/**
+ * Fixed waits every page pays, tuned against static pages and JS-heavy shops (IKEA, Shopify, OLX): shorter ones
+ * captured the same text and images, and save ~1 s per page (docs/crawling.md#where-the-time-goes).
+ */
+const NETWORK_IDLE_MS = 500;
+const SCROLL_STEP_PAUSE_MS = 150;
+const AFTER_SCROLL_PAUSE_MS = 250;
+const STABLE_TEXT_POLL_MS = 300;
 
 /** Scrolls to the bottom in steps so lazy content (spec tabs, images, cards) renders, then back to top. */
 export async function scrollFullPage(page: PageDriver, maxSteps = 40) {
   for (let i = 0; i < maxSteps; i++) {
     const atBottom = await page.run("scrollStep", { step: 900 });
-    await new Promise((r) => setTimeout(r, 150));
+    await new Promise((r) => setTimeout(r, SCROLL_STEP_PAUSE_MS));
     if (atBottom) break;
   }
-  await new Promise((r) => setTimeout(r, 400));
+  await new Promise((r) => setTimeout(r, AFTER_SCROLL_PAUSE_MS));
   await page.run("scrollToTop");
 }
 
@@ -276,7 +284,7 @@ export async function gotoAndSettle(page: PageDriver, url: string, opts: { scrol
       };
       const { status } = await page.goto(url, { timeoutMs: NAVIGATION_TIMEOUT_MS });
       lap("goto");
-      await page.waitForNetworkIdle({ idleMs: 700, timeoutMs: 8_000 });
+      await page.waitForNetworkIdle({ idleMs: NETWORK_IDLE_MS, timeoutMs: 8_000 });
       lap("idle");
       if (await page.run("isBotChallenge").catch(() => false)) {
         throw new BotWallError(`Bot protection challenge on ${new URL(url).host} — ${page.runner === "server" ? "try running it in your browser, or the proxy" : "open the site in Chrome once and solve the check"}`);
@@ -300,7 +308,7 @@ export async function gotoAndSettle(page: PageDriver, url: string, opts: { scrol
  * tables after network idle). Polls the text length and returns once it holds
  * still for two polls in a row, or after `timeoutMs`.
  */
-export async function waitForStableText(page: PageDriver, timeoutMs = 6_000, intervalMs = 500): Promise<void> {
+export async function waitForStableText(page: PageDriver, timeoutMs = 6_000, intervalMs = STABLE_TEXT_POLL_MS): Promise<void> {
   const t0 = performance.now();
   try {
     await pollStableText(page, timeoutMs, intervalMs);

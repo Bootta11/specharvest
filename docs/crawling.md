@@ -201,8 +201,11 @@ How to read it (from `lib/timing.ts`; the parts are summed over pages that ran i
 - **waited for a free browser page**: the shared page slots were full, so there are too few slots for the load
   (`SCRAPE_MAX_CONCURRENT_PAGES`).
 - **loading**: time with a page open. *goto* is the site and the browser rendering. *network idle*, *scroll* and
-  *text settle* are the crawler's own waits (≈ 2.5 s per page even on a static site). If the average climbs when
-  slots are raised, the browser host is out of CPU.
+  *text settle* are the crawler's own waits: 500 ms of network quiet, a 150 ms pause per scroll step plus 250 ms
+  after scrolling, and the visible text unchanged over two 300 ms polls (≈ 1.5 s per page even on a static site; the
+  constants are at the top of the navigation section in `crawler/browser.ts`). Item pages don't block images: the
+  snapshot keeps only images that loaded at ≥ 300 px wide. If the average climbs when slots are raised, the browser
+  host is out of CPU.
 - **LLM**: time per purpose. Slow calls point at the provider or model.
 
 With `DEBUG=1` the server also logs one line per page (URL, priority, slot wait, pages queued ahead, busy slots,
