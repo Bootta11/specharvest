@@ -51,4 +51,33 @@ describe("createSlotPool", () => {
     expect(pool.active).toBe(0);
     expect(pool.waiting).toBe(0);
   });
+
+  it("follows a size that changes at runtime", async () => {
+    let size = 1;
+    const pool = createSlotPool(() => size);
+    await pool.acquire();
+    let got = 0;
+    const waiters = [pool.acquire().then(() => got++), pool.acquire().then(() => got++), pool.acquire().then(() => got++)];
+    await tick();
+    expect(got).toBe(0);
+
+    // A browser joined: two more slots, handed to waiters at once.
+    size = 3;
+    pool.pump();
+    await tick();
+    expect(got).toBe(2);
+    expect(pool.active).toBe(3);
+
+    // It left again: releases don't hand over until the holders fit in the smaller size.
+    size = 1;
+    pool.release();
+    pool.release();
+    await tick();
+    expect(got).toBe(2);
+    expect(pool.active).toBe(1);
+    pool.release();
+    await Promise.all(waiters);
+    expect(got).toBe(3);
+    expect(pool.active).toBe(1);
+  });
 });

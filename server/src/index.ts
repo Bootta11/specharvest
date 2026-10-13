@@ -26,6 +26,7 @@ import { deleteVectors, upsertVector } from "./db/lance.ts";
 import { embed } from "./embedding.ts";
 import { proxyConfigured } from "./crawler/browser.ts";
 import { inspectUrl } from "./crawler/inspect.ts";
+import { startBurstServers } from "./crawler/burst/index.ts";
 import { FatalDriverError } from "./crawler/driver.ts";
 import { connectionFor, extensionStatus, registerExtensionGateway } from "./extension/gateway.ts";
 import { registerExtensionRoutes } from "./extension/routes.ts";
@@ -505,10 +506,13 @@ if (fs.existsSync(clientDist)) {
 
 await app.listen({ port: env.PORT, host: "0.0.0.0" });
 log.info(`SpecHarvest API listening on :${env.PORT} (data: ${env.DATA_DIR})`);
+const burst = startBurstServers();
 
 const shutdown = async () => {
   // Don't outlive Docker's stop timeout if something still holds the server open.
   setTimeout(() => process.exit(0), 10_000).unref();
+  // Rented servers first: they cost money while they run (leftovers are deleted on the next start anyway).
+  await burst?.close().catch(() => {});
   await app.close().catch(() => {});
   process.exit(0);
 };

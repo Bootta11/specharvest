@@ -1,20 +1,20 @@
 import puppeteer, { type Browser, type BrowserContext, type HTTPRequest, type HTTPResponse, type Page } from "puppeteer-core";
 import { NAME_SHIM, PAGE_SCRIPTS, type PageScriptArgs, type PageScriptName, type PageScriptResult } from "@specharvest/shared/page-scripts";
 import { env } from "../config.ts";
-import { createLogger } from "../lib/logger.ts";
+import { createLogger, errorMessage } from "../lib/logger.ts";
 import { assertPublicUrl, cachedIsPublicHost, strictPolicy, type TargetPolicy } from "../lib/net-guard.ts";
 import { withExtensionPage, type WaitOptions } from "../extension/driver.ts";
 import { FatalDriverError, type PageDriver, type Runner } from "./driver.ts";
 import { createSlotPool, type SlotPriority } from "./slots.ts";
+import { createBrowserPool, type BrowserPool, type Lease, type PoolEntry } from "./browser-pool.ts";
 import { InFlightRequests } from "./network-idle.ts";
 import { isTracker } from "./trackers.ts";
 import { addTiming, fmtMs, notePagePhase, notePageUrl, takePagePhases } from "../lib/timing.ts";
 
 const log = createLogger("browser");
 
-// ---------- Connection (memoized, cleared on failure/disconnect) ----------
+// ---------- Browsers (memoized connections, cleared on failure/disconnect) ----------
 
-let browserPromise: Promise<Browser> | null = null;
 const CONNECT_TIMEOUT_MS = 15_000;
 
 function wsHeaders(): Record<string, string> {
@@ -26,55 +26,120 @@ function wsHeaders(): Record<string, string> {
   return headers;
 }
 
-function startBrowser(): Promise<Browser> {
-  if (env.PUPPETEER_WS_ENDPOINT) {
-    log.info(`Connecting to remote browser ${new URL(env.PUPPETEER_WS_ENDPOINT).host}`);
-    return puppeteer.connect({ browserWSEndpoint: env.PUPPETEER_WS_ENDPOINT, headers: wsHeaders(), protocolTimeout: 120_000 });
-  }
-  if (env.PUPPETEER_EXECUTABLE_PATH) {
-    log.info(`Launching local browser ${env.PUPPETEER_EXECUTABLE_PATH}`);
-    return puppeteer.launch({ executablePath: env.PUPPETEER_EXECUTABLE_PATH, headless: true, protocolTimeout: 120_000 });
-  }
-  return Promise.reject(new Error("No browser configured — set PUPPETEER_WS_ENDPOINT (or PUPPETEER_EXECUTABLE_PATH for local dev)"));
+/** One browser's connection: made on first use, made again after a failure or a disconnect. */
+function browserConnection(name: string, start: () => Promise<Browser>, onLost?: () => void) {
+  let browserPromise: Promise<Browser> | null = null;
+  let closing = false;
+  return {
+    connect(): Promise<Browser> {
+      if (!browserPromise) {
+        const attempt = start();
+        browserPromise = attempt;
+        attempt.then(
+          (browser) => {
+            log.info(`Browser ${name} ready`);
+            browser.on("disconnected", () => {
+              if (browserPromise === attempt) browserPromise = null;
+              if (closing) return;
+              log.warn(`Browser ${name} disconnected`);
+              onLost?.();
+            });
+          },
+          (err) => {
+            log.error(`Failed to start/connect browser ${name}`, errorMessage(err));
+            if (browserPromise === attempt) browserPromise = null;
+          },
+        );
+      }
+      const pending = browserPromise;
+      // puppeteer.connect() has no timeout of its own; a hung endpoint would wedge every job.
+      return Promise.race([
+        pending,
+        new Promise<Browser>((_, reject) =>
+          setTimeout(() => reject(new Error(`Timed out connecting to browser ${name} after ${CONNECT_TIMEOUT_MS}ms`)), CONNECT_TIMEOUT_MS).unref(),
+        ),
+      ]);
+    },
+    async close() {
+      closing = true;
+      const browser = await browserPromise?.catch(() => null);
+      await browser?.disconnect().catch(() => {});
+    },
+  };
 }
 
-export function connect(): Promise<Browser> {
-  if (!browserPromise) {
-    const attempt = startBrowser();
-    browserPromise = attempt;
-    attempt.then(
-      (browser) => {
-        log.info("Browser ready");
-        browser.on("disconnected", () => {
-          log.warn("Browser disconnected");
-          if (browserPromise === attempt) browserPromise = null;
-        });
-      },
-      (err) => {
-        log.error("Failed to start/connect browser", String(err));
-        if (browserPromise === attempt) browserPromise = null;
-      },
-    );
+/** The configured browsers: PUPPETEER_WS_ENDPOINT (one or several), else a local Chrome for development. */
+function staticEntries(): Array<PoolEntry<Browser>> {
+  const tabs = () => env.SCRAPE_MAX_CONCURRENT_PAGES;
+  const entry = (name: string, start: () => Promise<Browser>): PoolEntry<Browser> => ({
+    name,
+    source: "static",
+    tabs,
+    allowProxy: true,
+    connect: browserConnection(name, start).connect,
+  });
+  const endpoints = (env.PUPPETEER_WS_ENDPOINT ?? "").split(",").map((u) => u.trim()).filter(Boolean);
+  if (endpoints.length) {
+    return endpoints.map((url, i) => {
+      const name = i === 0 ? "main" : `main-${i + 1}`;
+      return entry(name, () => {
+        log.info(`Connecting to remote browser ${name} (${new URL(url).host})`);
+        return puppeteer.connect({ browserWSEndpoint: url, headers: wsHeaders(), protocolTimeout: 120_000 });
+      });
+    });
   }
-  const pending = browserPromise;
-  // puppeteer.connect() has no timeout of its own; a hung endpoint would wedge every job.
-  return Promise.race([
-    pending,
-    new Promise<Browser>((_, reject) =>
-      setTimeout(() => reject(new Error(`Timed out connecting to remote browser after ${CONNECT_TIMEOUT_MS}ms`)), CONNECT_TIMEOUT_MS).unref(),
-    ),
-  ]);
+  const local = env.PUPPETEER_EXECUTABLE_PATH;
+  return [
+    entry("main", () => {
+      if (!local) return Promise.reject(new Error("No browser configured — set PUPPETEER_WS_ENDPOINT (or PUPPETEER_EXECUTABLE_PATH for local dev)"));
+      log.info(`Launching local browser ${local}`);
+      return puppeteer.launch({ executablePath: local, headless: true, protocolTimeout: 120_000 });
+    }),
+  ];
 }
 
 // ---------- Global page slots ----------
 
-// Every crawl and page check shares SCRAPE_MAX_CONCURRENT_PAGES pages; see slots.ts for who goes first.
-const slots = createSlotPool(() => env.SCRAPE_MAX_CONCURRENT_PAGES);
+// Every crawl and page check shares the pages all browsers take together; see slots.ts for who goes first and
+// browser-pool.ts for which browser a page runs in.
+const slots = createSlotPool(() => pool.capacity());
+const pool: BrowserPool<Browser> = createBrowserPool<Browser>({ onCapacityChange: () => slots.pump() });
+for (const entry of staticEntries()) pool.add(entry);
+
+const browserLoad = () =>
+  pool
+    .stats()
+    .map((b) => `${b.name} ${b.active}/${b.tabs}${b.state === "up" ? "" : ` ${b.state}`}`)
+    .join(", ");
 
 // While pages queue for a slot, say so every 30 s: a growing backlog means too few slots (or a slow browser).
 setInterval(() => {
-  if (slots.waiting > 0) log.info(`page slots: ${slots.active}/${env.SCRAPE_MAX_CONCURRENT_PAGES} busy, ${slots.waiting} pages waiting`);
+  if (slots.waiting > 0) log.info(`page slots: ${slots.active}/${pool.capacity()} busy (${browserLoad()}), ${slots.waiting} pages waiting`);
 }, 30_000).unref();
+
+/**
+ * For the burst controller (crawler/burst/): how many pages wait, and adding/removing browsers at runtime.
+ * A burst browser never takes proxy pages (see PoolEntry.allowProxy).
+ */
+export const browserFleet = {
+  waiting: () => slots.waiting,
+  get: (name: string) => pool.get(name),
+  addBurst(name: string, wsEndpoint: string, tabs: number, onLost: () => void) {
+    const connection = browserConnection(name, () => puppeteer.connect({ browserWSEndpoint: wsEndpoint, protocolTimeout: 120_000 }), onLost);
+    burstConnections.set(name, connection);
+    pool.add({ name, source: "burst", tabs: () => tabs, allowProxy: false, connect: connection.connect });
+  },
+  /** Stops sending pages to `name`, waits up to `timeoutMs` for its open pages, then drops it. */
+  async removeBurst(name: string, timeoutMs: number) {
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([pool.drain(name), new Promise((r) => (timer = setTimeout(r, timeoutMs)))]);
+    clearTimeout(timer);
+    pool.remove(name);
+    await burstConnections.get(name)?.close();
+    burstConnections.delete(name);
+  },
+};
+const burstConnections = new Map<string, ReturnType<typeof browserConnection>>();
 
 export const proxyConfigured = () => !!env.PROXY_SERVER;
 
@@ -249,8 +314,9 @@ export async function withPage<T>(fn: (page: PageDriver) => Promise<T>, opts: Wi
     if (!released) slots.release();
     released = true;
   };
-  const timing: PageTiming = { priority: opts.priority ?? "detail", queuedBehind, waited, opened: 0, openPhases: {}, worked: 0, closed: 0, filter: null };
+  const timing: PageTiming = { priority: opts.priority ?? "detail", browser: "", queuedBehind, waited, opened: 0, openPhases: {}, worked: 0, closed: 0, filter: null };
   let driver: PuppeteerDriver | null = null;
+  let lease: Lease<Browser> | null = null;
   try {
     let t = performance.now();
     const lap = (phase: string) => {
@@ -258,7 +324,26 @@ export async function withPage<T>(fn: (page: PageDriver) => Promise<T>, opts: Wi
       timing.openPhases[phase] = now - t;
       t = now;
     };
-    const browser = await connect();
+    let browser!: Browser;
+    // A browser that can't be reached: try the page once more on another one (when there is one).
+    const tried = new Set<string>();
+    let lastError: unknown = new Error("No browser available");
+    for (let attempt = 1; ; attempt++) {
+      lease = pool.pick({ useProxy: opts.useProxy, exclude: tried });
+      if (!lease) throw lastError;
+      timing.browser = lease.entry.name;
+      try {
+        browser = await lease.entry.connect();
+        break;
+      } catch (err) {
+        lease.release();
+        lease = null;
+        pool.markDown(timing.browser);
+        tried.add(timing.browser);
+        lastError = err;
+        if (attempt >= 2) throw err;
+      }
+    }
     const { page, context } = await openPage(browser, opts, lap);
     try {
       // The setup calls don't depend on each other: send them together instead of waiting for each answer
@@ -305,6 +390,8 @@ export async function withPage<T>(fn: (page: PageDriver) => Promise<T>, opts: Wi
     }
   } finally {
     release();
+    // The browser's tab count includes closing: the tab is only gone once its context is closed.
+    lease?.release();
     if (!timing.opened) timing.opened = performance.now() - t0 - waited - timing.closed;
     logPage(driver, timing);
   }
@@ -312,6 +399,8 @@ export async function withPage<T>(fn: (page: PageDriver) => Promise<T>, opts: Wi
 
 interface PageTiming {
   priority: string;
+  /** Which browser the page ran in (browser-pool.ts). */
+  browser: string;
   queuedBehind: number;
   waited: number;
   opened: number;
@@ -342,8 +431,8 @@ function logPage(driver: PuppeteerDriver | null, t: PageTiming) {
   const openDetail = list(t.openPhases);
   const workDetail = [list(phases), t.filter ? `${t.filter.requests} requests checked in ${fmtMs(t.filter.ms)}, ${t.filter.trackers} trackers + ${t.filter.prefetches} prefetches blocked` : ""].filter(Boolean).join(", ");
   const line =
-    `page ${url ?? "(no navigation)"} [${t.priority}]: ${fmtMs(t.waited + t.opened + t.worked + t.closed)} — waited ${fmtMs(t.waited)} for a slot ` +
-    `(${t.queuedBehind} queued ahead, ${slots.active}/${env.SCRAPE_MAX_CONCURRENT_PAGES} busy now), open ${fmtMs(t.opened)}${openDetail ? ` (${openDetail})` : ""}, ` +
+    `page ${url ?? "(no navigation)"} [${t.priority}${t.browser ? ` on ${t.browser}` : ""}]: ${fmtMs(t.waited + t.opened + t.worked + t.closed)} — waited ${fmtMs(t.waited)} for a slot ` +
+    `(${t.queuedBehind} queued ahead, ${slots.active}/${pool.capacity()} busy now), open ${fmtMs(t.opened)}${openDetail ? ` (${openDetail})` : ""}, ` +
     `work ${fmtMs(t.worked)}${workDetail ? ` (${workDetail})` : ""}, close ${fmtMs(t.closed)}`;
   if (t.worked + t.opened >= SLOW_PAGE_MS) log.info(`slow ${line}`);
   else log.debug(line);
@@ -444,9 +533,12 @@ async function pollStableText(page: PageDriver, timeoutMs: number, intervalMs: n
   }
 }
 
-/** Health probe: connect + open/close a context. */
+/** Health probe: connect to the (first) configured browser + open/close a context. */
 export async function checkBrowser(): Promise<void> {
-  const browser = await connect();
+  const main = pool.pick({ useProxy: true });
+  if (!main) throw new Error("No browser configured");
+  main.release();
+  const browser = await main.entry.connect();
   const ctx = await browser.createBrowserContext();
   await ctx.close();
 }

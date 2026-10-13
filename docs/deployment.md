@@ -133,6 +133,96 @@ recorders; the list is in `server/src/crawler/trackers.ts`) or the links a site 
 This saves browser CPU and gets pages quiet sooner. Set `SCRAPE_BLOCK_TRACKERS=false` if a site you crawl needs one
 of those scripts to show its content. Prefetches are always skipped.
 
+Once the browser host is out of CPU, more pages per browser only make each page slower: add a
+browser instead. `PUPPETEER_WS_ENDPOINT` takes several endpoints, comma-separated, with the same
+auth headers. Each takes `SCRAPE_MAX_CONCURRENT_PAGES` pages, and each page goes to the browser
+with the most free pages (`server/src/crawler/browser-pool.ts`). A browser that can't be reached
+gets no pages for 30 s, and the page is tried once on another one. The page log lines name the
+browser (`[detail on main-2]`).
+
+### Extra browser servers on demand
+
+Rather than a second browser that runs all the time, SpecHarvest can rent one from DigitalOcean
+while pages queue up and delete it when the queue is gone (`server/src/crawler/burst/`). You pay
+only for the minutes it runs.
+
+- **When:** when at least `BURST_MIN_WAITING` (4) pages have waited `BURST_AFTER_SECONDS` (60 s),
+  SpecHarvest creates a droplet (`BURST_SIZE`, default `s-4vcpu-8gb`, in `BURST_REGION`). It takes
+  `BURST_TABS` (6) pages once its browser answers: about 1.4 min from a fresh Debian image, 0.7 min
+  from our own image (see below).
+- **Until:** the droplet is deleted after `BURST_IDLE_MINUTES` (5) with no page while nothing
+  waits, or after `BURST_MAX_MINUTES` (180) at the latest. Pages running there get up to 2 min to
+  finish first.
+- **Spending limits:**
+  - `BURST_MAX_SERVERS` (1) servers at once;
+  - `BURST_MAX_HOURS_PER_DAY` (12) server-hours per UTC day, counted in memory;
+  - after a failed start, the next try waits 10 min;
+  - at startup and every 10 min, droplets tagged `<BURST_NAME>-burst` that this instance doesn't
+    run are deleted (leftovers of a crash or restart), and on shutdown it deletes its own.
+
+  Each deletion logs the server's lifetime, page count and estimated cost. Also set a billing
+  alert in DigitalOcean.
+- **What runs there:** Debian's Chromium (security updates from Debian), headless, listening on
+  127.0.0.1 only. Caddy on port 9223 passes only `/<token>/…` to it; the token is random per
+  server. A DigitalOcean firewall (`<BURST_NAME>-burst-firewall`, created on first use) lets only
+  `BURST_ALLOWED_IP`, this server's public IP, reach port 9223. Nothing else is open, not even SSH.
+- **No TLS:** the connection is plain `ws://`. Crawled public pages go through it, but pages
+  through the proxy (whose credentials travel over the browser connection) never run on a rented
+  browser.
+
+Setup:
+1. Create a DigitalOcean API token (*API → Tokens → Generate New Token*) with **custom scopes**,
+   not full access, so the token can't touch anything else in the account:
+
+   | Resource | Scopes | Used for |
+   | --- | --- | --- |
+   | droplet | create, read, delete | starting servers, waiting for them, finding leftovers, deleting them |
+   | firewall | create, read, update | the firewall that lets only `BURST_ALLOWED_IP` in, created once and updated when the IP changes |
+   | tag | create, read | tagging servers so leftovers can be found |
+   | sizes | read | hourly price for the cost line in the log |
+   | ssh_key | read | only with `BURST_DO_SSH_KEY_ID` |
+   | image | create, read, delete | only for `npm run burst:image`: saving, listing and deleting our images |
+   | actions | read | only for `npm run burst:image`: waiting for the shutdown and the snapshot |
+   | droplet | update | only for `npm run burst:image`: shutting the build droplet down |
+
+   Related read scopes that DigitalOcean adds on its own (regions, images…) are fine. A missing
+   scope shows up in the log as `DigitalOcean POST /droplets → 403: …`.
+2. Set `BURST_PROVIDER=digitalocean`, `BURST_DO_TOKEN` (or `BURST_DO_TOKEN_FILE`) and
+   `BURST_ALLOWED_IP`.
+3. Optional: add an SSH key to the account and set `BURST_DO_SSH_KEY_ID`. Without it, DigitalOcean
+   emails a root password for every server.
+4. The startup log shows `On-demand browser servers on digitalocean: …`. The `page slots: …`
+   lines list each browser's load.
+
+Instances sharing one account (dev and live) need different `BURST_NAME`s, or each deletes the
+other's servers as leftovers.
+
+#### Faster starts from our own image
+
+A fresh Debian droplet spends most of its start installing Chromium and Caddy. `npm run burst:image`
+does that once:
+1. It starts a Debian 13 droplet that installs all updates, Chromium and Caddy, and checks that
+   Chromium runs.
+2. It saves the droplet as a snapshot named `<BURST_NAME>-browser-<date>`, then deletes the droplet.
+3. It keeps the two newest of our images (`--keep N`) and prints the id to set as `BURST_IMAGE`.
+
+A build takes ~2–5 min and costs under a cent. Storing the image costs ~$0.06 per GB per month
+(~1.7 GB, about $0.10 a month). Servers started from it skip the install and are ready in about
+0.7 min instead of 1.4. `npm run burst:image -- --list` shows our
+images.
+
+No secret goes into the image: each server's token is still written at boot, and until then Caddy
+only answers 403. Run it where `BURST_ALLOWED_IP` points (the firewall lets only that IP check on
+the build), e.g. on the host:
+
+```bash
+docker exec specharvest /nodejs/bin/node --import tsx server/src/scripts/burst-image.ts
+```
+
+An image freezes Chromium at the day it was built. **Rebuild it weekly**, like the browser image,
+and update `BURST_IMAGE`. If `BURST_IMAGE` is an image that no longer exists, server starts fail with
+`422` in the log. The previous image is kept for that.
+
 ## Security settings
 
 | Variable | Default | Purpose |

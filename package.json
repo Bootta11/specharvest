@@ -19,6 +19,7 @@
     "typecheck": "npm run typecheck --workspace server && npm run typecheck --workspace client && npm run typecheck --workspace extension",
     "test": "npm test --workspace server",
     "seed:admin": "npm run seed:admin --workspace server --",
+    "burst:image": "npm run burst:image --workspace server --",
     "build:extension": "npm run build --workspace extension",
     "zip:extension": "npm run zip --workspace extension",
     "test:ci": "./scripts/ci.sh",

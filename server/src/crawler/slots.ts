@@ -8,14 +8,28 @@ export type SlotPriority = (typeof slotPriorities)[number];
 export interface SlotPool {
   acquire(priority?: SlotPriority): Promise<void>;
   release(): void;
+  /** Lets waiters in after the size grew (a browser joined). */
+  pump(): void;
   readonly active: number;
   readonly waiting: number;
 }
 
-/** At most `size()` holders at once; waiters are served by priority, first come first served within one. */
+/**
+ * At most `size()` holders at once; waiters are served by priority, first come first served within one. The size
+ * may change at runtime: call pump() after it grows; when it shrinks, releases stop handing slots over until the
+ * holders fit again.
+ */
 export function createSlotPool(size: () => number): SlotPool {
   let active = 0;
   const queues: Record<SlotPriority, Array<() => void>> = { interactive: [], listing: [], detail: [] };
+
+  const next = () => {
+    for (const p of slotPriorities) {
+      const waiter = queues[p].shift();
+      if (waiter) return waiter;
+    }
+    return null;
+  };
 
   return {
     async acquire(priority = "detail") {
@@ -27,11 +41,17 @@ export function createSlotPool(size: () => number): SlotPool {
       await new Promise<void>((resolve) => queues[priority].push(resolve));
     },
     release() {
-      for (const p of slotPriorities) {
-        const next = queues[p].shift();
-        if (next) return next();
-      }
+      const waiter = active <= size() ? next() : null;
+      if (waiter) return waiter();
       active--;
+    },
+    pump() {
+      while (active < size()) {
+        const waiter = next();
+        if (!waiter) return;
+        active++;
+        waiter();
+      }
     },
     get active() {
       return active;

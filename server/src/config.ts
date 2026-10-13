@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { isIP } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
@@ -60,9 +61,10 @@ const envSchema = z.object({
   // "Not found" web answers are retried after this many days (0 = never).
   ENRICH_NOT_FOUND_TTL_DAYS: z.coerce.number().min(0).default(30),
 
+  // One remote browser, or several separated by commas (each takes SCRAPE_MAX_CONCURRENT_PAGES pages; crawler/browser-pool.ts).
   PUPPETEER_WS_ENDPOINT: optionalNonEmpty().refine(
-    (v) => v === undefined || /^wss?:\/\//.test(v),
-    "PUPPETEER_WS_ENDPOINT must be a ws:// or wss:// URL",
+    (v) => v === undefined || v.split(",").every((u) => /^wss?:\/\//.test(u.trim())),
+    "PUPPETEER_WS_ENDPOINT must be a ws:// or wss:// URL (or several, comma-separated)",
   ),
   // Auth for a gated remote browser (traefik-apikeys X-Api-Key and/or Basic auth), like price-catcher.
   PUPPETEER_WS_API_KEY: optionalNonEmpty(),
@@ -75,6 +77,29 @@ const envSchema = z.object({
   PROXY_PASSWORD: optionalNonEmpty(),
 
   SCRAPE_MAX_CONCURRENT_PAGES: z.coerce.number().int().min(1).default(2),
+
+  // On-demand browser servers while pages queue up (crawler/burst/, docs/deployment.md#extra-browser-servers-on-demand).
+  BURST_PROVIDER: z.preprocess((v) => (v === "" ? undefined : v), z.enum(["digitalocean"]).optional()),
+  BURST_DO_TOKEN: optionalNonEmpty(),
+  // SpecHarvest's own public IP: the only address the servers' firewall lets in.
+  BURST_ALLOWED_IP: optionalNonEmpty().refine((v) => v === undefined || isIP(v) !== 0, "BURST_ALLOWED_IP must be an IP address"),
+  BURST_REGION: z.string().default("fra1"),
+  BURST_SIZE: z.string().default("s-4vcpu-8gb"),
+  BURST_IMAGE: z.string().default("debian-13-x64"),
+  // A DigitalOcean SSH key (id or fingerprint); without one, DigitalOcean emails a root password per server.
+  BURST_DO_SSH_KEY_ID: optionalNonEmpty(),
+  BURST_MAX_SERVERS: int(1, 1),
+  BURST_TABS: int(6, 1),
+  BURST_MIN_WAITING: int(4, 1),
+  BURST_AFTER_SECONDS: int(60),
+  BURST_IDLE_MINUTES: int(5),
+  BURST_MAX_MINUTES: int(180, 10),
+  BURST_MAX_HOURS_PER_DAY: z.preprocess((v) => (v === "" ? undefined : v), z.coerce.number().min(0).default(12)),
+  // Names and tags the servers; instances sharing one DigitalOcean account need different names.
+  BURST_NAME: z
+    .string()
+    .default("specharvest")
+    .refine((v) => /^[a-z0-9-]{1,40}$/.test(v), "BURST_NAME: lowercase letters, digits and dashes"),
   // Abort ad/analytics requests in crawled pages (crawler/trackers.ts): less browser CPU, quicker network idle.
   SCRAPE_BLOCK_TRACKERS: bool(true),
   MAX_PAGES: z.coerce.number().int().min(1).default(10),
@@ -136,13 +161,19 @@ const envSchema = z.object({
 });
 
 // Secrets can also come from files (Docker/Compose secrets): OPENROUTER_API_KEY_FILE=/run/secrets/openrouter.
-const FILE_SECRETS = ["OPENROUTER_API_KEY", "OPENROUTER_MANAGEMENT_KEY", "PUPPETEER_WS_API_KEY", "PUPPETEER_WS_PASSWORD", "PROXY_PASSWORD", "VAPID_PRIVATE_KEY", "ADMIN_PASSWORD", "ENCRYPTION_KEY"];
+const FILE_SECRETS = ["BURST_DO_TOKEN", "OPENROUTER_API_KEY", "OPENROUTER_MANAGEMENT_KEY", "PUPPETEER_WS_API_KEY", "PUPPETEER_WS_PASSWORD", "PROXY_PASSWORD", "VAPID_PRIVATE_KEY", "ADMIN_PASSWORD", "ENCRYPTION_KEY"];
 for (const key of FILE_SECRETS) {
   const file = process.env[`${key}_FILE`];
   if (file && !process.env[key]) process.env[key] = fs.readFileSync(file, "utf8").trim();
 }
 
-const parsed = envSchema.parse(process.env);
+const parsed = envSchema
+  .superRefine((e, ctx) => {
+    if (e.BURST_PROVIDER === "digitalocean" && (!e.BURST_DO_TOKEN || !e.BURST_ALLOWED_IP)) {
+      ctx.addIssue({ code: "custom", message: "BURST_PROVIDER=digitalocean needs BURST_DO_TOKEN and BURST_ALLOWED_IP", path: ["BURST_PROVIDER"] });
+    }
+  })
+  .parse(process.env);
 
 /** Repo root (server/src/config.ts → ../..), so relative DATA_DIR works the same from any cwd. */
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");

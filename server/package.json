@@ -8,7 +8,8 @@
     "start": "node --import tsx --env-file-if-exists=../.env src/index.ts",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "seed:admin": "node --import tsx --env-file-if-exists=../.env src/scripts/seed-admin.ts"
+    "seed:admin": "node --import tsx --env-file-if-exists=../.env src/scripts/seed-admin.ts",
+    "burst:image": "node --import tsx --env-file-if-exists=../.env src/scripts/burst-image.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.78",
