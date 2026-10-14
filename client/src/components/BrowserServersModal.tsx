@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { BurstOptions, BurstSettingKey, BurstSettings, BurstStatus } from "@specharvest/shared";
 import { api, formatUsd } from "../lib/api.ts";
+import { BrowsersSection } from "./BrowsersSection.tsx";
 import { Modal, Notice } from "./Modal.tsx";
 
 const settingRows: Array<{ key: Exclude<BurstSettingKey, "enabled">; label: string; step?: string }> = [
@@ -96,6 +97,10 @@ export function BrowserServersModal({ onClose }: { onClose: () => void }) {
 
   return (
     <Modal title="Browser servers" onClose={onClose}>
+      <div className="mb-6">
+        <BrowsersSection />
+      </div>
+      <h3 className="mb-3 border-t border-stone-200 pt-4 text-base font-semibold dark:border-stone-800">Rented servers (DigitalOcean)</h3>
       {error && <Notice kind="error">{error}</Notice>}
       {!status ? (
         <p className="text-sm text-stone-500">Loading…</p>

@@ -48,6 +48,35 @@ The test users are `loadtest-<tag>-<n>@example.com`. Their passwords and API key
 `.run/loadtest/users-<host>.json` (gitignored), so later runs need no login. Each run starts at the next category,
 so re-runs don't hit the "unchanged item" shortcut.
 
+## Browser capacity (admin UI)
+
+To find how many pages one browser handles at once, an admin opens **Browser servers** and presses **Test capacity**
+on that browser (`server/src/crawler/capacity.ts`). It loads books.toscrape.com product pages the way a crawl loads
+item pages: a fresh private context per page, with images, fonts and media blocked. It runs 30 s steps of 1, 2, 3,
+4, 6, 8, 10, 12 and 16 pages at once.
+
+- **Crawls:** the browser takes no crawl pages during the test. Its open pages finish first (up to 2 min), and other
+  browsers keep crawling. If it is the only browser, crawls wait until the test ends.
+- **Progress:** a progress bar shows the step, the countdown and the current step's pages so far. It updates every
+  second, and the run continues on the server if the window is closed.
+- **When it stops:** once more pages at once stopped helping for two steps (+5% pages/min or less), when many pages
+  fail, when a typical page takes over 30 s, or when the browser disconnects. A run usually takes 3–5 min.
+- **Recommendation:** the smallest step within 5% of the best pages/min, with no errors. **Use N pages** sets it as
+  that browser's limit. Browsers from `.env` all share `SCRAPE_MAX_CONCURRENT_PAGES` instead.
+- **Reading it:** pages/min that stays flat while time per page grows means the browser host is full. If the
+  "opening" time (context + tab) is what grows, the host is short of CPU.
+- **Caveat:** the test pages are light. Shops with heavy scripts reach the limit a bit sooner, so treat the result
+  as an upper bound.
+
+Example: `ws-pptr2` on 2026-10-14 (from the earlier script run).
+
+| Pages at once | 1 | 2 | 3 | 4 | 6 | 8 | 12 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Pages/min | 17.0 | 19.5 | 20.9 | 20.9 | 19.7 | 22.6 | 21.0 |
+| Time per page | 3.6 s | 6.0 s | 8.1 s | 11.5 s | 17.5 s | 22.4 s | 32.9 s |
+
+It levels off at about 3 pages, so its limit is 3.
+
 ## Options
 
 | Option | Default | Meaning |

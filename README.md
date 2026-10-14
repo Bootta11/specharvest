@@ -107,7 +107,7 @@ variable with comments. The essentials:
 | --- | --- |
 | `OPENROUTER_API_KEY` | The server's LLM key, for users without a key of their own (the admin decides who may use it) |
 | `ENCRYPTION_KEY` | Encrypts users' LLM API keys at rest (`openssl rand -base64 32`); generated into `DATA_DIR` if blank |
-| `PUPPETEER_WS_ENDPOINT` | Remote browser (`ws://`/`wss://`), or several comma-separated; `PUPPETEER_WS_API_KEY` / `_USER` / `_PASSWORD` for gated endpoints |
+| `PUPPETEER_WS_ENDPOINT` | Remote browser (`ws://`/`wss://`), or several comma-separated; `PUPPETEER_WS_API_KEY` / `_USER` / `_PASSWORD` for gated endpoints. More browsers, each with its own keys, can be added in the app (admin → Browser servers) |
 | `PUPPETEER_EXECUTABLE_PATH` | Local Chrome, used when the WS endpoint is blank |
 | `OPENROUTER_MODEL` / `_EXTRACTION_MODEL` / `_SMART_MODEL` / `_WEB_MODEL` | Server-key models per task |
 | `WEB_SEARCH_*`, `ENRICH_*` | Web lookup switch, searches per lookup, caps, prefetch and thresholds |

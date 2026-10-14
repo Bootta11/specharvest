@@ -140,6 +140,17 @@ with the most free pages (`server/src/crawler/browser-pool.ts`). A browser that 
 gets no pages for 30 s, and the page is tried once on another one. The page log lines name the
 browser (`[detail on main-2]`).
 
+Browsers can also be added in the app: an admin opens **Browser servers** in the user menu, then **Add browser**.
+Each one has its own URL, API key (`X-Api-Key`), username and password (Basic auth), and those keys are stored
+encrypted with `ENCRYPTION_KEY`. Each one can also have its own page limit (empty = `SCRAPE_MAX_CONCURRENT_PAGES`),
+be turned off without deleting it, and be kept away from proxy pages. **Test** connects with the entered keys and
+shows the browser's version. When a browser is changed, turned off or deleted, its open pages finish first (up to
+2 min) before the change takes effect. Browsers from `PUPPETEER_WS_ENDPOINT` show in the same list but can be changed
+only in `.env`, and they keep sharing the `PUPPETEER_WS_*` keys. The names `main`, `main-N` and
+`<BURST_NAME>-burst…` are reserved. The code is in `server/src/crawler/browsers.ts`.
+**Test capacity** on each browser finds its best page limit; see
+[Browser capacity](load-testing.md#browser-capacity-admin-ui).
+
 ### Extra browser servers on demand
 
 Rather than a second browser that runs all the time, SpecHarvest can rent one from DigitalOcean

@@ -77,6 +77,14 @@ export function createBrowserPool<B>(opts: { onCapacityChange?: () => void; now?
       return new Promise((resolve) => s.drained.push(resolve));
     },
 
+    /** Undoes drain(): `name` takes pages again (e.g. after a capacity test). */
+    resume(name: string) {
+      const s = states.get(name);
+      if (!s?.draining) return;
+      s.draining = false;
+      changed();
+    },
+
     remove(name: string) {
       const s = states.get(name);
       if (!s) return;

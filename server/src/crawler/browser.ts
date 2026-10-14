@@ -17,14 +17,24 @@ const log = createLogger("browser");
 
 const CONNECT_TIMEOUT_MS = 15_000;
 
-function wsHeaders(): Record<string, string> {
+/** Credentials for a gated remote browser (traefik-apikeys X-Api-Key and/or Basic auth). */
+export interface BrowserCredentials {
+  apiKey?: string | null;
+  username?: string | null;
+  password?: string | null;
+}
+
+const envCredentials = (): BrowserCredentials => ({ apiKey: env.PUPPETEER_WS_API_KEY, username: env.PUPPETEER_WS_USER, password: env.PUPPETEER_WS_PASSWORD });
+
+function wsHeaders(creds: BrowserCredentials): Record<string, string> {
   const headers: Record<string, string> = {};
-  if (env.PUPPETEER_WS_USER) {
-    headers.Authorization = `Basic ${Buffer.from(`${env.PUPPETEER_WS_USER}:${env.PUPPETEER_WS_PASSWORD ?? ""}`).toString("base64")}`;
-  }
-  if (env.PUPPETEER_WS_API_KEY) headers["X-Api-Key"] = env.PUPPETEER_WS_API_KEY;
+  if (creds.username) headers.Authorization = `Basic ${Buffer.from(`${creds.username}:${creds.password ?? ""}`).toString("base64")}`;
+  if (creds.apiKey) headers["X-Api-Key"] = creds.apiKey;
   return headers;
 }
+
+export const connectRemote = (url: string, creds: BrowserCredentials) =>
+  puppeteer.connect({ browserWSEndpoint: url, headers: wsHeaders(creds), protocolTimeout: 120_000 });
 
 /** One browser's connection: made on first use, made again after a failure or a disconnect. */
 function browserConnection(name: string, start: () => Promise<Browser>, onLost?: () => void) {
@@ -68,34 +78,41 @@ function browserConnection(name: string, start: () => Promise<Browser>, onLost?:
   };
 }
 
-/** The configured browsers: PUPPETEER_WS_ENDPOINT (one or several), else a local Chrome for development. */
-function staticEntries(): Array<PoolEntry<Browser>> {
-  const tabs = () => env.SCRAPE_MAX_CONCURRENT_PAGES;
-  const entry = (name: string, start: () => Promise<Browser>): PoolEntry<Browser> => ({
-    name,
-    source: "static",
-    tabs,
-    allowProxy: true,
-    connect: browserConnection(name, start).connect,
-  });
+/** The browsers in PUPPETEER_WS_ENDPOINT, named main, main-2, …; they share the PUPPETEER_WS_* credentials. */
+export function envBrowserEndpoints(): Array<{ name: string; url: string }> {
   const endpoints = (env.PUPPETEER_WS_ENDPOINT ?? "").split(",").map((u) => u.trim()).filter(Boolean);
-  if (endpoints.length) {
-    return endpoints.map((url, i) => {
-      const name = i === 0 ? "main" : `main-${i + 1}`;
-      return entry(name, () => {
-        log.info(`Connecting to remote browser ${name} (${new URL(url).host})`);
-        return puppeteer.connect({ browserWSEndpoint: url, headers: wsHeaders(), protocolTimeout: 120_000 });
-      });
-    });
-  }
-  const local = env.PUPPETEER_EXECUTABLE_PATH;
-  return [
-    entry("main", () => {
-      if (!local) return Promise.reject(new Error("No browser configured — set PUPPETEER_WS_ENDPOINT (or PUPPETEER_EXECUTABLE_PATH for local dev)"));
-      log.info(`Launching local browser ${local}`);
-      return puppeteer.launch({ executablePath: local, headless: true, protocolTimeout: 120_000 });
+  return endpoints.map((url, i) => ({ name: i === 0 ? "main" : `main-${i + 1}`, url }));
+}
+
+const staticEntry = (name: string, start: () => Promise<Browser>): PoolEntry<Browser> => ({
+  name,
+  source: "static",
+  tabs: () => env.SCRAPE_MAX_CONCURRENT_PAGES,
+  allowProxy: true,
+  connect: browserConnection(name, start).connect,
+});
+
+function envEntries(): Array<PoolEntry<Browser>> {
+  return envBrowserEndpoints().map(({ name, url }) =>
+    staticEntry(name, () => {
+      log.info(`Connecting to remote browser ${name} (${new URL(url).host})`);
+      return connectRemote(url, envCredentials());
     }),
-  ];
+  );
+}
+
+/**
+ * Local-dev fallback while no remote browser is configured (neither in .env nor in the admin UI): a local Chrome, or
+ * an entry that fails with a clear message — it keeps one page slot so pages fail fast instead of waiting forever.
+ */
+const FALLBACK = "main";
+function fallbackEntry(): PoolEntry<Browser> {
+  const local = env.PUPPETEER_EXECUTABLE_PATH;
+  return staticEntry(FALLBACK, () => {
+    if (!local) return Promise.reject(new Error("No browser configured — set PUPPETEER_WS_ENDPOINT, add one in Browser servers, or set PUPPETEER_EXECUTABLE_PATH for local dev"));
+    log.info(`Launching local browser ${local}`);
+    return puppeteer.launch({ executablePath: local, headless: true, protocolTimeout: 120_000 });
+  });
 }
 
 // ---------- Global page slots ----------
@@ -104,7 +121,8 @@ function staticEntries(): Array<PoolEntry<Browser>> {
 // browser-pool.ts for which browser a page runs in.
 const slots = createSlotPool(() => pool.capacity());
 const pool: BrowserPool<Browser> = createBrowserPool<Browser>({ onCapacityChange: () => slots.pump() });
-for (const entry of staticEntries()) pool.add(entry);
+const hasEnvBrowsers = envBrowserEndpoints().length > 0;
+for (const entry of envEntries()) pool.add(entry);
 
 const browserLoad = () =>
   pool
@@ -117,29 +135,92 @@ setInterval(() => {
   if (slots.waiting > 0) log.info(`page slots: ${slots.active}/${pool.capacity()} busy (${browserLoad()}), ${slots.waiting} pages waiting`);
 }, 30_000).unref();
 
+/** Connections of browsers added at runtime (admin UI and burst), closed when they leave the pool. */
+const connections = new Map<string, ReturnType<typeof browserConnection>>();
+/** Admin-UI browsers in the pool. */
+const appBrowsers = new Set<string>();
+
+/** The fallback is in the pool only while there is no other configured browser (admin names never take "main"). */
+function syncFallback() {
+  if (hasEnvBrowsers) return;
+  const inPool = !!pool.get(FALLBACK);
+  if (appBrowsers.size > 0 && inPool) pool.remove(FALLBACK);
+  else if (appBrowsers.size === 0 && !inPool) pool.add(fallbackEntry());
+}
+syncFallback();
+
+/** Stops sending pages to `name`, waits up to `timeoutMs` for its open pages, then drops it and closes its connection. */
+async function removeEntry(name: string, timeoutMs: number) {
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([pool.drain(name), new Promise((r) => (timer = setTimeout(r, timeoutMs)))]);
+  clearTimeout(timer);
+  pool.remove(name);
+  await connections.get(name)?.close();
+  connections.delete(name);
+}
+
 /**
- * For the burst controller (crawler/burst/): how many pages wait, and adding/removing browsers at runtime.
- * A burst browser never takes proxy pages (see PoolEntry.allowProxy).
+ * For the burst controller (crawler/burst/) and the admin browser list (crawler/browsers.ts): how many pages wait,
+ * and adding/removing browsers at runtime. A burst browser never takes proxy pages (see PoolEntry.allowProxy).
  */
 export const browserFleet = {
   waiting: () => slots.waiting,
   get: (name: string) => pool.get(name),
+  stats: () => pool.stats(),
+  defaultTabs: () => env.SCRAPE_MAX_CONCURRENT_PAGES,
   addBurst(name: string, wsEndpoint: string, tabs: number, onLost: () => void) {
     const connection = browserConnection(name, () => puppeteer.connect({ browserWSEndpoint: wsEndpoint, protocolTimeout: 120_000 }), onLost);
-    burstConnections.set(name, connection);
+    connections.set(name, connection);
     pool.add({ name, source: "burst", tabs: () => tabs, allowProxy: false, connect: connection.connect });
   },
   /** Stops sending pages to `name`, waits up to `timeoutMs` for its open pages, then drops it. */
-  async removeBurst(name: string, timeoutMs: number) {
-    let timer: NodeJS.Timeout | undefined;
-    await Promise.race([pool.drain(name), new Promise((r) => (timer = setTimeout(r, timeoutMs)))]);
-    clearTimeout(timer);
-    pool.remove(name);
-    await burstConnections.get(name)?.close();
-    burstConnections.delete(name);
+  removeBurst: removeEntry,
+  /** Stops sending new pages to `name` (capacity test); resolves once its open pages are done. */
+  pause: (name: string) => pool.drain(name),
+  resume: (name: string) => pool.resume(name),
+  /** URL and credentials of a .env browser (main, main-2…), or null. */
+  envBrowser(name: string): { url: string; creds: BrowserCredentials } | null {
+    const found = envBrowserEndpoints().find((b) => b.name === name);
+    return found ? { url: found.url, creds: envCredentials() } : null;
+  },
+  /** A browser added in the admin UI, with its own credentials and page limit (null = SCRAPE_MAX_CONCURRENT_PAGES). */
+  addConfigured(name: string, url: string, creds: BrowserCredentials, opts: { tabs: number | null; allowProxy: boolean }) {
+    const connection = browserConnection(name, () => {
+      log.info(`Connecting to remote browser ${name} (${new URL(url).host})`);
+      return connectRemote(url, creds);
+    });
+    connections.set(name, connection);
+    appBrowsers.add(name);
+    pool.add({ name, source: "static", tabs: () => opts.tabs ?? env.SCRAPE_MAX_CONCURRENT_PAGES, allowProxy: opts.allowProxy, connect: connection.connect });
+    syncFallback();
+  },
+  async removeConfigured(name: string, timeoutMs: number) {
+    await removeEntry(name, timeoutMs);
+    appBrowsers.delete(name);
+    syncFallback();
   },
 };
-const burstConnections = new Map<string, ReturnType<typeof browserConnection>>();
+
+/** Connects with the given URL and credentials, asks the browser's version and disconnects (admin "Test" button). */
+export async function testBrowserConnection(url: string, creds: BrowserCredentials): Promise<string> {
+  let timer: NodeJS.Timeout | undefined;
+  const attempt = connectRemote(url, creds);
+  try {
+    const browser = await Promise.race([
+      attempt,
+      new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error(`Timed out after ${CONNECT_TIMEOUT_MS / 1000}s`)), CONNECT_TIMEOUT_MS))),
+    ]);
+    try {
+      return await browser.version();
+    } finally {
+      await browser.disconnect().catch(() => {});
+    }
+  } finally {
+    clearTimeout(timer);
+    // A connection that arrives after the timeout is closed right away.
+    attempt.then((b) => b.disconnect().catch(() => {}), () => {});
+  }
+}
 
 export const proxyConfigured = () => !!env.PROXY_SERVER;
 

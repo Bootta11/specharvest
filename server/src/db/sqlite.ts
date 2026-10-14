@@ -156,6 +156,21 @@ CREATE TABLE IF NOT EXISTS burst_servers (
 );
 CREATE INDEX IF NOT EXISTS burst_servers_started ON burst_servers(started_at);
 
+-- Remote browsers added in the admin UI (crawler/browsers.ts), each with its own credentials (encrypted).
+CREATE TABLE IF NOT EXISTS browsers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  url TEXT NOT NULL,
+  api_key_enc TEXT,
+  api_key_last4 TEXT,
+  username TEXT,
+  password_enc TEXT,
+  tabs INTEGER,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  allow_proxy INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL
+);
+
 -- Web Push subscriptions, one per browser that opted in.
 CREATE TABLE IF NOT EXISTS push_subscriptions (
   endpoint TEXT PRIMARY KEY,
@@ -1717,6 +1732,83 @@ export function listBurstServers(limit = 20): BurstServerRow[] {
 
 export function listOpenBurstServers(): BurstServerRow[] {
   return (getDb().prepare("SELECT * FROM burst_servers WHERE ended_at IS NULL ORDER BY started_at").all() as Row[]).map(toBurstServer);
+}
+
+// ---------- Browsers added in the admin UI ----------
+
+export interface BrowserRow {
+  id: number;
+  name: string;
+  url: string;
+  apiKeyEnc: string | null;
+  apiKeyLast4: string | null;
+  username: string | null;
+  passwordEnc: string | null;
+  tabs: number | null;
+  enabled: boolean;
+  allowProxy: boolean;
+  createdAt: number;
+}
+
+const BROWSER_COLUMNS: Record<keyof Omit<BrowserRow, "id">, string> = {
+  name: "name",
+  url: "url",
+  apiKeyEnc: "api_key_enc",
+  apiKeyLast4: "api_key_last4",
+  username: "username",
+  passwordEnc: "password_enc",
+  tabs: "tabs",
+  enabled: "enabled",
+  allowProxy: "allow_proxy",
+  createdAt: "created_at",
+};
+
+const toBrowser = (r: Row): BrowserRow => ({
+  id: Number(r.id),
+  name: String(r.name),
+  url: String(r.url),
+  apiKeyEnc: r.api_key_enc == null ? null : String(r.api_key_enc),
+  apiKeyLast4: r.api_key_last4 == null ? null : String(r.api_key_last4),
+  username: r.username == null ? null : String(r.username),
+  passwordEnc: r.password_enc == null ? null : String(r.password_enc),
+  tabs: r.tabs == null ? null : Number(r.tabs),
+  enabled: Number(r.enabled) === 1,
+  allowProxy: Number(r.allow_proxy) === 1,
+  createdAt: Number(r.created_at),
+});
+
+const browserValue = (value: unknown): SQLInputValue => (typeof value === "boolean" ? (value ? 1 : 0) : (value as SQLInputValue));
+
+export function listBrowsers(): BrowserRow[] {
+  return (getDb().prepare("SELECT * FROM browsers ORDER BY id").all() as Row[]).map(toBrowser);
+}
+
+export function getBrowser(id: number): BrowserRow | null {
+  const r = getDb().prepare("SELECT * FROM browsers WHERE id = ?").get(id) as Row | undefined;
+  return r ? toBrowser(r) : null;
+}
+
+export function insertBrowser(row: Pick<BrowserRow, "name" | "url" | "tabs" | "enabled" | "allowProxy" | "username">): number {
+  return Number(
+    getDb()
+      .prepare("INSERT INTO browsers (name, url, username, tabs, enabled, allow_proxy, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(row.name, row.url, row.username, row.tabs, row.enabled ? 1 : 0, row.allowProxy ? 1 : 0, Date.now()).lastInsertRowid,
+  );
+}
+
+export function updateBrowser(id: number, patch: Partial<Omit<BrowserRow, "id" | "createdAt">>) {
+  const fields: string[] = [];
+  const values: SQLInputValue[] = [];
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined) continue;
+    fields.push(`${BROWSER_COLUMNS[key as keyof typeof BROWSER_COLUMNS]} = ?`);
+    values.push(browserValue(value));
+  }
+  if (fields.length) getDb().prepare(`UPDATE browsers SET ${fields.join(", ")} WHERE id = ?`).run(...values, id);
+}
+
+export function deleteBrowser(id: number) {
+  getDb().prepare("DELETE FROM browsers WHERE id = ?").run(id);
 }
 
 /** Usage overlapping one UTC day. Open rows count through `now`. */

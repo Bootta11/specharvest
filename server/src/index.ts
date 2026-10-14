@@ -28,6 +28,8 @@ import { proxyConfigured } from "./crawler/browser.ts";
 import { inspectUrl } from "./crawler/inspect.ts";
 import { startBurstServers } from "./crawler/burst/index.ts";
 import { registerBurstRoutes } from "./crawler/burst/routes.ts";
+import { registerBrowserRoutes } from "./crawler/browsers-routes.ts";
+import { startConfiguredBrowsers } from "./crawler/browsers.ts";
 import { FatalDriverError } from "./crawler/driver.ts";
 import { connectionFor, extensionStatus, registerExtensionGateway } from "./extension/gateway.ts";
 import { registerExtensionRoutes } from "./extension/routes.ts";
@@ -93,6 +95,8 @@ const notFound = (reply: FastifyReply) => reply.status(404).send({ error: "Not f
 registerAuthRoutes(app);
 const burst = startBurstServers();
 registerBurstRoutes(app, () => burst);
+void startConfiguredBrowsers();
+registerBrowserRoutes(app);
 registerLlmRoutes(app);
 await registerExtensionGateway(app);
 registerExtensionRoutes(app);

@@ -86,4 +86,18 @@ describe("browser pool", () => {
     expect(pool.pick()).toBeNull();
     expect(pool.capacity()).toBe(0);
   });
+
+  it("resumes a drained browser: it takes pages again and counts for capacity", async () => {
+    const pool = createBrowserPool<string>();
+    pool.add(entry("main", 2));
+    pool.add(entry("other", 2));
+    await pool.drain("main");
+    expect(pool.capacity()).toBe(2);
+    expect(pool.pick()!.entry.name).toBe("other");
+    pool.resume("main");
+    expect(pool.capacity()).toBe(4);
+    expect(pool.get("main")!.state).toBe("up");
+    expect(pool.pick()!.entry.name).toBe("main");
+    pool.resume("missing");
+  });
 });

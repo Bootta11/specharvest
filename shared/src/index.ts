@@ -704,6 +704,120 @@ export interface BurstOptions {
   sizes: Array<{ slug: string; description: string; priceHourly: number; regions: string[]; available: boolean }>;
 }
 
+// ---------- Remote browsers (admin) ----------
+
+const browserSecret = z.string().trim().min(1).max(500).nullable().optional();
+
+/** A browser added in the admin UI. Secrets: a string sets it, null clears it, left out keeps the saved one. */
+export const browserInputSchema = z
+  .object({
+    name: z
+      .string()
+      .trim()
+      .min(1, "Enter a name")
+      .max(40, "Name: up to 40 characters")
+      .regex(/^[\p{L}\p{N} ._-]+$/u, "Name: letters, digits, spaces, dots, dashes or underscores"),
+    url: z
+      .string()
+      .trim()
+      .max(2000)
+      .regex(/^wss?:\/\/\S+$/, "URL must start with ws:// or wss://")
+      .refine((v) => URL.canParse(v), "Not a valid URL"),
+    apiKey: browserSecret,
+    username: z.string().trim().min(1).max(200).nullable().optional(),
+    password: browserSecret,
+    tabs: z.number().int().min(1).max(100).nullable().optional(),
+    enabled: z.boolean().optional(),
+    allowProxy: z.boolean().optional(),
+  })
+  .strict();
+export type BrowserInput = z.infer<typeof browserInputSchema>;
+export const browserPatchSchema = browserInputSchema.partial();
+export type BrowserPatch = z.infer<typeof browserPatchSchema>;
+
+export const browserTestSchema = z
+  .object({
+    id: z.number().int().optional(),
+    url: z.string().trim().max(2000).optional(),
+    apiKey: z.string().trim().max(500).optional(),
+    username: z.string().trim().max(200).optional(),
+    password: z.string().trim().max(500).optional(),
+  })
+  .strict();
+
+export interface BrowserStatus {
+  /** null for a browser from PUPPETEER_WS_ENDPOINT (read-only here). */
+  id: number | null;
+  name: string;
+  source: "env" | "app";
+  /** Host (and port) only: the URL's path may hold a token. */
+  host: string;
+  /** Full URL for browsers added here (to edit them); null for .env ones. */
+  url: string | null;
+  apiKey: { set: boolean; last4: string | null; warning?: string };
+  username: string | null;
+  password: { set: boolean; warning?: string };
+  /** Own page limit, or null = SCRAPE_MAX_CONCURRENT_PAGES. */
+  tabs: number | null;
+  defaultTabs: number;
+  enabled: boolean;
+  allowProxy: boolean;
+  /** Live, from the pool: null when the browser isn't in it (off, or still being swapped). */
+  live: { active: number; tabs: number; state: "up" | "down" | "draining"; pages: number } | null;
+  /** The last finished capacity test on this browser. */
+  capacity: { testedAt: number; recommended: number | null; bestPagesPerMin: number } | null;
+}
+
+/** One step of a capacity test: `tabs` pages at once for a fixed time. */
+export interface CapacityStep {
+  tabs: number;
+  pages: number;
+  pagesPerMin: number;
+  openP50Ms: number | null;
+  totalP50Ms: number | null;
+  totalP95Ms: number | null;
+  errors: number;
+  errorSamples: string[];
+}
+
+export type CapacityPhase = "collecting" | "connecting" | "pausing" | "testing" | "done" | "stopped" | "failed";
+
+/** A browser capacity test (crawler/capacity.ts): the running one, or the last one. */
+export interface CapacityRun {
+  browser: string;
+  /** null for a .env browser. */
+  browserId: number | null;
+  phase: CapacityPhase;
+  running: boolean;
+  startedAt: number;
+  finishedAt: number | null;
+  steps: CapacityStep[];
+  recommended: number | null;
+  /** Why it ended (plateau, overload, disconnect, stopped) or failed. */
+  note: string | null;
+  error: string | null;
+  progress: {
+    stepIndex: number;
+    stepCount: number;
+    stepTabs: number | null;
+    stepStartedAt: number | null;
+    stepMs: number;
+    /** The step that's running now, so far. */
+    current: { pages: number; errors: number; pagesPerMin: number } | null;
+    /** While pausing: crawl pages still open on the browser. */
+    waitingPages: number;
+    elapsedMs: number;
+    /** Upper bound if no step stops it early. */
+    maxRemainingMs: number;
+  };
+}
+
+export interface BrowserTestResult {
+  ok: boolean;
+  version?: string;
+  error?: string;
+}
+
 export const loginSchema = z.object({ email: z.string().trim().toLowerCase().pipe(z.email()), password: z.string().min(1).max(200) });
 export const signupSchema = z.object({ email: z.string().trim().toLowerCase().pipe(z.email()), password: z.string().min(8).max(200) });
 export const updateAccountSchema = z.object({

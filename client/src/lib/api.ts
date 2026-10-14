@@ -3,6 +3,11 @@ import type {
   ApiKeyCreated,
   ApiKeySummary,
   AuthStatus,
+  BrowserInput,
+  BrowserPatch,
+  BrowserStatus,
+  BrowserTestResult,
+  CapacityRun,
   BurstBuildStatus,
   BurstOptions,
   BurstSettings,
@@ -85,7 +90,10 @@ async function request<T>(method: string, url: string, body?: unknown): Promise<
   if (res.status === 401 && !url.startsWith("/api/auth/")) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
   if (!res.ok) {
     const retryAfter = Number(res.headers.get("retry-after"));
-    throw new ApiError(data?.error ?? `${res.status} ${res.statusText}`, res.status, Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : null);
+    // Invalid input (400 from zod): say what's wrong, not just "Invalid request".
+    const issue: string | undefined = data?.issues?.[0]?.message;
+    const message = data?.error ? (issue ? `${data.error}: ${issue}` : data.error) : `${res.status} ${res.statusText}`;
+    throw new ApiError(message, res.status, Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : null);
   }
   return data as T;
 }
@@ -198,6 +206,15 @@ export const api = {
   burstOptions: () => request<BurstOptions>("GET", "/api/admin/burst/options"),
   detectBurstIp: () => request<{ ip: string }>("POST", "/api/admin/burst/detect-ip"),
   rebuildBurstImage: () => request<BurstBuildStatus>("POST", "/api/admin/burst/image"),
+  browsers: () => request<BrowserStatus[]>("GET", "/api/admin/browsers"),
+  createBrowser: (body: BrowserInput) => request<BrowserStatus[]>("POST", "/api/admin/browsers", body),
+  updateBrowser: (id: number, body: BrowserPatch) => request<BrowserStatus[]>("PUT", `/api/admin/browsers/${id}`, body),
+  deleteBrowser: (id: number) => request<BrowserStatus[]>("DELETE", `/api/admin/browsers/${id}`),
+  testBrowser: (body: { id?: number; url?: string; apiKey?: string; username?: string; password?: string }) =>
+    request<BrowserTestResult>("POST", "/api/admin/browsers/test", body),
+  capacityTest: () => request<{ run: CapacityRun | null }>("GET", "/api/admin/browsers/capacity"),
+  startCapacityTest: (name: string) => request<{ run: CapacityRun }>("POST", "/api/admin/browsers/capacity", { name }),
+  stopCapacityTest: () => request<{ run: CapacityRun | null }>("DELETE", "/api/admin/browsers/capacity"),
   // LLM provider (own API keys, model picks)
   llmSettings: () => request<LlmSettingsResponse>("GET", "/api/settings/llm"),
   saveLlmKey: (provider: string, apiKey: string, baseUrl?: string) => request<LlmSettingsResponse>("PUT", `/api/settings/llm/keys/${encodeURIComponent(provider)}`, { apiKey, baseUrl }),
