@@ -20,7 +20,7 @@ export interface BurstProvider {
   readonly name: string;
   /** Lets `allowedIp` (only) reach `port` on servers tagged `tag`; safe to call again. */
   prepare(o: { tag: string; allowedIp: string; port: number }): Promise<void>;
-  create(o: { name: string; tag: string; userData: string }): Promise<BurstServer>;
+  create(o: { name: string; tag: string; userData: string; image?: string }): Promise<BurstServer>;
   /** null when the server no longer exists. */
   get(id: string): Promise<BurstServer | null>;
   /** Deleting a server that's already gone is fine. */

@@ -112,7 +112,7 @@ variable with comments. The essentials:
 | `OPENROUTER_MODEL` / `_EXTRACTION_MODEL` / `_SMART_MODEL` / `_WEB_MODEL` | Server-key models per task |
 | `WEB_SEARCH_*`, `ENRICH_*` | Web lookup switch, searches per lookup, caps, prefetch and thresholds |
 | `MAX_PAGES`, `MAX_ITEMS`, `SCRAPE_MAX_CONCURRENT_PAGES` | Crawl limits |
-| `BURST_*` | Extra browser servers rented from DigitalOcean while pages queue up — see [on-demand browsers](docs/deployment.md#extra-browser-servers-on-demand) |
+| `BURST_*` | Extra browser servers rented from DigitalOcean while pages queue up; admins can manage settings, status and images in **Browser servers** — see [on-demand browsers](docs/deployment.md#extra-browser-servers-on-demand) |
 | `PUBLIC_URL`, `VAPID_*` | Links in notifications; Web Push keys (auto-generated if blank) |
 | `ADMIN_EMAIL`, `ADMIN_PASSWORD` | First admin, created on boot when no user exists |
 | `SESSION_COOKIE_SECURE` | Session cookie `Secure` flag (default: on when `PUBLIC_URL` is https) |

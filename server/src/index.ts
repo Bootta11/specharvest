@@ -27,6 +27,7 @@ import { embed } from "./embedding.ts";
 import { proxyConfigured } from "./crawler/browser.ts";
 import { inspectUrl } from "./crawler/inspect.ts";
 import { startBurstServers } from "./crawler/burst/index.ts";
+import { registerBurstRoutes } from "./crawler/burst/routes.ts";
 import { FatalDriverError } from "./crawler/driver.ts";
 import { connectionFor, extensionStatus, registerExtensionGateway } from "./extension/gateway.ts";
 import { registerExtensionRoutes } from "./extension/routes.ts";
@@ -90,6 +91,8 @@ const idParam = (p: unknown) => {
 const notFound = (reply: FastifyReply) => reply.status(404).send({ error: "Not found" });
 
 registerAuthRoutes(app);
+const burst = startBurstServers();
+registerBurstRoutes(app, () => burst);
 registerLlmRoutes(app);
 await registerExtensionGateway(app);
 registerExtensionRoutes(app);
@@ -506,8 +509,6 @@ if (fs.existsSync(clientDist)) {
 
 await app.listen({ port: env.PORT, host: "0.0.0.0" });
 log.info(`SpecHarvest API listening on :${env.PORT} (data: ${env.DATA_DIR})`);
-const burst = startBurstServers();
-
 const shutdown = async () => {
   // Don't outlive Docker's stop timeout if something still holds the server open.
   setTimeout(() => process.exit(0), 10_000).unref();

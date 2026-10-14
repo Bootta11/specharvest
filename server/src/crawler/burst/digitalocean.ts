@@ -37,6 +37,16 @@ export interface ImageBuilder {
   deleteSnapshot(id: string): Promise<void>;
 }
 
+export interface DigitalOceanOptions {
+  regions: Array<{ slug: string; name: string; available: boolean }>;
+  sizes: Array<{ slug: string; description: string; priceHourly: number; regions: string[]; available: boolean }>;
+}
+
+export interface DigitalOceanProvider extends BurstProvider, ImageBuilder {
+  options(): Promise<DigitalOceanOptions>;
+  testScopes(): Promise<Record<string, { ok: boolean; error?: string }>>;
+}
+
 const ACTION_POLL_MS = 5_000;
 const ACTION_TIMEOUT_MS = 20 * 60_000;
 
@@ -49,7 +59,7 @@ export function digitalOcean(o: {
   sshKeyId?: string;
   fetch?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
-}): BurstProvider & ImageBuilder {
+}): DigitalOceanProvider {
   const sleep = o.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const doFetch = o.fetch ?? fetch;
 
@@ -120,13 +130,13 @@ export function digitalOcean(o: {
       else await call("POST", "/firewalls", body);
     },
 
-    async create({ name, tag, userData }) {
+    async create({ name, tag, userData, image }) {
       const r = await call<{ droplet: Droplet }>("POST", "/droplets", {
         name,
         region: o.region,
         size: o.size,
         // A snapshot is named by its numeric id, a DigitalOcean image by its slug.
-        image: /^\d+$/.test(o.image) ? Number(o.image) : o.image,
+        image: /^\d+$/.test(image ?? o.image) ? Number(image ?? o.image) : (image ?? o.image),
         user_data: userData,
         tags: [tag],
         ipv6: false,
@@ -173,6 +183,46 @@ export function digitalOcean(o: {
 
     async deleteSnapshot(id) {
       await call("DELETE", `/snapshots/${encodeURIComponent(id)}`, undefined, true);
+    },
+
+    async options() {
+      const [regions, sizes] = await Promise.all([
+        call<{ regions: Array<{ slug: string; name: string; available: boolean }> }>("GET", "/regions?per_page=200"),
+        call<{ sizes: Array<{ slug: string; description: string; price_hourly: number; regions: string[]; available: boolean }> }>("GET", "/sizes?per_page=200"),
+      ]);
+      return {
+        regions: regions?.regions ?? [],
+        sizes: (sizes?.sizes ?? []).map((size) => ({
+          slug: size.slug,
+          description: size.description,
+          priceHourly: size.price_hourly,
+          regions: size.regions,
+          available: size.available,
+        })),
+      };
+    },
+
+    async testScopes() {
+      const checks: Array<[string, string]> = [
+        ["droplet:read", "/droplets?per_page=1"],
+        ["firewall:read", "/firewalls?per_page=1"],
+        ["sizes:read", "/sizes?per_page=1"],
+        ["image:read", "/snapshots?resource_type=droplet&per_page=1"],
+        ["actions:read", "/actions?per_page=1"],
+        ["tag:read", "/tags?per_page=1"],
+      ];
+      return Object.fromEntries(
+        await Promise.all(
+          checks.map(async ([scope, path]) => {
+            try {
+              await call("GET", path);
+              return [scope, { ok: true }] as const;
+            } catch (err) {
+              return [scope, { ok: false, error: (err as Error).message }] as const;
+            }
+          }),
+        ),
+      );
     },
 
     async hourlyPrice() {

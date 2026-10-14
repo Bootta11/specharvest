@@ -229,4 +229,24 @@ describe("burst controller", () => {
     expect(w.provider.create).toHaveBeenCalledTimes(1);
     expect(w.controller.servers()).toEqual([]);
   });
+
+  it("reads config on every tick and drains a running server when switched off", async () => {
+    const w = world();
+    const original = cfg.enabled;
+    cfg.enabled = true;
+    try {
+      w.setWaiting(5);
+      await w.controller.tick();
+      w.advance(60_000);
+      await w.controller.tick();
+      await settle();
+      expect(w.controller.servers()).toHaveLength(1);
+      cfg.enabled = false;
+      await w.controller.tick();
+      await settle();
+      expect(w.controller.servers()).toHaveLength(0);
+    } finally {
+      cfg.enabled = original;
+    }
+  });
 });

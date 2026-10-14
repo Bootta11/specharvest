@@ -167,13 +167,7 @@ for (const key of FILE_SECRETS) {
   if (file && !process.env[key]) process.env[key] = fs.readFileSync(file, "utf8").trim();
 }
 
-const parsed = envSchema
-  .superRefine((e, ctx) => {
-    if (e.BURST_PROVIDER === "digitalocean" && (!e.BURST_DO_TOKEN || !e.BURST_ALLOWED_IP)) {
-      ctx.addIssue({ code: "custom", message: "BURST_PROVIDER=digitalocean needs BURST_DO_TOKEN and BURST_ALLOWED_IP", path: ["BURST_PROVIDER"] });
-    }
-  })
-  .parse(process.env);
+const parsed = envSchema.parse(process.env);
 
 /** Repo root (server/src/config.ts → ../..), so relative DATA_DIR works the same from any cwd. */
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");

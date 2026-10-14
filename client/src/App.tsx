@@ -8,6 +8,7 @@ import { SettingsModal } from "./components/SettingsModal.tsx";
 import { UserMenu } from "./components/UserMenu.tsx";
 import { AccountModal } from "./components/AccountModal.tsx";
 import { AdminModal } from "./components/AdminModal.tsx";
+import { BrowserServersModal } from "./components/BrowserServersModal.tsx";
 import { LlmSettingsModal } from "./components/LlmSettingsModal.tsx";
 import { LoginView, UnreachableView } from "./views/LoginView.tsx";
 import { CONNECT_EXTENSION_PATH, ConnectExtensionView } from "./views/ConnectExtensionView.tsx";
@@ -48,7 +49,7 @@ export default function App() {
 }
 
 function Workspace({ user, auth }: { user: UserSummary; auth: Auth }) {
-  const [dialog, setDialog] = useState<"account" | "llm" | "admin" | null>(null);
+  const [dialog, setDialog] = useState<"account" | "llm" | "admin" | "servers" | null>(null);
   const [tab, setTab] = useState<Tab>(() => (takeJobParam() || hasPendingShare() || storageGet("tab") === "ingest" ? "ingest" : "search"));
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -187,7 +188,7 @@ function Workspace({ user, auth }: { user: UserSummary; auth: Auth }) {
                 <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
               </svg>
             </button>
-            <UserMenu user={user} onAccount={() => setDialog("account")} onLlm={() => setDialog("llm")} onAdmin={() => setDialog("admin")} onLogout={auth.logout} onSwitch={auth.switchTo} onAddAccount={auth.addAccount} />
+            <UserMenu user={user} onAccount={() => setDialog("account")} onLlm={() => setDialog("llm")} onAdmin={() => setDialog("admin")} onServers={() => setDialog("servers")} onLogout={auth.logout} onSwitch={auth.switchTo} onAddAccount={auth.addAccount} />
           </div>
           <nav className="order-last flex w-full rounded-lg bg-stone-100 p-1 text-sm md:order-none md:w-auto dark:bg-stone-900" aria-label="Main">
             {(["search", "ingest"] as const).map((t) => (
@@ -252,6 +253,7 @@ function Workspace({ user, auth }: { user: UserSummary; auth: Auth }) {
       {dialog === "account" && <AccountModal user={user} onUpdated={auth.setUser} onDelete={auth.deleteAccount} onClose={() => setDialog(null)} />}
       {dialog === "llm" && <LlmSettingsModal onClose={() => setDialog(null)} onChanged={refreshConfig} />}
       {dialog === "admin" && <AdminModal me={user} onClose={() => setDialog(null)} />}
+      {dialog === "servers" && <BrowserServersModal onClose={() => setDialog(null)} />}
     </div>
   );
 }

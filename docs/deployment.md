@@ -155,7 +155,7 @@ only for the minutes it runs.
   finish first.
 - **Spending limits:**
   - `BURST_MAX_SERVERS` (1) servers at once;
-  - `BURST_MAX_HOURS_PER_DAY` (12) server-hours per UTC day, counted in memory;
+  - `BURST_MAX_HOURS_PER_DAY` (12) server-hours per UTC day, recorded in SQLite so restarts do not reset it;
   - after a failed start, the next try waits 10 min;
   - at startup and every 10 min, droplets tagged `<BURST_NAME>-burst` that this instance doesn't
     run are deleted (leftovers of a crash or restart), and on shutdown it deletes its own.
@@ -185,10 +185,15 @@ Setup:
    | actions | read | only for `npm run burst:image`: waiting for the shutdown and the snapshot |
    | droplet | update | only for `npm run burst:image`: shutting the build droplet down |
 
-   Related read scopes that DigitalOcean adds on its own (regions, images…) are fine. A missing
+   The admin panel's **Test** button checks the read scopes for droplets, firewalls, sizes, images,
+   actions and tags. Write scopes cannot be checked without changing the account. Related read
+   scopes that DigitalOcean adds on its own (regions, images…) are fine. A missing
    scope shows up in the log as `DigitalOcean POST /droplets → 403: …`.
-2. Set `BURST_PROVIDER=digitalocean`, `BURST_DO_TOKEN` (or `BURST_DO_TOKEN_FILE`) and
-   `BURST_ALLOWED_IP`.
+2. Set `BURST_PROVIDER=digitalocean`. Set `BURST_DO_TOKEN` (or `BURST_DO_TOKEN_FILE`) and
+   `BURST_ALLOWED_IP` in env to keep the feature on immediately, or enter them under
+   **Account menu → Browser servers** and switch it on there. Panel values override env; removing
+   one returns to its env value. The token is encrypted with `ENCRYPTION_KEY` and is never returned
+   by the API. If that key is lost, enter the token again.
 3. Optional: add an SSH key to the account and set `BURST_DO_SSH_KEY_ID`. Without it, DigitalOcean
    emails a root password for every server.
 4. The startup log shows `On-demand browser servers on digitalocean: …`. The `page slots: …`
@@ -197,6 +202,11 @@ Setup:
 Instances sharing one account (dev and live) need different `BURST_NAME`s, or each deletes the
 other's servers as leftovers.
 
+The admin panel also changes the server count, tabs, queue threshold, delays, lifetimes and daily
+limit without a redeploy. `BURST_NAME`, `BURST_PROVIDER`, `BURST_DO_SSH_KEY_ID` and
+`ENCRYPTION_KEY` remain env-only. Turning the feature off drains active pages for up to two minutes
+and deletes the rented servers.
+
 #### Faster starts from our own image
 
 A fresh Debian droplet spends most of its start installing Chromium and Caddy. `npm run burst:image`
@@ -204,7 +214,7 @@ does that once:
 1. It starts a Debian 13 droplet that installs all updates, Chromium and Caddy, and checks that
    Chromium runs.
 2. It saves the droplet as a snapshot named `<BURST_NAME>-browser-<date>`, then deletes the droplet.
-3. It keeps the two newest of our images (`--keep N`) and prints the id to set as `BURST_IMAGE`.
+3. It keeps the two newest of our images (`--keep N`) and switches new servers to the latest one.
 
 A build takes ~2–5 min and costs under a cent. Storing the image costs ~$0.06 per GB per month
 (~1.7 GB, about $0.10 a month). Servers started from it skip the install and are ready in about
@@ -224,9 +234,11 @@ docker exec -w /app $(docker ps -q -f ancestor=ghcr.io/bootta11/specharvest:late
 
 Paste it as one line: a line break in the middle runs Node without the script.
 
-An image freezes Chromium at the day it was built. **Rebuild it weekly**, like the browser image,
-and update `BURST_IMAGE`. If `BURST_IMAGE` is an image that no longer exists, server starts fail with
-`422` in the log. The previous image is kept for that.
+The app builds the first image once account setup is complete, then rebuilds it every seven days by
+default. The panel shows progress and has **Rebuild now**; set the interval to 0 to turn automatic
+builds off. A failed automatic build retries after 24 hours. `BURST_IMAGE` is the fallback until the
+first successful app build. The CLI/SSH command above remains a fallback. If the fallback image no
+longer exists, server starts fail with `422` in the log. The previous app-built image is kept.
 
 ## Security settings
 

@@ -3,6 +3,10 @@ import type {
   ApiKeyCreated,
   ApiKeySummary,
   AuthStatus,
+  BurstBuildStatus,
+  BurstOptions,
+  BurstSettings,
+  BurstStatus,
   Collection,
   CollectionGroup,
   CollectionProducts,
@@ -186,6 +190,14 @@ export const api = {
   adminSettings: () => request<AdminSettings>("GET", "/api/settings/admin"),
   saveAdminSettings: (body: Partial<Pick<AdminSettings, "signupEnabled" | "serverLlmAccess" | "serverLlmDailyLimitUsd">>) =>
     request<AdminSettings>("PUT", "/api/settings/admin", body),
+  burstStatus: () => request<BurstStatus>("GET", "/api/admin/burst"),
+  saveBurstSettings: (body: Partial<Record<keyof BurstSettings, BurstSettings[keyof BurstSettings] | null>>) => request<BurstStatus>("PUT", "/api/admin/burst", body),
+  saveBurstAccount: (body: { token?: string | null; allowedIp?: string | null; region?: string | null; size?: string | null }) =>
+    request<BurstStatus>("PUT", "/api/admin/burst/account", body),
+  testBurst: (token?: string) => request<Record<string, { ok: boolean; error?: string }>>("POST", "/api/admin/burst/test", token ? { token } : {}),
+  burstOptions: () => request<BurstOptions>("GET", "/api/admin/burst/options"),
+  detectBurstIp: () => request<{ ip: string }>("POST", "/api/admin/burst/detect-ip"),
+  rebuildBurstImage: () => request<BurstBuildStatus>("POST", "/api/admin/burst/image"),
   // LLM provider (own API keys, model picks)
   llmSettings: () => request<LlmSettingsResponse>("GET", "/api/settings/llm"),
   saveLlmKey: (provider: string, apiKey: string, baseUrl?: string) => request<LlmSettingsResponse>("PUT", `/api/settings/llm/keys/${encodeURIComponent(provider)}`, { apiKey, baseUrl }),

@@ -9,6 +9,7 @@ export function UserMenu({
   onAccount,
   onLlm,
   onAdmin,
+  onServers,
   onLogout,
   onSwitch,
   onAddAccount,
@@ -17,6 +18,7 @@ export function UserMenu({
   onAccount: () => void;
   onLlm: () => void;
   onAdmin: () => void;
+  onServers: () => void;
   onLogout: () => void;
   onSwitch: (id: string) => void;
   onAddAccount: () => void;
@@ -72,9 +74,14 @@ export function UserMenu({
             LLM provider
           </button>
           {user.role === "admin" && (
-            <button role="menuitem" className={item} onClick={pick(onAdmin)}>
-              Users & sign-up
-            </button>
+            <>
+              <button role="menuitem" className={item} onClick={pick(onAdmin)}>
+                Users & sign-up
+              </button>
+              <button role="menuitem" className={item} onClick={pick(onServers)}>
+                Browser servers
+              </button>
+            </>
           )}
           {isNative && (
             <div className="border-y border-stone-200 py-1 dark:border-stone-800">

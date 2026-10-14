@@ -141,6 +141,21 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT NOT NULL
 );
 
+-- Rented browser and image-build droplets. No FKs: operational history stands alone.
+CREATE TABLE IF NOT EXISTS burst_servers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  droplet_id TEXT,
+  image TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  ready_at INTEGER,
+  ended_at INTEGER,
+  end_reason TEXT,
+  pages INTEGER NOT NULL DEFAULT 0,
+  cost_usd REAL
+);
+CREATE INDEX IF NOT EXISTS burst_servers_started ON burst_servers(started_at);
+
 -- Web Push subscriptions, one per browser that opted in.
 CREATE TABLE IF NOT EXISTS push_subscriptions (
   endpoint TEXT PRIMARY KEY,
@@ -1654,6 +1669,71 @@ export function setSetting(key: string, value: unknown) {
 
 export function deleteSetting(key: string) {
   getDb().prepare("DELETE FROM settings WHERE key = ?").run(key);
+}
+
+export interface BurstServerRow {
+  id: number;
+  name: string;
+  dropletId: string | null;
+  image: string;
+  startedAt: number;
+  readyAt: number | null;
+  endedAt: number | null;
+  endReason: string | null;
+  pages: number;
+  costUsd: number | null;
+}
+
+const toBurstServer = (r: Row): BurstServerRow => ({
+  id: Number(r.id),
+  name: String(r.name),
+  dropletId: r.droplet_id == null ? null : String(r.droplet_id),
+  image: String(r.image),
+  startedAt: Number(r.started_at),
+  readyAt: r.ready_at == null ? null : Number(r.ready_at),
+  endedAt: r.ended_at == null ? null : Number(r.ended_at),
+  endReason: r.end_reason == null ? null : String(r.end_reason),
+  pages: Number(r.pages),
+  costUsd: r.cost_usd == null ? null : Number(r.cost_usd),
+});
+
+export function createBurstServer(name: string, image: string, startedAt: number): number {
+  return Number(getDb().prepare("INSERT INTO burst_servers (name, image, started_at) VALUES (?, ?, ?)").run(name, image, startedAt).lastInsertRowid);
+}
+
+export function updateBurstServer(id: number, patch: { dropletId?: string; readyAt?: number; endedAt?: number; endReason?: string; pages?: number; costUsd?: number }) {
+  const fields: string[] = [];
+  const values: SQLInputValue[] = [];
+  for (const [key, value] of Object.entries(patch)) {
+    fields.push(`${({ dropletId: "droplet_id", readyAt: "ready_at", endedAt: "ended_at", endReason: "end_reason", pages: "pages", costUsd: "cost_usd" } as Record<string, string>)[key]} = ?`);
+    values.push(value);
+  }
+  if (fields.length) getDb().prepare(`UPDATE burst_servers SET ${fields.join(", ")} WHERE id = ?`).run(...values, id);
+}
+
+export function listBurstServers(limit = 20): BurstServerRow[] {
+  return (getDb().prepare("SELECT * FROM burst_servers ORDER BY started_at DESC LIMIT ?").all(limit) as Row[]).map(toBurstServer);
+}
+
+export function listOpenBurstServers(): BurstServerRow[] {
+  return (getDb().prepare("SELECT * FROM burst_servers WHERE ended_at IS NULL ORDER BY started_at").all() as Row[]).map(toBurstServer);
+}
+
+/** Usage overlapping one UTC day. Open rows count through `now`. */
+export function burstUsageSince(since: number, now = Date.now()): { ms: number; costUsd: number } {
+  const rows = getDb().prepare("SELECT started_at, ended_at, cost_usd FROM burst_servers WHERE started_at < ? AND COALESCE(ended_at, ?) > ?").all(now, now, since) as Row[];
+  let ms = 0;
+  let costUsd = 0;
+  for (const row of rows) {
+    const started = Math.max(Number(row.started_at), since);
+    const ended = Math.min(row.ended_at == null ? now : Number(row.ended_at), now);
+    ms += Math.max(0, ended - started);
+    if (row.cost_usd != null) {
+      const full = Math.max(1, (row.ended_at == null ? now : Number(row.ended_at)) - Number(row.started_at));
+      costUsd += Number(row.cost_usd) * (Math.max(0, ended - started) / full);
+    }
+  }
+  return { ms, costUsd };
 }
 
 export interface PushSubscriptionRow {

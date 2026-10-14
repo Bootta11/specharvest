@@ -628,6 +628,82 @@ export interface AdminSettings {
   serverLlmConfigured: boolean;
 }
 
+// ---------- On-demand browser servers ----------
+
+export const burstSettingsSchema = z.object({
+  enabled: z.boolean(),
+  maxServers: z.number().int().min(1),
+  tabs: z.number().int().min(1),
+  minWaiting: z.number().int().min(1),
+  afterSeconds: z.number().int().min(0),
+  idleMinutes: z.number().int().min(0),
+  maxMinutes: z.number().int().min(10),
+  maxHoursPerDay: z.number().min(0),
+  autoRebuildDays: z.number().int().min(0),
+});
+
+export type BurstSettings = z.infer<typeof burstSettingsSchema>;
+export type BurstSettingKey = keyof BurstSettings;
+
+export interface BurstAccountStatus {
+  token: { set: boolean; last4: string | null; source: "app" | "env" | null; warning?: string };
+  allowedIp: string | null;
+  region: string;
+  size: string;
+  sources: { allowedIp: "app" | "env" | null; region: "app" | "env"; size: "app" | "env" };
+}
+
+export interface BurstServerStatus {
+  name: string;
+  state: "starting" | "up" | "stopping";
+  startedAt: number;
+  readyAt: number | null;
+  active: number;
+  tabs: number;
+  pages: number;
+}
+
+export interface BurstServerHistory {
+  id: number;
+  name: string;
+  dropletId: string | null;
+  image: string;
+  startedAt: number;
+  readyAt: number | null;
+  endedAt: number | null;
+  endReason: string | null;
+  pages: number;
+  costUsd: number | null;
+}
+
+export interface BurstBuildStatus {
+  running: boolean;
+  startedAt: number | null;
+  steps: string[];
+  lastError: string | null;
+  lastFinishedAt: number | null;
+}
+
+export interface BurstStatus {
+  providerEnabled: boolean;
+  available: boolean;
+  settings: BurstSettings;
+  envDefaults: BurstSettings;
+  overridden: BurstSettingKey[];
+  account: BurstAccountStatus;
+  running: BurstServerStatus[];
+  today: { hours: number; limit: number; costUsd: number };
+  history: BurstServerHistory[];
+  image: { id: string; name: string; createdAt: string | null; ageDays: number | null; source: "build" | "env" } | null;
+  build: BurstBuildStatus;
+  priceHourly: number | null;
+}
+
+export interface BurstOptions {
+  regions: Array<{ slug: string; name: string; available: boolean }>;
+  sizes: Array<{ slug: string; description: string; priceHourly: number; regions: string[]; available: boolean }>;
+}
+
 export const loginSchema = z.object({ email: z.string().trim().toLowerCase().pipe(z.email()), password: z.string().min(1).max(200) });
 export const signupSchema = z.object({ email: z.string().trim().toLowerCase().pipe(z.email()), password: z.string().min(8).max(200) });
 export const updateAccountSchema = z.object({
