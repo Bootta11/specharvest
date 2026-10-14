@@ -79,8 +79,10 @@ last page. The walk keeps its own browser page, so a crawl has up to
 `SCRAPE_MAX_CONCURRENT_PAGES` + 1 pages open. Hand-added items and gone-marking
 still wait for the whole walk.
 
-**Page slots.** Every crawl and page check on the server shares one pool of
-`SCRAPE_MAX_CONCURRENT_PAGES` browser pages (`crawler/slots.ts`). When it's full, waiting
+**Page slots.** Every crawl and page check on the server shares one pool of browser pages
+(`crawler/slots.ts`): `SCRAPE_MAX_CONCURRENT_PAGES` per configured browser, plus `BURST_TABS` per
+rented one ([extra browsers](deployment.md#crawl-capacity)). Each page runs in the browser with
+the most free pages (`crawler/browser-pool.ts`). When it's full, waiting
 pages go in this order: page checks and single added items (someone is looking at the form),
 then listing detection and walks (a crawl's first results), then item pages. Under load a new
 crawl therefore starts producing results soon, instead of queueing behind every item page
@@ -230,9 +232,10 @@ How to read it (from `lib/timing.ts`; the parts are summed over pages that ran i
   is slow.
 - **LLM**: time per purpose. Slow calls point at the provider or model.
 
-With `DEBUG=1` the server also logs one line per page (URL, priority, slot wait, pages queued ahead, busy slots,
+With `DEBUG=1` the server also logs one line per page (URL, priority and browser, e.g. `[detail on burst-1]`, slot
+wait, pages queued ahead, busy slots,
 each opening and loading phase, requests checked, close time) and per LLM call (purpose, model, duration, tokens). Pages that take ≥ 20 s and LLM calls ≥ 20 s are
-logged without `DEBUG`. While pages wait for a slot, `page slots: n/N busy, m pages waiting` is logged every 30 s.
+logged without `DEBUG`. While pages wait for a slot, `page slots: n/N busy (main 5/5, burst-1 6/6), m pages waiting` is logged every 30 s.
 
 ## Stop & resume
 

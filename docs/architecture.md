@@ -16,7 +16,7 @@ React UI (Vite) ──HTTP/SSE──► Fastify API ──► crawler (PageDrive
 | Path | What |
 | --- | --- |
 | `shared/` | Types + zod schemas shared by API and UI (query plan, job events, …) |
-| `server/src/crawler/` | `browser.ts` (remote/local Chrome, page slots, proxy, navigation + bot-wall check), `detect.ts` (card + pagination detection), `paginate.ts` (walkers, card text, walk completeness), `fingerprint.ts` (change-detection hashes), `sanitize.ts` (LLM-ready HTML, detail-page text snapshot), `job.ts` (crawl orchestration) |
+| `server/src/crawler/` | `browser.ts` (remote/local Chrome, page slots, proxy, navigation + bot-wall check), `browser-pool.ts` (which browser takes a page), `burst/` (DigitalOcean servers rented while pages queue up), `detect.ts` (card + pagination detection), `paginate.ts` (walkers, card text, walk completeness), `fingerprint.ts` (change-detection hashes), `sanitize.ts` (LLM-ready HTML, detail-page text snapshot), `job.ts` (crawl orchestration) |
 | `server/src/extension/` | `gateway.ts` (the extension's WebSocket: auth, commands, tab slots, permission waits), `driver.ts` (`PageDriver` over the socket), `routes.ts` (pairing, connected browsers) — see [browser extension](extension.md) |
 | `shared/src/page-scripts.ts` | DOM functions both runners run in crawled pages (card collection, detail snapshot, page signals…) |
 | `extension/` | Chrome extension (WXT + React): background worker (socket, crawl tabs, site permissions), popup, settings, permission prompt page |

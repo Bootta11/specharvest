@@ -11,6 +11,8 @@ export default defineConfig({
   outDir: testHosts.length ? "dist-test" : "dist", // not dot-folders: macOS file pickers hide those (Load unpacked)
   modules: ["@wxt-dev/module-react"],
   vite: () => ({ plugins: [tailwindcss()] }),
+  // Dev-reload server; off 3000, where a Puppeteer ssh tunnel usually sits.
+  dev: { server: { port: 4719 } },
   manifest: {
     name: "SpecHarvest",
     description: "Lets SpecHarvest crawl shop listings in your own Chrome — the sites you allow, at your pace.",

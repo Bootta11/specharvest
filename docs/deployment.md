@@ -213,11 +213,16 @@ images.
 
 No secret goes into the image: each server's token is still written at boot, and until then Caddy
 only answers 403. Run it where `BURST_ALLOWED_IP` points (the firewall lets only that IP check on
-the build), e.g. on the host:
+the build), i.e. on the host, in the app container:
 
 ```bash
-docker exec specharvest /nodejs/bin/node --import tsx server/src/scripts/burst-image.ts
+# Compose setup from this repo (service "app")
+docker compose exec -w /app app /nodejs/bin/node --import tsx server/src/scripts/burst-image.ts
+# any setup: find the container by its image
+docker exec -w /app $(docker ps -q -f ancestor=ghcr.io/bootta11/specharvest:latest) /nodejs/bin/node --import tsx server/src/scripts/burst-image.ts
 ```
+
+Paste it as one line: a line break in the middle runs Node without the script.
 
 An image freezes Chromium at the day it was built. **Rebuild it weekly**, like the browser image,
 and update `BURST_IMAGE`. If `BURST_IMAGE` is an image that no longer exists, server starts fail with
