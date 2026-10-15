@@ -188,6 +188,8 @@ export const searchRequestSchema = z.object({
   filters: z.array(filterSchema).max(100).optional(),
   /** Also return `facets` (value counts per field) for a filter panel. */
   facets: z.boolean().optional(),
+  /** Order picked in the UI; used when the parsed `query` (or the given `plan`) has no order of its own. */
+  sort: queryPlanSchema.shape.sort,
 });
 export type SearchRequest = z.infer<typeof searchRequestSchema>;
 

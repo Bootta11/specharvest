@@ -52,6 +52,8 @@ async function runSearch(req: SearchRequest, viewer: db.Viewer, scope: db.Collec
     db.recordSearch(viewer.id, db.historySlot(collectionId, req.groupId), normalizeQuery(req.query));
   }
   else plan = { filters: [], sort: null, semanticText: null, missingAttributes: [], show: [] };
+  // The order picked in the UI, unless the typed request asked for one ("cheapest").
+  if (!plan.sort && req.sort) plan = sanitizePlan({ ...plan, sort: req.sort }, keys, db.keyAliasesOf);
   // Filter-panel conditions, merged after parsing so cached plans never hold them.
   if (req.filters?.length) {
     const extra = sanitizePlan({ filters: req.filters, sort: null, semanticText: null, missingAttributes: [] }, keys, db.keyAliasesOf).filters;

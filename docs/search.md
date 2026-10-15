@@ -50,6 +50,14 @@ removing one re-runs the search with the edited `plan` (no LLM call).
 3. If `semanticText` is set, candidates are ranked by cosine similarity in
    LanceDB (`item_id IN (…)` prefilter).
 4. An explicit sort wins; semantic score breaks ties; missing sort values go last.
+   Without a sort: best match for a meaning search, otherwise newest first.
+
+**Choosing the order yourself.** The results bar has a *Sort* menu with newest (or best match), price, name and the
+scope's numeric fields, most common first. In the list view, column headers sort too: one click ↑, the next ↓, the
+third back to the default. A picked order re-runs the same plan, with no LLM call and no web lookup, and is sent as
+`sort` with later typed requests. It applies unless the request asks for its own order ("cheapest" still means
+price ↑). Removing the violet sort chip goes back to the default. Prices in different currencies are compared by
+amount only, and the results bar says so when that happens.
 
 ## Filter panel
 

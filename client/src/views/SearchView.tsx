@@ -8,6 +8,7 @@ import { ItemModal } from "../components/ItemModal.tsx";
 import { CompareTable } from "../components/CompareTable.tsx";
 import { FilterIcon, FilterPanel } from "../components/FilterPanel.tsx";
 import { Modal } from "../components/Modal.tsx";
+import { SortMenu, type Sort } from "../components/SortMenu.tsx";
 
 type ViewMode = "list" | "cards";
 const VIEW_STORAGE = "specharvest.resultsView";
@@ -111,6 +112,8 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
   const seq = useRef(0);
   /** Keys set in the filter panel: their conditions stay when a new request is typed. */
   const [manualKeys, setManualKeys] = useState<Set<string>>(() => new Set());
+  /** The order picked in the menu or a column header: kept for typed requests that don't ask for their own. */
+  const [manualSort, setManualSort] = useState<Sort>(null);
   const [filtersOpen, setFiltersOpenState] = useState(() => storageGet(FILTERS_STORAGE) !== "0");
   const [sheetOpen, setSheetOpen] = useState(false);
   const desktop = useDesktop();
@@ -142,7 +145,7 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
   const loadRecent = useCallback(() => api.recentSearches(scope).then(setRecent, () => setRecent([])), [scope]);
 
   const run = useCallback(
-    async function search(body: { query?: string; plan?: QueryPlan; filters?: Filter[]; enrich?: boolean; includeGone?: boolean }) {
+    async function search(body: { query?: string; plan?: QueryPlan; filters?: Filter[]; enrich?: boolean; includeGone?: boolean; sort?: Sort }) {
       // Anything run now supersedes a filter change or retry still waiting to be sent.
       clearTimeout(filterTimer.current);
       clearTimeout(retryTimer.current);
@@ -177,6 +180,7 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
     setEnrichJobId(null);
     setQuery("");
     setManualKeys(new Set());
+    setManualSort(null);
     run({});
     loadRecent();
   }, [scope]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -194,7 +198,7 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
   const runQuery = (q: string) => {
     setQuery(q);
     setEnrichJobId(null);
-    run({ query: q, filters: manualFilters() });
+    run({ query: q, filters: manualFilters(), sort: manualSort });
   };
 
   // When a web lookup finishes, re-run the same plan (without starting another lookup).
@@ -206,12 +210,22 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
   const submit = (e?: FormEvent) => {
     e?.preventDefault();
     setEnrichJobId(null);
-    run(query.trim() ? { query: query.trim(), filters: manualFilters() } : { filters: manualFilters() });
+    run(query.trim() ? { query: query.trim(), filters: manualFilters(), sort: manualSort } : { filters: manualFilters(), sort: manualSort });
   };
 
   const editPlan = (next: QueryPlan) => {
     setManualKeys((prev) => new Set([...prev].filter((k) => next.filters.some((f) => f.key === k))));
     run({ plan: next });
+  };
+
+  /** A new order from the menu or a column header: re-runs the same plan (no LLM call, no web lookup). */
+  const chooseSort = (sort: Sort) => {
+    setManualSort(sort);
+    if (!result) return run({ sort, enrich: false });
+    // The field sorted by until now keeps its column (as a shown field), so the list doesn't lose it under the cursor.
+    const prev = result.plan.sort?.key;
+    const keep = !!prev && prev !== sort?.key && !isListingField(prev) && !result.plan.show.includes(prev) && !result.plan.filters.some((f) => f.key === prev);
+    editPlan({ ...result.plan, sort, show: keep ? [...result.plan.show, prev] : result.plan.show });
   };
 
   /** A filter-panel change: replaces every condition on `key`, shows at once, searches after a short pause (no LLM call, no web lookup). */
@@ -258,6 +272,7 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
       )
     : [];
   const missingKeys = new Set(plan?.missingAttributes.map((m) => m.key) ?? []);
+  const mixedCurrencySort = plan?.sort?.key === "price" && new Set(result?.items.map((i) => i.currency).filter(Boolean)).size > 1;
   const enriching = enrichJobId !== null && enrich.job && (enrich.job.status === "running" || enrich.job.status === "queued");
   const pendingKeys = enriching ? new Set(highlightKeys) : new Set<string>();
   const hasFields = highlightKeys.some((k) => k !== "price");
@@ -411,7 +426,7 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
               </Chip>
             ))}
             {plan.sort && (
-              <Chip tone={missingKeys.has(plan.sort.key) ? "pending" : "sort"} onRemove={() => editPlan({ ...plan, sort: null })}>
+              <Chip tone={missingKeys.has(plan.sort.key) ? "pending" : "sort"} onRemove={() => chooseSort(null)}>
                 {missingKeys.has(plan.sort.key) && <GlobeIcon className="mr-1 inline size-3.5" />}
                 {plan.sort.dir === "asc" ? "↑" : "↓"} {specLabel(plan.sort.key)}
               </Chip>
@@ -533,6 +548,7 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
               <span>
                 <strong className="text-stone-900 dark:text-stone-100">{result.total}</strong> match{result.total === 1 ? "" : "es"}
                 {result.unknown.length > 0 && <> · {result.unknown.length} can’t be judged yet</>}
+                {mixedCurrencySort && <span className="block text-xs text-amber-700 dark:text-amber-400">Prices in different currencies are sorted by amount only</span>}
               </span>
               <span className="flex flex-wrap items-center gap-3">
                 <label className="inline-flex items-center gap-1.5 text-xs" title="Listings missing from the latest complete crawl">
@@ -540,6 +556,7 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
                   Show sold/removed
                 </label>
                 {loading && <span className="animate-pulse">updating…</span>}
+                <SortMenu sort={plan?.sort ?? null} keys={keys} semantic={!!plan?.semanticText} onChange={chooseSort} />
                 {hasFields && (
                   <span className="inline-flex rounded-lg border border-stone-200 p-0.5 text-xs dark:border-stone-700" role="group" aria-label="Results view">
                     {(["list", "cards"] as const).map((v) => (
@@ -560,7 +577,7 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
           )}
 
           {result && result.items.length > 0 && mode === "list" ? (
-            <CompareTable items={result.items} keys={keys} fieldKeys={highlightKeys} sort={plan?.sort ?? null} pendingKeys={pendingKeys} onOpen={setOpen} />
+            <CompareTable items={result.items} keys={keys} fieldKeys={highlightKeys} sort={plan?.sort ?? null} onSort={chooseSort} pendingKeys={pendingKeys} onOpen={setOpen} />
           ) : (
             <div className={`grid grid-cols-1 gap-4 sm:grid-cols-2 ${sidebar ? "xl:grid-cols-3" : "lg:grid-cols-3 xl:grid-cols-4"}`}>
               {result?.items.map((item) => (
