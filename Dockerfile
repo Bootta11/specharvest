@@ -35,7 +35,7 @@ RUN npm run build --workspace client \
   # LanceDB's Linux binary ships with debug symbols (~390 MB -> ~255 MB stripped).
   && strip --strip-unneeded node_modules/@lancedb/lancedb-linux-*/*.node
 
-FROM gcr.io/distroless/nodejs24-debian13:nonroot@sha256:9eeb7f5887d0e239e78264b06f7f11d2e14be534050481803a9e4728fcdd278e
+FROM gcr.io/distroless/nodejs24-debian13:nonroot@sha256:59c479c9b8c123e66047315c968aa2d35e31ae5149c856e4110a79c8b3563f0b
 WORKDIR /app
 ARG GIT_SHA=""
 ENV NODE_ENV=production \
