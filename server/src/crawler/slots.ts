@@ -6,7 +6,8 @@ export const slotPriorities = ["interactive", "listing", "detail"] as const;
 export type SlotPriority = (typeof slotPriorities)[number];
 
 export interface SlotPool {
-  acquire(priority?: SlotPriority): Promise<void>;
+  /** Rejects with `signal.reason` when the signal aborts while it waits (the page is no longer wanted). */
+  acquire(priority?: SlotPriority, signal?: AbortSignal): Promise<void>;
   release(): void;
   /** Lets waiters in after the size grew (a browser joined). */
   pump(): void;
@@ -32,13 +33,27 @@ export function createSlotPool(size: () => number): SlotPool {
   };
 
   return {
-    async acquire(priority = "detail") {
+    async acquire(priority = "detail", signal) {
+      signal?.throwIfAborted();
       if (active < size()) {
         active++;
         return;
       }
       // The releasing holder hands its slot over directly, so `active` stays the same.
-      await new Promise<void>((resolve) => queues[priority].push(resolve));
+      await new Promise<void>((resolve, reject) => {
+        const queue = queues[priority];
+        const onAbort = () => {
+          const i = queue.indexOf(waiter);
+          if (i >= 0) queue.splice(i, 1);
+          reject(signal!.reason);
+        };
+        const waiter = () => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve();
+        };
+        queue.push(waiter);
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
     },
     release() {
       const waiter = active <= size() ? next() : null;

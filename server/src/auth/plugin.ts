@@ -125,7 +125,8 @@ export async function registerAuth(app: FastifyInstance) {
     origin: (origin, cb) => cb(null, !!origin && (env.APP_ORIGINS.includes(origin) || origin.startsWith("chrome-extension://"))),
     credentials: false,
     allowedHeaders: ["Authorization", "Content-Type", "X-SpecHarvest-Client", "Last-Event-ID", "X-Api-Key"],
-    exposedHeaders: ["Content-Disposition"],
+    // Retry-After: the app retries 429s and restart 503s (client/src/lib/api.ts).
+    exposedHeaders: ["Content-Disposition", "Retry-After"],
     methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
     maxAge: 600,
   });

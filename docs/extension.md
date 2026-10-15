@@ -97,6 +97,11 @@ Closing Chrome, putting the computer to sleep or losing the network stops the
 crawl as *Stopped: Your browser disconnected*. *Resume* (or *Resume on the
 server*) continues the same job, skipping items it already read.
 
+A server update is different. After the restart, the crawl waits up to 2 minutes for
+the extension to reconnect, then continues on its own. If Chrome isn't back by then,
+you get a "Crawl paused" notification
+([Updates and restarts](deployment.md#updates-and-restarts)).
+
 ## How it works
 
 ```

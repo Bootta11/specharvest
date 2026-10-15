@@ -13,7 +13,7 @@ import {
 import { extensionDeviceName, verifyKey } from "../auth/api-keys.ts";
 import { getUser } from "../auth/users.ts";
 import { FatalDriverError } from "../crawler/driver.ts";
-import { createLogger } from "../lib/logger.ts";
+import { createLogger, errorMessage } from "../lib/logger.ts";
 import { publish } from "../sse/hub.ts";
 
 /**
@@ -71,6 +71,12 @@ export interface Connection {
 }
 
 const connections = new Map<number, Connection>();
+
+const connectListeners = new Set<(userId: number) => void>();
+/** Called each time a user's extension connects (after a restart: their held crawls continue, index.ts). */
+export function onExtensionConnected(fn: (userId: number) => void) {
+  connectListeners.add(fn);
+}
 
 export const connectionFor = (userId: number | null): Connection | null => (userId === null ? null : (connections.get(userId) ?? null));
 
@@ -272,6 +278,13 @@ export async function registerExtensionGateway(app: FastifyInstance) {
       sendMessage(socket, { type: "welcome", email: user.email, deviceName: conn.deviceName });
       publishStatus(user.id);
       log.info(`user ${user.id}: extension ${hello.version} connected (${conn.deviceName}, ${hello.concurrency} tabs)`);
+      for (const fn of connectListeners) {
+        try {
+          fn(user.id);
+        } catch (err) {
+          log.warn("extension connect listener failed", errorMessage(err));
+        }
+      }
     });
 
     socket.on("close", () => {

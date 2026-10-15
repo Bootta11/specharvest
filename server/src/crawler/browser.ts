@@ -387,7 +387,8 @@ export async function withPage<T>(fn: (page: PageDriver) => Promise<T>, opts: Wi
   if (opts.runner === "browser") return withExtensionPage(opts.userId ?? null, fn, opts);
   const queuedBehind = slots.waiting;
   const t0 = performance.now();
-  await slots.acquire(opts.priority);
+  // A stopped crawl drops pages still waiting for a slot; pages already open finish.
+  await slots.acquire(opts.priority, opts.signal);
   const waited = performance.now() - t0;
   // The slot goes to the next page as soon as this one's work is done; closing the tab doesn't need it.
   let released = false;

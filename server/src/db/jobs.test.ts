@@ -72,7 +72,7 @@ describe("resumable crawl jobs", () => {
     expect(db.urlsSeenSince(c, Date.now() + 1000).size).toBe(0);
   });
 
-  it("marks crawls cut off by a restart as interrupted, others as failed", async () => {
+  it("marks crawls cut off by a restart as interrupted, lookups as stopped, others as failed", async () => {
     const c = db.createCollection("shop", "https://shop.example/c", "shop.example");
     const crawl = db.createJob("crawl", c, { url: "https://shop.example/c" });
     db.updateJob(crawl.id, { status: "running" });
@@ -87,6 +87,55 @@ describe("resumable crawl jobs", () => {
     const after = (id: number) => restarted.getJob(id)!;
     expect(after(crawl.id)).toMatchObject({ status: "interrupted", resumable: true, error: "Interrupted by server restart" });
     expect(after(legacy.id)).toMatchObject({ status: "failed", resumable: false });
-    expect(after(enrich.id)).toMatchObject({ status: "failed", resumable: false });
+    expect(after(enrich.id)).toMatchObject({ status: "stopped", resumable: false });
+  });
+});
+
+describe("crawls continued after a restart", () => {
+  const candidates = (c: number) => db.listRestartCandidates().filter((r) => r.job.collectionId === c);
+
+  it("lists interrupted crawls flagged to continue, with their crashes in a row", () => {
+    const c = db.createCollection("shop", "https://shop.example/d", "shop.example");
+    const crawl = () => db.createJob("crawl", c, { url: "https://shop.example/d" }).id;
+    const flagged = crawl();
+    db.setAutoResume(flagged, true);
+    db.markPausedForRestart(flagged, "Paused");
+    const stoppedByUser = crawl();
+    db.setAutoResume(stoppedByUser, false);
+    db.markPausedForRestart(stoppedByUser, "Paused");
+    // Interrupted before the flag existed (or by hand): left alone.
+    const historical = crawl();
+    db.updateJob(historical, { status: "interrupted", error: db.RESTART_ERROR });
+    const finished = crawl();
+    db.setAutoResume(finished, true);
+    db.updateJob(finished, { status: "done" });
+
+    expect(candidates(c).map((r) => r.job.id)).toEqual([flagged]);
+    expect(candidates(c)[0]).toMatchObject({ crashRestarts: 0, job: { status: "interrupted", message: "Paused", resumable: true } });
+  });
+
+  it("counts crashes on start, resets them on a clean pause or the user's resume", async () => {
+    const c = db.createCollection("shop", "https://shop.example/e", "shop.example");
+    const id = db.createJob("crawl", c, { url: "https://shop.example/e" }).id;
+    const lookup = db.createJob("enrich", c).id;
+    db.setAutoResume(id, true);
+    db.updateJob(id, { status: "running" });
+    db.updateJob(lookup, { status: "running", message: "Looking up wheelbase" });
+
+    vi.resetModules();
+    const restarted = await import("./sqlite.ts");
+    restarted.getDb();
+    expect(candidates(c)).toMatchObject([{ crashRestarts: 1, job: { id, status: "interrupted", error: db.RESTART_ERROR } }]);
+    // A lookup keeps what it found and says why it stopped (not its last progress line).
+    expect(restarted.getJob(lookup)).toMatchObject({ status: "stopped", message: db.LOOKUP_RESTART_MESSAGE });
+
+    db.markPausedForRestart(id, "Paused");
+    expect(candidates(c)[0].crashRestarts).toBe(0);
+    db.updateJob(id, { status: "running" });
+    vi.resetModules();
+    (await import("./sqlite.ts")).getDb();
+    expect(candidates(c)[0].crashRestarts).toBe(1);
+    db.resetCrashRestarts(id);
+    expect(candidates(c)[0].crashRestarts).toBe(0);
   });
 });

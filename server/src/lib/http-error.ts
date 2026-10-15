@@ -19,7 +19,9 @@ export function errorHandler(err: Error, req: FastifyRequest, reply: FastifyRepl
   const status = (err as { statusCode?: unknown }).statusCode;
   if (typeof status === "number" && status >= 400 && status < 600) {
     if (status >= 500) log.error(`${req.method} ${req.url} → ${status}`, errorMessage(err));
-    return reply.status(status).send({ error: errorMessage(err) });
+    const { retryAfter, restarting } = err as { retryAfter?: number; restarting?: boolean };
+    if (retryAfter) reply.header("Retry-After", String(retryAfter));
+    return reply.status(status).send({ error: errorMessage(err), ...(restarting ? { restarting: true } : {}) });
   }
   log.error(`${req.method} ${req.url} failed`, err.stack ?? errorMessage(err));
   return reply.status(500).send({ error: "Internal error" });

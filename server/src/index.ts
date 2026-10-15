@@ -31,12 +31,12 @@ import { registerBurstRoutes } from "./crawler/burst/routes.ts";
 import { registerBrowserRoutes } from "./crawler/browsers-routes.ts";
 import { startConfiguredBrowsers } from "./crawler/browsers.ts";
 import { FatalDriverError } from "./crawler/driver.ts";
-import { connectionFor, extensionStatus, registerExtensionGateway } from "./extension/gateway.ts";
+import { connectionFor, extensionStatus, onExtensionConnected, registerExtensionGateway } from "./extension/gateway.ts";
 import { registerExtensionRoutes } from "./extension/routes.ts";
-import { embeddingText, emitJob, jobChannel, JOBS_CHANNEL, ResumeError, resumeCrawl, startCrawl, stopCrawl } from "./crawler/job.ts";
+import { continueHeldCrawls, embeddingText, emitJob, interruptCrawls, jobChannel, JOBS_CHANNEL, markUndrainedCrawls, ResumeError, resumeAfterRestart, resumeCrawl, startCrawl, stopCrawl } from "./crawler/job.ts";
 import { getNotificationSettings, maskSettings, saveNotificationSettings, sendTest } from "./notify/index.ts";
 import { vapidKeys } from "./notify/push.ts";
-import { startEnrichment, stopEnrichment } from "./enrich/web.ts";
+import { interruptLookups, markUndrainedLookups, startEnrichment, stopEnrichment } from "./enrich/web.ts";
 import { autoConfirmMatches, groupForCollection, lookupIdentity, matchSuggestions, productGroups, sameProductOf, ungroupedCount } from "./enrich/group.ts";
 import { search } from "./search/hybrid.ts";
 import { proposeKeyMerges } from "./llm/consolidate.ts";
@@ -49,6 +49,7 @@ import { subscribe } from "./sse/hub.ts";
 import { createLogger, errorMessage } from "./lib/logger.ts";
 import { errorHandler, httpError } from "./lib/http-error.ts";
 import { assertPublicUrl, strictPolicy } from "./lib/net-guard.ts";
+import { beginShutdown, isShuttingDown, restartingError } from "./lib/shutdown.ts";
 import { registerSecurityHeaders } from "./lib/security-headers.ts";
 import { bootstrapAdmin } from "./auth/bootstrap.ts";
 import { requireCollection, requireGroup, requireJob } from "./auth/ownership.ts";
@@ -58,6 +59,8 @@ import { registerAuthRoutes } from "./auth/routes.ts";
 import { pruneSessions } from "./auth/sessions.ts";
 
 const log = createLogger("server");
+/** Static imports are done by the time this runs: how long loading the modules took (logged when ready). */
+const modulesMs = performance.now();
 
 // A stray rejected promise in background work (a crawl, an embedding) must not take every running crawl down with it.
 process.on("unhandledRejection", (err) => log.error("Unhandled promise rejection", err instanceof Error ? (err.stack ?? err.message) : String(err)));
@@ -83,6 +86,29 @@ const app = Fastify({
 });
 await registerAuth(app);
 registerSecurityHeaders(app);
+/**
+ * Requests that start background work or hold a browser page: refused while the server shuts down (searches, edits and
+ * settings keep working). The client retries the 503 (client/src/lib/api.ts), so they land on the new server. Runs
+ * before the routes' rate limits, so those retries don't count against the user.
+ */
+const REFUSED_WHILE_STOPPING = new Set([
+  "POST /api/crawl",
+  "POST /api/crawl/inspect",
+  "POST /api/enrich",
+  "POST /api/jobs/:id/resume",
+  "POST /api/collections/import",
+  "POST /api/collections/:id/consolidate",
+  "POST /api/admin/browsers/capacity",
+  "POST /api/admin/burst/image",
+]);
+/** Writes in flight, so shutdown lets them finish before closing the server (SSE streams are GETs). */
+let writesInFlight = 0;
+app.addHook("onRequest", async (req, reply) => {
+  if (isShuttingDown() && REFUSED_WHILE_STOPPING.has(`${req.method} ${req.routeOptions.url}`)) throw restartingError();
+  if (req.method === "GET" || req.method === "HEAD") return;
+  writesInFlight++;
+  reply.raw.once("close", () => writesInFlight--);
+});
 app.setErrorHandler(errorHandler);
 
 const idParam = (p: unknown) => {
@@ -451,7 +477,9 @@ app.get("/api/jobs/:id/events", async (req, reply) => {
   const job = requireJob(idParam(req.params), currentUser(req));
   const id = job.id;
   hijackForStream(reply);
-  subscribe(jobChannel(id), reply.raw, req.headers["last-event-id"] as string | undefined);
+  // The web's EventSource can't set the header when it reopens after a restart, so it sends the id in the query.
+  const lastEventId = (req.headers["last-event-id"] as string | undefined) ?? (req.query as { lastEventId?: string }).lastEventId;
+  subscribe(jobChannel(id), reply.raw, lastEventId);
   // A finished job's channel may already be retired — always end with a fresh snapshot.
   if (!isActiveJob(job)) emitJob(job);
 });
@@ -511,15 +539,39 @@ if (fs.existsSync(clientDist)) {
   });
 }
 
-await app.listen({ port: env.PORT, host: "0.0.0.0" });
-log.info(`SpecHarvest API listening on :${env.PORT} (data: ${env.DATA_DIR})`);
+/** How long running crawls and lookups get to close their pages on shutdown; the rest is recorded and continued. */
+const DRAIN_MS = 15_000;
+/** Then how long writes still in flight (a search, a save) get to answer. */
+const WRITES_MS = 5_000;
+const waitUntil = async (done: () => boolean, ms: number) => {
+  for (const end = Date.now() + ms; !done() && Date.now() < end; ) await new Promise((r) => setTimeout(r, 100));
+  return done();
+};
 const shutdown = async () => {
-  // Don't outlive Docker's stop timeout if something still holds the server open.
-  setTimeout(() => process.exit(0), 10_000).unref();
-  // Rented servers first: they cost money while they run (leftovers are deleted on the next start anyway).
+  // A second Ctrl-C (dev) doesn't wait.
+  if (isShuttingDown()) process.exit(1);
+  beginShutdown();
+  // Stay under the stop timeout (Compose stop_grace_period / WATCHTOWER_TIMEOUT, 30 s) if something holds the server open.
+  setTimeout(() => process.exit(0), 25_000).unref();
+  log.info("Shutting down — pausing running crawls and lookups");
+  let drained = false;
+  void Promise.allSettled([interruptCrawls(), interruptLookups()]).then(() => (drained = true));
+  if (!(await waitUntil(() => drained, DRAIN_MS))) log.warn(`Shutdown: jobs still running after ${DRAIN_MS / 1000} s — recorded, they continue after the restart`);
+  markUndrainedCrawls();
+  markUndrainedLookups();
+  await waitUntil(() => writesInFlight <= 0, WRITES_MS);
+  // Then the rented servers (no pages left on them): they cost money while they run (leftovers are deleted on the next start).
   await burst?.close().catch(() => {});
   await app.close().catch(() => {});
   process.exit(0);
 };
+// Before the restart work below: as PID 1 (no init), a SIGTERM without a handler would be ignored until Docker kills it.
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
+
+// After a restart, crawls in a user's Chrome continue once their extension is back.
+onExtensionConnected(continueHeldCrawls);
+// Before listening, so clients' first snapshot already shows them running again (no "finished" toast).
+resumeAfterRestart();
+await app.listen({ port: env.PORT, host: "0.0.0.0" });
+log.info(`SpecHarvest API listening on :${env.PORT} (data: ${env.DATA_DIR}) — ready in ${(performance.now() / 1000).toFixed(1)} s (modules ${(modulesMs / 1000).toFixed(1)} s)`);

@@ -17,6 +17,8 @@ interface Channel {
 }
 
 const MAX_BUFFER = 500;
+/** Event ids are `<boot>-<seq>`: a Last-Event-ID from before a restart is recognised as such, whatever its number. */
+const BOOT_ID = Date.now().toString(36);
 const channels = new Map<string, Channel>();
 
 function channel(id: string): Channel {
@@ -29,7 +31,7 @@ function channel(id: string): Channel {
 }
 
 function write(res: ServerResponse, seq: number, data: JobEvent) {
-  res.write(`id: ${seq}\nevent: ${data.type}\ndata: ${JSON.stringify(data)}\n\n`);
+  res.write(`id: ${BOOT_ID}-${seq}\nevent: ${data.type}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
 /**
@@ -51,8 +53,9 @@ export function subscribe(
   });
   res.write(":ok\n\n");
   const c = channel(channelId);
-  let last = lastEventId ? Number(lastEventId) : NaN;
-  // An id beyond anything this process issued means the server restarted — replay all.
+  // An id from another process (the server restarted) or one it never issued: replay all.
+  const [boot, seq] = lastEventId?.split("-") ?? [];
+  let last = boot === BOOT_ID ? Number(seq) : NaN;
   if (Number.isFinite(last) && last >= c.nextSeq) last = NaN;
   // `initial` replaces replay for channels where history is stale (e.g. the all-jobs feed sends a fresh snapshot).
   for (const data of opts.initial ?? []) res.write(`event: ${data.type}\ndata: ${JSON.stringify(data)}\n\n`);

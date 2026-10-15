@@ -7,6 +7,11 @@ import { withSafeUrlPattern } from "../crawler/url-pattern.ts";
 
 let db: DatabaseSync | null = null;
 
+/** The error of jobs a server restart cut off; crawls with it are continued on their own after the restart. */
+export const RESTART_ERROR = "Interrupted by server restart";
+/** A lookup a restart cut off: what it found is kept, the search view offers the rest. */
+export const LOOKUP_RESTART_MESSAGE = "Stopped by a server restart — look up the rest again";
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS collections (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -306,12 +311,18 @@ export function getDb(): DatabaseSync {
   );
   // Cross-collection reuse: the same ad in another collection, the same request's plan for another collection.
   db.exec("CREATE INDEX IF NOT EXISTS items_url ON items(url); CREATE INDEX IF NOT EXISTS query_cache_query ON query_cache(query, registry_sig);");
-  // Jobs cut off by a restart: crawls with saved options can be resumed, everything else can never finish.
+  // Continuing crawls after a restart (crawler/job.ts resumeAfterRestart): auto_resume = continue this one on its own
+  // (set when it starts, cleared by the user's Stop); crash_restarts = crashes in a row while it ran.
+  addColumnIfMissing("jobs", "auto_resume", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing("jobs", "crash_restarts", "INTEGER NOT NULL DEFAULT 0");
+  // Jobs still running here were cut off without a clean pause (a crash, or a shutdown past its drain): crawls with
+  // saved options can be resumed; lookups keep what they found ("Look up N more"); anything else can never finish.
   const now = Date.now();
   db.prepare(
-    "UPDATE jobs SET status = 'interrupted', error = 'Interrupted by server restart', finished_at = ? WHERE status IN ('queued','running') AND kind = 'crawl' AND params IS NOT NULL",
-  ).run(now);
-  db.prepare("UPDATE jobs SET status = 'failed', error = 'Interrupted by server restart', finished_at = ? WHERE status IN ('queued','running')").run(now);
+    "UPDATE jobs SET status = 'interrupted', error = ?, finished_at = ?, crash_restarts = crash_restarts + 1 WHERE status IN ('queued','running') AND kind = 'crawl' AND params IS NOT NULL",
+  ).run(RESTART_ERROR, now);
+  db.prepare("UPDATE jobs SET status = 'stopped', message = ?, finished_at = ? WHERE status IN ('queued','running') AND kind = 'enrich'").run(LOOKUP_RESTART_MESSAGE, now);
+  db.prepare("UPDATE jobs SET status = 'failed', error = ?, finished_at = ? WHERE status IN ('queued','running')").run(RESTART_ERROR, now);
   const admin = db.prepare("SELECT id FROM users WHERE role = 'admin' AND disabled_at IS NULL ORDER BY id LIMIT 1").get() as Row | undefined;
   if (admin) assignOrphansTo(Number(admin.id));
   return db;
@@ -1391,6 +1402,7 @@ export function listRecentQueries(userId: number, slot: number, limit = 10): Arr
 
 // ---------- Jobs ----------
 
+
 function toJob(r: Row): Job {
   const status = String(r.status) as Job["status"];
   return {
@@ -1483,6 +1495,31 @@ export function updateJob(id: number, patch: Partial<Omit<Job, "id" | "kind" | "
 export function listActiveJobs(viewer?: Viewer): Job[] {
   const f = jobOwnerFilter(viewer);
   return (getDb().prepare(`SELECT * FROM jobs WHERE status IN ('queued','running') AND ${f.sql} ORDER BY id`).all(...f.params) as Row[]).map(toJob);
+}
+
+/** Crawls a restart left interrupted that should continue on their own, with their crashes in a row. */
+export function listRestartCandidates(): Array<{ job: Job; crashRestarts: number }> {
+  return (
+    getDb()
+      .prepare("SELECT * FROM jobs WHERE kind = 'crawl' AND status = 'interrupted' AND auto_resume = 1 AND params IS NOT NULL AND collection_id IS NOT NULL ORDER BY id")
+      .all() as Row[]
+  ).map((r) => ({ job: toJob(r), crashRestarts: Number(r.crash_restarts ?? 0) }));
+}
+
+export function setAutoResume(id: number, on: boolean) {
+  getDb().prepare("UPDATE jobs SET auto_resume = ? WHERE id = ?").run(on ? 1 : 0, id);
+}
+
+/** The user asked for this crawl again: earlier crashes no longer count against continuing it. */
+export function resetCrashRestarts(id: number) {
+  getDb().prepare("UPDATE jobs SET crash_restarts = 0 WHERE id = ?").run(id);
+}
+
+/** A clean pause for a server update (no crash): continues after the restart. Not emitted to clients. */
+export function markPausedForRestart(id: number, message: string) {
+  getDb()
+    .prepare("UPDATE jobs SET status = 'interrupted', error = ?, message = ?, finished_at = ?, crash_restarts = 0 WHERE id = ?")
+    .run(RESTART_ERROR, message, Date.now(), id);
 }
 
 /** Queued or running jobs started by one user. */

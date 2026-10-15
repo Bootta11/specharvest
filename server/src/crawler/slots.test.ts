@@ -81,3 +81,30 @@ describe("createSlotPool", () => {
     expect(pool.active).toBe(1);
   });
 });
+
+describe("aborting a waiter", () => {
+  it("leaves the queue, rejects, and the freed slot goes to the next waiter", async () => {
+    const pool = createSlotPool(() => 1);
+    await pool.acquire();
+    const stop = new AbortController();
+    const dropped = pool.acquire("detail", stop.signal);
+    const next = pool.acquire("detail");
+    await tick();
+    expect(pool.waiting).toBe(2);
+
+    stop.abort(new Error("stopped"));
+    await expect(dropped).rejects.toThrow("stopped");
+    expect(pool.waiting).toBe(1);
+
+    pool.release();
+    await next;
+    expect(pool.active).toBe(1);
+    expect(pool.waiting).toBe(0);
+  });
+
+  it("rejects at once when already aborted", async () => {
+    const pool = createSlotPool(() => 1);
+    await expect(pool.acquire("detail", AbortSignal.abort(new Error("gone")))).rejects.toThrow("gone");
+    expect(pool.active).toBe(0);
+  });
+});

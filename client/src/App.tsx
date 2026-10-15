@@ -3,6 +3,7 @@ import type { Collection, CollectionGroup, Job, UserSummary } from "@specharvest
 import { api, formatUsd, parseScope, showLocalNotification, storageGet, storageSet, useJobsFeed, type AppConfig, type SearchScope } from "./lib/api.ts";
 import { IngestView } from "./views/IngestView.tsx";
 import { SearchView } from "./views/SearchView.tsx";
+import { ReconnectingBanner } from "./components/ReconnectingBanner.tsx";
 import { SpendMenu } from "./components/SpendMenu.tsx";
 import { SettingsModal } from "./components/SettingsModal.tsx";
 import { UserMenu } from "./components/UserMenu.tsx";
@@ -40,7 +41,8 @@ export default function App() {
   const auth = useAuth();
   const [path, setPath] = useState(() => location.pathname);
   if (auth.unreachable) return <UnreachableView auth={auth} />;
-  if (auth.user === undefined) return null;
+  // Booting: nothing to show unless the server takes long to answer (e.g. it's restarting for an update).
+  if (auth.user === undefined) return <ReconnectingBanner fullscreen />;
   if (auth.user === null) return <LoginView auth={auth} />;
   // The browser extension's "approve on the website" page (sign-in above first when needed).
   if (path === CONNECT_EXTENSION_PATH && !isNative) return <ConnectExtensionView user={auth.user} onDone={() => setPath(location.pathname)} />;
@@ -208,6 +210,7 @@ function Workspace({ user, auth }: { user: UserSummary; auth: Auth }) {
       </header>
 
       <main className="mx-auto max-w-7xl px-4 py-6">
+        <ReconnectingBanner />
         {error && (
           <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
             {error}

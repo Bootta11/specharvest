@@ -173,15 +173,34 @@ export async function dispatch(s: NotificationSettings, m: NotifyMessage, channe
 
 /** Called when a job reaches done/failed; notifies the job's owner. Never throws. */
 export async function notifyJobFinished(job: Job) {
+  const event = jobEvent(job);
+  if (event) await notifyJob(job, event, (collection) => buildMessage(job, collection));
+}
+
+/**
+ * A crawl a restart cut off that couldn't continue on its own: its user has to resume it. Sent like a failed crawl,
+ * with the job's message (why, and what to do) as the body.
+ */
+export async function notifyJobInterrupted(job: Job) {
+  await notifyJob(job, "crawlFailed", (collection) => ({
+    event: "crawlFailed",
+    title: `Crawl paused${collection ? ` · ${collection}` : ""}`,
+    body: job.message ?? "Interrupted by a server update — open it and press Resume",
+    url: env.PUBLIC_URL ? `${env.PUBLIC_URL}/?job=${job.id}` : null,
+    job,
+    collection,
+  }));
+}
+
+async function notifyJob(job: Job, event: NotifyEvent, message: (collection: string | null) => NotifyMessage) {
   try {
-    const event = jobEvent(job);
-    if (!event || job.userId === null) return;
+    if (job.userId === null) return;
     const s = getNotificationSettings(job.userId);
     if (!wants(s, event)) return;
     const channels = enabledChannels(s, db.listPushSubs(job.userId).length);
     if (channels.length === 0) return;
     const collection = job.collectionId ? (db.getCollection(job.collectionId)?.name ?? null) : null;
-    const errors = await dispatch(s, buildMessage(job, collection), channels, job.userId);
+    const errors = await dispatch(s, message(collection), channels, job.userId);
     for (const [ch, err] of Object.entries(errors)) log.warn(`${ch} notification for job ${job.id} failed: ${err}`);
   } catch (err) {
     log.error(`Notification for job ${job.id} failed`, errorMessage(err));

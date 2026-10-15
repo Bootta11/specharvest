@@ -78,14 +78,95 @@ export class ApiError extends Error {
   }
 }
 
+// ---------- Server restarts (an update) ----------
+
+/** Since when requests or live streams can't reach the server (null = they can); shown by ReconnectingBanner. */
+let reconnectingSince: number | null = null;
+const reconnectListeners = new Set<() => void>();
+
+function setReconnecting(on: boolean) {
+  const next = on ? (reconnectingSince ?? Date.now()) : null;
+  if (next === reconnectingSince) return;
+  reconnectingSince = next;
+  for (const fn of reconnectListeners) fn();
+}
+
+/** Seconds the server has been unreachable while requests retry or streams reconnect, ticking; null when it's fine. */
+export function useServerReconnecting(): number | null {
+  const [since, setSince] = useState(reconnectingSince);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const onChange = () => setSince(reconnectingSince);
+    reconnectListeners.add(onChange);
+    onChange();
+    return () => void reconnectListeners.delete(onChange);
+  }, []);
+  useEffect(() => {
+    if (since === null) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [since]);
+  return since === null ? null : Math.max(0, Math.round((now - since) / 1000));
+}
+
+/**
+ * How long a request keeps retrying while the server restarts: its shutdown (up to ~22 s of refusing new jobs) plus
+ * the restart itself (~15–20 s on the live host).
+ */
+const RESTART_RETRY_MS = 45_000;
+const backoff = (attempt: number) => Math.min(1000 * 2 ** attempt, 5000);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+const parseBody = (text: string): unknown => {
+  try {
+    return text ? JSON.parse(text) : null;
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * The request did nothing because the server is restarting: its own 503 `{restarting: true}` while it shuts down, or
+ * the proxy's plain-text 404/502/503/504 while no server is up (the API's own errors, e.g. an out-of-credit 503, are
+ * JSON without that flag).
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const restarting = (res: Response, data: any) =>
+  (res.status === 503 && (data?.restarting === true || res.headers.has("retry-after"))) || ([404, 502, 503, 504].includes(res.status) && data === undefined);
+
 async function request<T>(method: string, url: string, body?: unknown): Promise<T> {
-  const res = await fetch(apiUrl(url), {
-    method,
-    headers: { ...authHeaders(), ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
+  // Only reads are retried after a network error: a write may already have reached the server.
+  const idempotent = method === "GET" || method === "HEAD";
+  let res: Response;
+  // The API's JSON (as JSON.parse returns it), or undefined when the body isn't JSON.
+  let data: any; // eslint-disable-line @typescript-eslint/no-explicit-any
+  const giveUpAt = Date.now() + RESTART_RETRY_MS;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      res = await fetch(apiUrl(url), {
+        method,
+        headers: { ...authHeaders(), ...(body !== undefined ? { "Content-Type": "application/json" } : {}) },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+      });
+    } catch (err) {
+      if (!idempotent || Date.now() + backoff(attempt) > giveUpAt) {
+        setReconnecting(false);
+        throw err;
+      }
+      setReconnecting(true);
+      await sleep(backoff(attempt));
+      continue;
+    }
+    data = parseBody(await res.text());
+    const after = Number(res.headers.get("retry-after"));
+    const wait = Number.isFinite(after) && after > 0 ? Math.min(after, 10) * 1000 : backoff(attempt);
+    if (!restarting(res, data) || Date.now() + wait > giveUpAt) {
+      setReconnecting(false);
+      break;
+    }
+    setReconnecting(true);
+    await sleep(wait);
+  }
   // A 401 from the credential endpoints is just a wrong password, not a lost session.
   if (res.status === 401 && !url.startsWith("/api/auth/")) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
   if (!res.ok) {
@@ -266,16 +347,56 @@ export const RESUME_EVENT = "specharvest:resume";
 type StreamListeners = Record<string, (data: string) => void>;
 
 /**
+ * EventSource reconnects by itself after a dropped connection, but gives up for good on a non-200 answer — which is
+ * what the proxy sends while the server restarts for an update. Then open a new one, with backoff. A new EventSource
+ * can't send Last-Event-ID, so the last id goes in the query and only newer events are replayed.
+ */
+function openWebEventStream(path: string, listeners: StreamListeners): () => void {
+  let closed = false;
+  let es: EventSource | null = null;
+  let lastId: string | undefined;
+  let delay = 1000;
+  let retry: ReturnType<typeof setTimeout> | undefined;
+
+  const open = () => {
+    const url = lastId ? `${path}${path.includes("?") ? "&" : "?"}lastEventId=${encodeURIComponent(lastId)}` : path;
+    const source = new EventSource(apiUrl(url));
+    es = source;
+    for (const [type, fn] of Object.entries(listeners)) {
+      source.addEventListener(type, (e) => {
+        const ev = e as MessageEvent;
+        if (ev.lastEventId) lastId = ev.lastEventId;
+        fn(ev.data);
+      });
+    }
+    source.onopen = () => {
+      delay = 1000;
+      setReconnecting(false);
+    };
+    source.onerror = () => {
+      if (closed || source.readyState !== EventSource.CLOSED) return;
+      // The server answered but isn't up (it restarts in seconds): retry often.
+      setReconnecting(true);
+      retry = setTimeout(open, delay);
+      delay = Math.min(delay * 2, 5_000);
+    };
+  };
+
+  open();
+  return () => {
+    closed = true;
+    clearTimeout(retry);
+    es?.close();
+  };
+}
+
+/**
  * Subscribes to an SSE endpoint. The web uses EventSource (cookie auth). The app can't add headers to an
  * EventSource, so it reads the stream with fetch + the bearer token, resending Last-Event-ID and reconnecting
  * with backoff — and right away when the app comes back to the foreground (Android drops idle connections).
  */
 export function openEventStream(path: string, listeners: StreamListeners): () => void {
-  if (!isNative) {
-    const es = new EventSource(apiUrl(path));
-    for (const [type, fn] of Object.entries(listeners)) es.addEventListener(type, (e) => fn((e as MessageEvent).data));
-    return () => es.close();
-  }
+  if (!isNative) return openWebEventStream(path, listeners);
 
   let closed = false;
   let attempt: AbortController | null = null;
@@ -301,6 +422,8 @@ export function openEventStream(path: string, listeners: StreamListeners): () =>
   const run = async () => {
     while (!closed) {
       attempt = new AbortController();
+      // A fetch that fails (offline) backs off to 30 s; an answer from a server that isn't up (a restart) to 5 s.
+      let maxDelay = 30_000;
       try {
         const res = await fetch(apiUrl(path), {
           headers: { ...authHeaders(), Accept: "text/event-stream", ...(lastId ? { "Last-Event-ID": lastId } : {}) },
@@ -310,8 +433,12 @@ export function openEventStream(path: string, listeners: StreamListeners): () =>
           window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
           return;
         }
-        if (!res.ok || !res.body) throw new Error(`stream ${res.status}`);
+        if (!res.ok || !res.body) {
+          maxDelay = 5_000;
+          throw new Error(`stream ${res.status}`);
+        }
         delay = 1000;
+        setReconnecting(false);
         const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
         let buf = "";
         for (;;) {
@@ -327,12 +454,13 @@ export function openEventStream(path: string, listeners: StreamListeners): () =>
         /* dropped, aborted or offline — retry below */
       }
       if (closed) return;
+      setReconnecting(true);
       await new Promise<void>((resolve) => {
         const t = setTimeout(resolve, delay);
         wake = () => (clearTimeout(t), resolve());
       });
       wake = null;
-      delay = Math.min(delay * 2, 30_000);
+      delay = Math.min(delay * 2, maxDelay);
     }
   };
 

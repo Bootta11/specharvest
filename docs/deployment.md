@@ -79,6 +79,44 @@ echo "<token>" | docker login ghcr.io -u <github-username> --password-stdin
 Update: `docker compose pull && docker compose up -d`. Roll back: set
 `IMAGE=ghcr.io/bootta11/specharvest:sha-<commit>` in `.env`, then `up -d`.
 
+### Updates and restarts
+
+An update (`up -d`, Watchtower) stops the container and starts the new one. On a small VPS the new server answers
+about 15–20 s later. The startup log line `ready in … s (modules … s)` shows how long it took. Running crawls carry
+on by themselves:
+
+- **On SIGTERM**, the server first refuses requests that would start work it can't finish: crawls, resumes, web
+  lookups, page checks, imports, key consolidation, capacity tests and image builds. They get
+  `503 {"restarting": true}` with `Retry-After: 5`, and the web and Android clients retry them on their own.
+  Searches, edits and settings keep working.
+- **Running crawls close their pages and pause.** Pages still waiting for a browser slot are dropped. The pause is
+  recorded only on the server, so clients don't announce a stopped crawl. A crawl its user had stopped stays
+  stopped.
+- **Web lookups end as stopped** and keep what they found. *Look up N more* finishes the rest, after a click: paid
+  lookups never continue on their own.
+- **The drain gets up to 15 s,** then up to 5 s for writes still in flight. Then rented browser servers are deleted
+  and the server exits, at most 25 s after the signal.
+- **On start**, every crawl a restart cut off continues in the same job, skipping items it already handled. That
+  covers a clean pause, and also a crash or a shutdown that ran out of time.
+  - **Crash limit:** a crawl the server crashed under 3 times in a row stays paused, so it can't keep taking the
+    server down.
+  - **No working LLM key:** the crawl stays paused.
+  - **Crawls that run in the user's Chrome** wait up to 2 minutes for their extension to reconnect (it retries within
+    about 30 s), then continue.
+  - Crawls that can't continue get a "Crawl paused" notification through their user's crawl-failed channels.
+- **Clients:** while the server can't be reached, a banner says so and counts the seconds. Requests retry for up to
+  45 s, and the live job feeds reconnect and catch up.
+
+Two settings need to match:
+- **Stop timeout:** give the container at least 30 s to stop: `stop_grace_period: 30s` in this `compose.yaml`, and
+  for Watchtower `WATCHTOWER_TIMEOUT=30s`. containrrr/watchtower defaults to 10 s; the nicholas-fedor fork already
+  defaults to 30 s.
+- **Docker Engine 25+:** the image's healthcheck uses `--start-interval=2s`, so a new container is `healthy`, and
+  Traefik routes to it, about 2 s after it listens. Older engines ignore the option and first check after 30 s. Until
+  then Traefik answers 404.
+
+Uptime Kuma: set the monitor's **Retries** to 1 or more, so the ~20 s of an update doesn't raise an alert.
+
 ### Compose variables
 
 These go in `.env` next to the app settings and only affect Compose:

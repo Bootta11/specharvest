@@ -6,6 +6,9 @@ how many jobs are running, and the **Collections** tab lists them live
 when a job ends.
 
 **Events:** crawl finished, crawl failed (both on by default), web lookup finished.
+A crawl a server update cut off that can't continue on its own is sent as "Crawl paused" under crawl failed (webhook
+`event`: `crawlFailed`). That happens when it runs in Chrome and the extension didn't reconnect, when there's no
+working LLM key, or after repeated crashes.
 
 Every channel has a **Send test** button. Tests use the saved settings, so any
 pending edits are saved first. A failing channel is logged

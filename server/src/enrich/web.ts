@@ -10,6 +10,7 @@ import { withLlmContext } from "../llm/usage.ts";
 import { coerceToType } from "../llm/extract.ts";
 import { proposeKeyMerges } from "../llm/consolidate.ts";
 import { createLogger, errorMessage } from "../lib/logger.ts";
+import { assertAcceptingWork } from "../lib/shutdown.ts";
 import { retireChannel } from "../sse/hub.ts";
 import { assertJobSlot, embeddingText, emitJob, jobChannel, jobLog, patchJob } from "../crawler/job.ts";
 import { autoConfirmMatches, canonicalizeIdentities, lookupIdentity, resolvedIdentity } from "./group.ts";
@@ -175,8 +176,10 @@ export interface EnrichInput {
 
 const activeByScope = new Map<string, number>();
 
-/** Lookup jobs running in this process, so they can be stopped. */
-const runningJobs = new Map<number, AbortController>();
+/** Lookup jobs running in this process, so they can be stopped (and awaited on shutdown). */
+const runningJobs = new Map<number, { controller: AbortController; done: Promise<void> }>();
+/** Lookups interruptLookups() stopped for a server update (their stopped message says so). */
+const interrupted = new Set<number>();
 
 /** Paid lookups running right now, by product + key — shared by every user's jobs so nobody pays twice. */
 const inflight = new Map<string, Promise<void>>();
@@ -213,13 +216,14 @@ export function startEnrichment(input: EnrichInput): Job {
     const job = db.getJob(running);
     if (job && (job.status === "queued" || job.status === "running")) return job;
   }
+  // A lookup started now would die with this process (a search with enrich, too): the client retries on the new one.
+  assertAcceptingWork();
   assertJobSlot(input.userId);
   const job = db.createJob("enrich", input.collectionId, undefined, input.userId);
   activeByScope.set(scope, job.id);
   const controller = new AbortController();
-  runningJobs.set(job.id, controller);
   emitJob(job);
-  withLlmContext({ jobId: job.id, collectionId: input.collectionId, userId: input.userId }, () => runEnrichment(job.id, input, controller.signal))
+  const done = withLlmContext({ jobId: job.id, collectionId: input.collectionId, userId: input.userId }, () => runEnrichment(job.id, input, controller.signal))
     .catch((err) => {
       patchJob(job.id, { status: "failed", error: errorMessage(err), finishedAt: Date.now() });
       jobLog(job.id, `Enrichment failed: ${errorMessage(err)}`, "error");
@@ -227,20 +231,42 @@ export function startEnrichment(input: EnrichInput): Job {
     .finally(() => {
       activeByScope.delete(scope);
       runningJobs.delete(job.id);
+      interrupted.delete(job.id);
       retireChannel(jobChannel(job.id));
     });
+  runningJobs.set(job.id, { controller, done });
   return job;
 }
 
 /** Asks a running lookup job to stop: queued products are dropped, lookups already running finish and are kept. */
 export function stopEnrichment(jobId: number): Job | null {
-  const controller = runningJobs.get(jobId);
+  const controller = runningJobs.get(jobId)?.controller;
   if (!controller) return null;
   if (!controller.signal.aborted) {
     controller.abort();
     jobLog(jobId, "Stop requested — finishing lookups already running");
   }
   return patchJob(jobId, { message: "Stopping…" });
+}
+
+/**
+ * Shutdown: stops every lookup job. Each ends as stopped with what it found kept, so "Look up N more" finishes the
+ * rest after the restart. Resolves once they have all ended (the caller bounds the wait).
+ */
+export async function interruptLookups(): Promise<void> {
+  const jobs = [...runningJobs.entries()];
+  for (const [id, { controller }] of jobs) {
+    if (controller.signal.aborted) continue;
+    interrupted.add(id);
+    controller.abort();
+    jobLog(id, "Server update — finishing lookups already running");
+  }
+  await Promise.allSettled(jobs.map(([, j]) => j.done));
+}
+
+/** Shutdown, after the drain: lookups still running end as stopped (what they found is kept). Database only. */
+export function markUndrainedLookups() {
+  for (const id of runningJobs.keys()) db.updateJob(id, { status: "stopped", message: "Stopped by a server update — look up the rest again", finishedAt: Date.now() });
 }
 
 async function runEnrichment(jobId: number, input: EnrichInput, signal: AbortSignal) {
@@ -437,7 +463,7 @@ async function runEnrichment(jobId: number, input: EnrichInput, signal: AbortSig
       status: "stopped",
       itemsRemaining: notLookedUp,
       lookup: { ...lookupStats, remaining: notLookedUp, ...(prefetched ? { prefetched } : {}) },
-      message: `Stopped — filled ${applied} values from ${lookups} web lookups (${webSearches} searches), ${notLookedUp} products not looked up`,
+      message: `${interrupted.has(jobId) ? "Stopped by a server update" : "Stopped"} — filled ${applied} values from ${lookups} web lookups (${webSearches} searches), ${notLookedUp} products not looked up`,
       finishedAt: Date.now(),
     });
     jobLog(jobId, `Stopped: ${applied} values filled, ${lookups} lookups, ${notLookedUp} products not looked up`, "warn");

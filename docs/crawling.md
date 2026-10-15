@@ -245,7 +245,13 @@ Web lookup jobs can be stopped the same way (see
 [Search & web lookups](search.md#web-lookups-enrichment)). A server restart leaves
 running crawls **interrupted**. Both show *Resume* (`POST /api/jobs/:id/resume`),
 which continues the **same job** with the options it was started with
-(`jobs.params`) — nothing resumes automatically.
+(`jobs.params`). A stopped crawl only continues when its user resumes it, even if an
+update restarts the server meanwhile. A crawl interrupted by a restart continues on
+its own after the restart. A crawl in the user's Chrome first waits up to 2 minutes
+for the extension to reconnect. It stays paused, with a notification, when the server
+crashed under it 3 times in a row, when its user has no working LLM key, or when the
+browser doesn't come back
+([Updates and restarts](deployment.md#updates-and-restarts)).
 
 A resumed crawl walks the listing again (browser only, no LLM), then skips every
 item whose `last_seen_at` is at or after the job's `started_at` — i.e. extracted

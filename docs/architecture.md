@@ -28,7 +28,8 @@ React UI (Vite) ──HTTP/SSE──► Fastify API ──► crawler (PageDrive
 | `server/src/notify/` | `index.ts` (settings, job-finished dispatch), `channels.ts` (ntfy, Telegram, Discord/Slack, webhook, Apprise), `push.ts` (Web Push / VAPID) — see [notifications](notifications.md) |
 | `server/src/auth/` | `plugin.ts` (cookie / `X-Api-Key` → `req.user` hook), `routes.ts`, `users.ts`, `sessions.ts`, `api-keys.ts`, `crypto.ts` (scrypt, tokens), `ownership.ts` (read/write checks), `bootstrap.ts` — see [auth](auth.md) |
 | `server/src/scripts/seed-admin.ts` | `npm run seed:admin` — creates the first admin |
-| `server/src/sse/hub.ts` | Per-job SSE channels with replay for late subscribers; per-subscriber filters (each user's jobs feed) |
+| `server/src/sse/hub.ts` | Per-job SSE channels with replay for late subscribers; per-subscriber filters (each user's jobs feed); event ids carry a per-process boot id, so a reconnect after a restart replays the new process's history |
+| `server/src/lib/shutdown.ts`, `server/src/crawler/restart.ts` | Shutdown state (refusing new work with a retryable 503), and what happens to a crawl a restart cut off ([Updates and restarts](deployment.md#updates-and-restarts)) |
 | `client/src/` | `views/LoginView.tsx`, `views/IngestView.tsx`, `views/SearchView.tsx`, `components/FilterPanel.tsx` (search filters on every field), item card/modal, job progress, `components/{UserMenu,AccountModal,AdminModal}.tsx`, `lib/auth.ts` |
 
 The server runs TypeScript directly through `tsx` (dev and Docker), so there is

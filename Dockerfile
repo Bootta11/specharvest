@@ -55,7 +55,9 @@ COPY --from=builder --chown=nonroot:nonroot /app/data data
 USER nonroot
 VOLUME ["/app/data"]
 EXPOSE 3100
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+# --start-interval (Docker 25+): checks every 2 s until healthy, so a reverse proxy that waits for "healthy"
+# (Traefik) routes to a new container seconds after an update instead of after the first 30 s interval.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --start-interval=2s --retries=3 \
   CMD ["/nodejs/bin/node", "/app/server/healthcheck.mjs"]
 # The image's entrypoint is node itself; the server runs TypeScript through tsx.
 CMD ["--import", "tsx", "server/src/index.ts"]

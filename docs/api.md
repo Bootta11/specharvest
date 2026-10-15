@@ -19,6 +19,11 @@ searches — with a `query` — and, counted apart, 240 filter-only searches, or
 `MAX_ACTIVE_JOBS_PER_USER` running. Unexpected server errors answer `500` with
 `{error: "Internal error"}`; the details only go to the server log.
 
+While the server shuts down for an update, requests that would start work it can't finish answer
+`503 {error, restarting: true}` with `Retry-After: 5`. That covers crawls, resumes, lookups (also a search with
+`enrich: true`), page checks, imports, consolidation, capacity tests and image builds. Send them again; they land on
+the new server ([Updates and restarts](deployment.md#updates-and-restarts)).
+
 ```bash
 curl -H "X-Api-Key: shk_…" https://specharvest.example/api/collections
 ```
@@ -100,7 +105,7 @@ See [LLM providers](llm-providers.md). Tiers: `fast`, `smart`, `web`.
 | `GET /api/usage` | `?scope=all` (admin: everyone's) | your LLM spend `{today, last30d, allTime, byFunding: {own, platform}, estimated, byPurpose, byModel: [{provider, model, …}], unpricedCalls}` (USD; exact from OpenRouter/Perplexity, estimated for other providers) |
 | `GET /api/usage/credits` | admin | Server key's OpenRouter balance `{provider, key, account, errors, fetchedAt}`: `key` = API key limit/remaining/usage (`/api/v1/key`); `account` = purchased/used/remaining credits, only when `OPENROUTER_MANAGEMENT_KEY` is set. Cached 60 s |
 | `GET /api/jobs/events` | SSE | your jobs (admins: all): `jobs` (active jobs snapshot on connect), then `job` on every change; `extension` (`{status: {online, deviceName, version, concurrency}}`) on connect and whenever your extension comes or goes |
-| `GET /api/jobs/:id/events` | SSE | events `job`, `log`, `item`, `queue` (history replayed) |
+| `GET /api/jobs/:id/events` | SSE | events `job`, `log`, `item`, `queue` (history replayed). Event ids are `<boot>-<seq>`. `Last-Event-ID` (or `?lastEventId=`, for an EventSource reopened after a restart) replays only newer events, or everything when the id is from before a restart |
 | `GET /api/settings/notifications` | | your notification settings, secrets replaced by `********` |
 | `PUT /api/settings/notifications` | settings (a `********` field keeps its stored value) | saved settings (masked); 400 when an enabled channel points somewhere you may not send ([details](notifications.md#server-side-channels)) |
 | `POST /api/notifications/test` | `{channel: "ntfy"\|"telegram"\|"discord"\|"webhook"\|"apprise"\|"push"}` | `{ok, error?}` |

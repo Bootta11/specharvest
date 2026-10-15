@@ -7,13 +7,15 @@ import { embed } from "../embedding.ts";
 import { finishJobTiming, startJobTiming, timed } from "../lib/timing.ts";
 import { coerceToType, extractItem, type Extraction } from "../llm/extract.ts";
 import { llmBlocked } from "../llm/client.ts";
+import { llmReady } from "../llm/resolve.ts";
+import { BROWSER_WAIT_MS, restartAction } from "./restart.ts";
 import { proposeKeyMerges } from "../llm/consolidate.ts";
 import { groupForCollection } from "../enrich/group.ts";
 import { withLlmContext } from "../llm/usage.ts";
 import { createLogger, errorMessage } from "../lib/logger.ts";
 import { httpError } from "../lib/http-error.ts";
 import { getUser } from "../auth/users.ts";
-import { notifyJobFinished } from "../notify/index.ts";
+import { notifyJobFinished, notifyJobInterrupted } from "../notify/index.ts";
 import { publish, retireChannel, reviveChannel } from "../sse/hub.ts";
 import { prepareBrowserRunner } from "../extension/driver.ts";
 import { BlockedPageError, BotWallError, gotoAndSettle, waitForStableText, withPage, type WithPageOptions } from "./browser.ts";
@@ -112,8 +114,12 @@ function logJobTiming(jobId: number) {
   if (timing) jobLog(jobId, timing);
 }
 
-/** Crawls running in this process, so they can be stopped. */
-const running = new Map<number, AbortController>();
+/** Crawls running in this process, so they can be stopped (and awaited on shutdown). */
+const running = new Map<number, { controller: AbortController; done: Promise<void> }>();
+/** Crawls interruptCrawls() stopped for a server update: they pause for the restart instead of ending as stopped. */
+const pausing = new Set<number>();
+/** After a restart, crawls that run in a user's Chrome wait here (by user) for their extension to reconnect. */
+const heldForBrowser = new Map<number, Set<number>>();
 
 /**
  * Sites whose listing structure a server crawl is detecting right now. A crawl of the same site that starts
@@ -153,17 +159,25 @@ const pausesJob = (err: unknown) => llmBlocked(err) || err instanceof FatalDrive
  */
 function launch(jobId: number, collectionId: number, req: CrawlRequest, resumeSince?: number, snapshot?: PageSnapshot) {
   const controller = new AbortController();
-  running.set(jobId, controller);
   const url = new URL(req.url).toString();
   const userId = db.getJob(jobId)?.userId ?? null;
+  // Continued on its own if a restart cuts it off (resumeAfterRestart); the user's Stop clears it.
+  db.setAutoResume(jobId, true);
   startJobTiming(jobId);
-  withLlmContext({ jobId, collectionId, userId }, () => runCrawl(jobId, collectionId, url, req, controller.signal, resumeSince, snapshot))
+  const done = withLlmContext({ jobId, collectionId, userId }, () => runCrawl(jobId, collectionId, url, req, controller.signal, resumeSince, snapshot))
     .catch((err) => {
       logJobTiming(jobId);
       if (err instanceof BotWallError) patchJob(jobId, { botWall: true });
+      // Stopped for a server update: the next start continues it (resumeAfterRestart). Only the database learns
+      // of it — clients would otherwise announce a stopped crawl and stop following it.
+      if (pausing.has(jobId)) {
+        db.markPausedForRestart(jobId, PAUSED_MESSAGE);
+        jobLog(jobId, "Paused for a server update — continues after the restart", "warn");
+        return;
+      }
       // A rejected / out-of-credit LLM key, a disconnected browser or a bot wall stops the crawl like the user
-      // would: resumable once it's fixed.
-      if (err instanceof StopError || pausesJob(err)) {
+      // would: resumable once it's fixed. So does the user's Stop, whatever it interrupted.
+      if (err instanceof StopError || pausesJob(err) || controller.signal.aborted) {
         // Stopped by the user while waiting on their browser: a plain stop, not a failure reason.
         const reason = err instanceof StopError ? err.reason : controller.signal.aborted ? undefined : err.message;
         const job = db.getJob(jobId)!;
@@ -179,8 +193,10 @@ function launch(jobId: number, collectionId: number, req: CrawlRequest, resumeSi
     })
     .finally(() => {
       running.delete(jobId);
+      pausing.delete(jobId);
       finishJobTiming(jobId);
     });
+  running.set(jobId, { controller, done });
 }
 
 /**
@@ -222,8 +238,17 @@ export function startCrawl(req: CrawlRequest, userId: number | null, collectionI
 
 /** Asks a running crawl to stop; in-flight pages finish first. False if it isn't running here. */
 export function stopCrawl(jobId: number): Job | null {
-  const controller = running.get(jobId);
+  const job = db.getJob(jobId);
+  // Held after a restart, waiting for the user's browser: nothing runs yet.
+  if (job?.userId != null && heldForBrowser.get(job.userId)?.delete(jobId)) {
+    db.setAutoResume(jobId, false);
+    return patchJob(jobId, { status: "stopped", message: "Stopped", finishedAt: Date.now() });
+  }
+  const controller = running.get(jobId)?.controller;
   if (!controller) return null;
+  // The user's own stop, even during a shutdown: it stays stopped instead of continuing after the restart.
+  db.setAutoResume(jobId, false);
+  pausing.delete(jobId);
   if (!controller.signal.aborted) {
     controller.abort();
     jobLog(jobId, "Stop requested — finishing pages already open");
@@ -238,6 +263,13 @@ export class ResumeError extends Error {}
  * whose browser loads the pages from here on (e.g. the user's own after a bot wall).
  */
 export function resumeCrawl(jobId: number, runner?: Runner): Job {
+  const resumed = continueCrawl(jobId, runner);
+  // The user asked for it again: earlier crashes no longer count against continuing it after a restart.
+  db.resetCrashRestarts(jobId);
+  return resumed;
+}
+
+function continueCrawl(jobId: number, runner?: Runner): Job {
   const job = db.getJob(jobId);
   let params = db.getJobParams<CrawlRequest>(jobId);
   if (!job || !job.resumable || !params || job.collectionId == null) throw new ResumeError("This job can't be resumed");
@@ -252,6 +284,90 @@ export function resumeCrawl(jobId: number, runner?: Runner): Job {
   const resumed = patchJob(jobId, { status: "running", error: null, finishedAt: null, itemsFailed: 0, message: "Resuming" });
   launch(jobId, job.collectionId, params, job.startedAt);
   return resumed;
+}
+
+const PAUSED_MESSAGE = "Paused for a server update — continues on its own";
+
+/**
+ * Shutdown: stops every crawl so its open pages close, and marks it paused for the restart instead of stopped.
+ * Crawls their user already stopped finish as stopped. Resolves once they have all ended (the caller bounds the wait).
+ */
+export async function interruptCrawls(): Promise<void> {
+  const crawls = [...running.entries()];
+  for (const [id, { controller }] of crawls) {
+    if (controller.signal.aborted) continue;
+    pausing.add(id);
+    controller.abort();
+  }
+  await Promise.allSettled(crawls.map(([, c]) => c.done));
+}
+
+/** Shutdown, after the drain: records crawls still running (and held ones) before the process exits. Database only. */
+export function markUndrainedCrawls() {
+  for (const id of running.keys()) {
+    if (pausing.has(id)) db.markPausedForRestart(id, PAUSED_MESSAGE);
+    else db.updateJob(id, { status: "stopped", message: "Stopped — the server restarted before it finished", error: null, finishedAt: Date.now() });
+  }
+  for (const ids of heldForBrowser.values()) for (const id of ids) db.markPausedForRestart(id, PAUSED_MESSAGE);
+}
+
+/** Leaves a crawl the restart cut off to its user: tells them why and how to go on. */
+function pauseForUser(jobId: number, message: string) {
+  db.setAutoResume(jobId, false);
+  const job = patchJob(jobId, { status: "interrupted", error: db.RESTART_ERROR, message, finishedAt: Date.now() });
+  jobLog(jobId, message, "warn");
+  void notifyJobInterrupted(job);
+}
+
+function continueAfterRestart(jobId: number, note: string) {
+  try {
+    continueCrawl(jobId);
+    jobLog(jobId, note);
+  } catch (err) {
+    log.warn(`job ${jobId}: not continued after the restart: ${errorMessage(err)}`);
+    pauseForUser(jobId, "Paused by a server update — press Resume");
+  }
+}
+
+/**
+ * Startup (before listening): continues the crawls a restart cut off — an update, or a crash up to the limit.
+ * Crawls in the user's Chrome wait for their extension (continueHeldCrawls); the rest are left to their users.
+ */
+export function resumeAfterRestart() {
+  let held = false;
+  for (const { job, crashRestarts } of db.listRestartCandidates()) {
+    const params = db.getJobParams<CrawlRequest>(job.id);
+    const action = restartAction({
+      crashRestarts,
+      runner: params?.runner === "browser" ? "browser" : "server",
+      llmReady: job.userId === null || llmReady(job.userId, "fast"),
+    });
+    if (action.kind === "pause") pauseForUser(job.id, action.message);
+    else if (action.kind === "resume") continueAfterRestart(job.id, "Continued after a server update");
+    else if (job.userId !== null) {
+      // Active while it waits, so nothing announces it as stopped; auto_resume stays set until it's resolved.
+      patchJob(job.id, { status: "queued", error: null, finishedAt: null, message: "Paused by a server update — continues when your browser reconnects" });
+      if (!heldForBrowser.has(job.userId)) heldForBrowser.set(job.userId, new Set());
+      heldForBrowser.get(job.userId)!.add(job.id);
+      held = true;
+    }
+  }
+  if (!held) return;
+  setTimeout(() => {
+    for (const ids of heldForBrowser.values()) for (const id of ids) pauseForUser(id, "Paused by a server update — your browser didn't reconnect; press Resume");
+    heldForBrowser.clear();
+  }, BROWSER_WAIT_MS).unref();
+}
+
+/** The user's extension connected: their crawls held since the restart continue. */
+export function continueHeldCrawls(userId: number) {
+  const ids = heldForBrowser.get(userId);
+  if (!ids) return;
+  heldForBrowser.delete(userId);
+  for (const id of ids) {
+    db.updateJob(id, { status: "interrupted" });
+    continueAfterRestart(id, "Continued after a server update (your browser reconnected)");
+  }
 }
 
 /** A walk that would mark more than this share of a collection as gone is treated as a glitch. */
@@ -278,7 +394,7 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
         signal,
         origin: new URL(url).origin,
       }
-    : { useProxy: !!req.useProxy };
+    : { useProxy: !!req.useProxy, signal };
   /** The add-item page as the user's tab showed it: read once instead of loading the page again. */
   const takeSnapshot = (itemUrl: string): DetailSnapshot | null => {
     if (!snapshot || snapshot.url.split("#")[0] !== itemUrl.split("#")[0]) return null;
@@ -378,6 +494,8 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
       indexed++;
       patchJob(jobId, { itemsIndexed: indexed });
     } catch (err) {
+      // Stopped while it waited for a browser page: not this item's failure, it's picked up again on resume.
+      if (signal.aborted) return;
       if (llmBlocked(err) || err instanceof FatalDriverError) {
         // Not this item's fault — it's picked up again on resume.
         halt ??= err;
