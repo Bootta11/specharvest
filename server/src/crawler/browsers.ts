@@ -8,7 +8,7 @@ import { browserFleet, envBrowserEndpoints, type BrowserCredentials } from "./br
 import { deleteSavedCapacity, renameSavedCapacity, savedCapacity } from "./capacity.ts";
 
 /**
- * Remote browsers added in the admin UI (Browser servers window), on top of the ones in PUPPETEER_WS_ENDPOINT.
+ * Remote browsers added in the admin dashboard (Browser servers), on top of the ones in PUPPETEER_WS_ENDPOINT.
  * Each has its own credentials (encrypted at rest), page limit, on/off switch and proxy setting. A change drains the
  * browser's open pages in the background and puts the new version in the pool (browser.ts browserFleet).
  */

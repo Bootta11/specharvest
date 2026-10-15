@@ -146,12 +146,12 @@ SpecHarvest can't be used without signing in, so reviewers need an account:
 2. Click **Add instructions** and fill in:
    - **Name:** Demo account
    - **Username / email:** a demo user you created on `specharvest.bootta.dev` (as an admin: account menu →
-     **Users & sign-up** → *Add a user*, see [users & access](auth.md))
+     **Admin dashboard** → *Users* → *Add a user*, see [users & access](auth.md))
    - **Password:** its password
    - **Other information:** "The app opens on the sign-in screen; keep the default server and sign in.
      Collections lists a sample collection; Search shows its products."
 3. **Make the demo account work:** give it a small sample collection, and make sure it can use the server's
-   AI key (account menu → **Users & sign-up** → *Server LLM key*, see [LLM providers](llm-providers.md)) so a reviewer's
+   AI key (admin dashboard → **Settings** → *Server LLM key*, see [LLM providers](llm-providers.md)) so a reviewer's
    test crawl doesn't fail. Don't delete or change this account while a review is running.
 
 ### Ads

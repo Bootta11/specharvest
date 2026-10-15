@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import type { BrowserPatch, BrowserStatus, BrowserTestResult, CapacityRun } from "@specharvest/shared";
-import { api } from "../lib/api.ts";
+import { adminApi } from "./api.ts";
 import { CapacityPanel, capacityPercent } from "./CapacityPanel.tsx";
-import { Notice } from "./Modal.tsx";
+import { Notice } from "../components/Modal.tsx";
 
 interface Draft {
   name: string;
@@ -54,8 +54,8 @@ export function BrowsersSection() {
   const [showRun, setShowRun] = useState(true);
 
   const fail = (value: unknown) => setError((value as Error).message);
-  const load = () => api.browsers().then(setBrowsers, fail);
-  const loadRun = () => api.capacityTest().then((r) => setRun(r.run), fail);
+  const load = () => adminApi.browsers().then(setBrowsers, fail);
+  const loadRun = () => adminApi.capacityTest().then((r) => setRun(r.run), fail);
   // Every second while a capacity test runs (its progress lives on the server), else every 5 s.
   const testing = !!run?.running;
   useEffect(() => {
@@ -113,7 +113,7 @@ export function BrowsersSection() {
     if (draft.password) body.password = draft.password;
     else if (draft.clearPassword) body.password = null;
     void act(async () => {
-      setBrowsers(editing === "new" ? await api.createBrowser({ ...body, name: body.name!, url: body.url! }) : await api.updateBrowser(editing as number, body));
+      setBrowsers(editing === "new" ? await adminApi.createBrowser({ ...body, name: body.name!, url: body.url! }) : await adminApi.updateBrowser(editing as number, body));
     }).then((ok) => ok && close());
   };
 
@@ -121,7 +121,7 @@ export function BrowsersSection() {
     void act(async () => {
       setTest(null);
       setTest(
-        await api.testBrowser({
+        await adminApi.testBrowser({
           ...(typeof editing === "number" ? { id: editing } : {}),
           url: draft.url.trim() || undefined,
           apiKey: draft.apiKey || undefined,
@@ -136,23 +136,23 @@ export function BrowsersSection() {
     const warning = others.length ? "" : "\n\nIt's the only browser, so crawls wait until the test ends.";
     if (!window.confirm(`Test how many pages ${b.name} can run at once?\n\nIt takes about 3–5 min, and ${b.name} takes no crawl pages meanwhile (its open pages finish first).${warning}`)) return;
     void act(async () => {
-      setRun((await api.startCapacityTest(b.name)).run);
+      setRun((await adminApi.startCapacityTest(b.name)).run);
       setShowRun(true);
     });
   };
-  const stopTest = () => void act(async () => setRun((await api.stopCapacityTest()).run));
+  const stopTest = () => void act(async () => setRun((await adminApi.stopCapacityTest()).run));
   const runBrowser = run ? browsers?.find((b) => b.name === run.browser) : undefined;
 
-  const toggle = (b: BrowserStatus) => void act(async () => setBrowsers(await api.updateBrowser(b.id!, { enabled: !b.enabled })));
+  const toggle = (b: BrowserStatus) => void act(async () => setBrowsers(await adminApi.updateBrowser(b.id!, { enabled: !b.enabled })));
   const remove = (b: BrowserStatus) => {
     if (!window.confirm(`Delete browser "${b.name}"? Its open pages finish first.`)) return;
-    void act(async () => setBrowsers(await api.deleteBrowser(b.id!)));
+    void act(async () => setBrowsers(await adminApi.deleteBrowser(b.id!)));
   };
 
   return (
     <section className="space-y-3">
       <div className="flex items-center justify-between gap-3">
-        <h3 className="text-sm font-semibold">Browsers</h3>
+        <h2 className="text-base font-semibold">Browsers</h2>
         {editing === null && (
           <button className="btn-secondary" disabled={busy} onClick={() => open("new")}>
             Add browser
@@ -232,7 +232,7 @@ export function BrowsersSection() {
           onClose={() => setShowRun(false)}
           onApply={
             runBrowser?.id != null
-              ? (tabs) => void act(async () => setBrowsers(await api.updateBrowser(runBrowser.id!, { tabs })))
+              ? (tabs) => void act(async () => setBrowsers(await adminApi.updateBrowser(runBrowser.id!, { tabs })))
               : null
           }
         />

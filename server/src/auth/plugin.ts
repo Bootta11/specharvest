@@ -178,6 +178,7 @@ export function searchLimit(limits: { typed: number; filterOnly: number }) {
   };
 }
 
+/** Only called by the admin scope's hook (admin/routes.ts): admin routes never check this themselves. */
 export function requireAdmin(req: FastifyRequest): AuthUser {
   const user = currentUser(req);
   if (user.role !== "admin") throw httpError(403, "Admin access required");

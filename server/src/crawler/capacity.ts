@@ -5,7 +5,7 @@ import { createLogger, errorMessage } from "../lib/logger.ts";
 import { browserFleet, connectRemote, type BrowserCredentials } from "./browser.ts";
 
 /**
- * Browser capacity test (admin → Browser servers → Test capacity): loads more and more pages at once in one browser
+ * Browser capacity test (admin dashboard → Browser servers → Test capacity): loads more and more pages at once in one browser
  * and measures pages/min, to find the page limit after which more pages only make each one slower. The browser takes
  * no crawl pages meanwhile (paused in the pool, browser-pool.ts) and the test uses its own connection. Workload:
  * books.toscrape.com product pages, the public scraping sandbox of docs/load-testing.md.

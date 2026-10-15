@@ -1,17 +1,7 @@
 import type {
-  AdminSettings,
   ApiKeyCreated,
   ApiKeySummary,
   AuthStatus,
-  BrowserInput,
-  BrowserPatch,
-  BrowserStatus,
-  BrowserTestResult,
-  CapacityRun,
-  BurstBuildStatus,
-  BurstOptions,
-  BurstSettings,
-  BurstStatus,
   Collection,
   CollectionGroup,
   CollectionProducts,
@@ -34,15 +24,12 @@ import type {
   LlmTier,
   NotificationChannel,
   NotificationSettings,
-  ProviderCredits,
   RecentSearch,
   Runner,
   SearchRequest,
   SearchResponse,
   SpecKey,
   UsageSummary,
-  UserCreated,
-  UserRole,
   UserSummary,
 } from "@specharvest/shared";
 import { isActiveJob, isHttpUrl } from "@specharvest/shared";
@@ -134,7 +121,7 @@ const parseBody = (text: string): unknown => {
 const restarting = (res: Response, data: any) =>
   (res.status === 503 && (data?.restarting === true || res.headers.has("retry-after"))) || ([404, 502, 503, 504].includes(res.status) && data === undefined);
 
-async function request<T>(method: string, url: string, body?: unknown): Promise<T> {
+export async function request<T>(method: string, url: string, body?: unknown): Promise<T> {
   // Only reads are retried after a network error: a write may already have reached the server.
   const idempotent = method === "GET" || method === "HEAD";
   let res: Response;
@@ -235,8 +222,7 @@ export const api = {
   stopJob: (id: number) => request<Job>("POST", `/api/jobs/${id}/stop`),
   resumeJob: (id: number, runner?: Runner) => request<Job>("POST", `/api/jobs/${id}/resume`, runner ? { runner } : {}),
   search: (body: SearchRequest) => request<SearchResponse>("POST", "/api/search", body),
-  usage: (all = false) => request<UsageSummary>("GET", `/api/usage${all ? "?scope=all" : ""}`),
-  credits: () => request<ProviderCredits>("GET", "/api/usage/credits"),
+  usage: () => request<UsageSummary>("GET", "/api/usage"),
   notificationSettings: () => request<NotificationSettings>("GET", "/api/settings/notifications"),
   saveNotificationSettings: (body: NotificationSettings) => request<NotificationSettings>("PUT", "/api/settings/notifications", body),
   testNotification: (channel: NotificationChannel) => request<{ ok: boolean; error?: string }>("POST", "/api/notifications/test", { channel }),
@@ -272,30 +258,6 @@ export const api = {
   createExtensionToken: (name: string) => request<{ token: string; device: ExtensionDevice }>("POST", "/api/extension/devices", { name }),
   revokeExtensionDevice: (id: number) => request<{ ok: true }>("DELETE", `/api/extension/devices/${id}`),
   approveExtension: (challenge: string, deviceName: string) => request<{ ok: true }>("POST", "/api/extension/pair/approve", { challenge, deviceName }),
-  // Admin
-  users: () => request<UserSummary[]>("GET", "/api/users"),
-  createUser: (email: string, role: UserRole) => request<UserCreated>("POST", "/api/users", { email, role }),
-  setUserDisabled: (id: number, disabled: boolean) => request<UserSummary>("PATCH", `/api/users/${id}`, { disabled }),
-  adminSettings: () => request<AdminSettings>("GET", "/api/settings/admin"),
-  saveAdminSettings: (body: Partial<Pick<AdminSettings, "signupEnabled" | "serverLlmAccess" | "serverLlmDailyLimitUsd">>) =>
-    request<AdminSettings>("PUT", "/api/settings/admin", body),
-  burstStatus: () => request<BurstStatus>("GET", "/api/admin/burst"),
-  saveBurstSettings: (body: Partial<Record<keyof BurstSettings, BurstSettings[keyof BurstSettings] | null>>) => request<BurstStatus>("PUT", "/api/admin/burst", body),
-  saveBurstAccount: (body: { token?: string | null; allowedIp?: string | null; region?: string | null; size?: string | null }) =>
-    request<BurstStatus>("PUT", "/api/admin/burst/account", body),
-  testBurst: (token?: string) => request<Record<string, { ok: boolean; error?: string }>>("POST", "/api/admin/burst/test", token ? { token } : {}),
-  burstOptions: () => request<BurstOptions>("GET", "/api/admin/burst/options"),
-  detectBurstIp: () => request<{ ip: string }>("POST", "/api/admin/burst/detect-ip"),
-  rebuildBurstImage: () => request<BurstBuildStatus>("POST", "/api/admin/burst/image"),
-  browsers: () => request<BrowserStatus[]>("GET", "/api/admin/browsers"),
-  createBrowser: (body: BrowserInput) => request<BrowserStatus[]>("POST", "/api/admin/browsers", body),
-  updateBrowser: (id: number, body: BrowserPatch) => request<BrowserStatus[]>("PUT", `/api/admin/browsers/${id}`, body),
-  deleteBrowser: (id: number) => request<BrowserStatus[]>("DELETE", `/api/admin/browsers/${id}`),
-  testBrowser: (body: { id?: number; url?: string; apiKey?: string; username?: string; password?: string }) =>
-    request<BrowserTestResult>("POST", "/api/admin/browsers/test", body),
-  capacityTest: () => request<{ run: CapacityRun | null }>("GET", "/api/admin/browsers/capacity"),
-  startCapacityTest: (name: string) => request<{ run: CapacityRun }>("POST", "/api/admin/browsers/capacity", { name }),
-  stopCapacityTest: () => request<{ run: CapacityRun | null }>("DELETE", "/api/admin/browsers/capacity"),
   // LLM provider (own API keys, model picks)
   llmSettings: () => request<LlmSettingsResponse>("GET", "/api/settings/llm"),
   saveLlmKey: (provider: string, apiKey: string, baseUrl?: string) => request<LlmSettingsResponse>("PUT", `/api/settings/llm/keys/${encodeURIComponent(provider)}`, { apiKey, baseUrl }),

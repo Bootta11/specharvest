@@ -16,6 +16,7 @@ const users = await import("../../auth/users.ts");
 const sessions = await import("../../auth/sessions.ts");
 const { errorHandler } = await import("../../lib/http-error.ts");
 const { registerBurstRoutes } = await import("./routes.ts");
+const { adminScope } = await import("../../admin/routes.ts");
 
 afterAll(() => fs.rmSync(dataDir, { recursive: true, force: true }));
 
@@ -33,7 +34,7 @@ const manager = {
 const app = Fastify();
 await registerAuth(app);
 app.setErrorHandler(errorHandler);
-registerBurstRoutes(app, () => manager);
+await adminScope(app, (admin) => registerBurstRoutes(admin, () => manager));
 await app.ready();
 
 const admin = await users.createUser("burst-admin@example.com", "password1", "admin");

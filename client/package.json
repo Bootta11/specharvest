@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json",
-    "cap:sync": "npm run build && cap sync android",
+    "cap:sync": "vite build --mode app && cap sync android",
     "android": "npm run cap:sync && cap open android",
     "android:debug": "npm run cap:sync && cd android && ./gradlew assembleDebug",
     "android:bundle": "npm run cap:sync && cd android && ./gradlew bundleRelease"

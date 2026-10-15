@@ -56,8 +56,9 @@ CI tests, scans and publishes the image on every push to `master`. See
 
 0. **Users** — the avatar menu has *Account & API keys*, *LLM provider* (your
    own API keys and models, see [LLM providers](docs/llm-providers.md)) and, for
-   admins, *Users & sign-up* (add people, disable them, allow self sign-up, who
-   may use the server's LLM key). Each
+   admins, *Admin dashboard*: a separate page at `/admin/` (add people, disable
+   them, allow self sign-up, who may use the server's LLM key, browser servers,
+   everyone's spend; see [admin dashboard](docs/auth.md#admin-dashboard)). Each
    person has their own collections, jobs, searches, alerts and spend.
    *Share* makes a collection searchable by everyone, read only
    ([details](docs/auth.md)).
@@ -107,12 +108,12 @@ variable with comments. The essentials:
 | --- | --- |
 | `OPENROUTER_API_KEY` | The server's LLM key, for users without a key of their own (the admin decides who may use it) |
 | `ENCRYPTION_KEY` | Encrypts users' LLM API keys at rest (`openssl rand -base64 32`); generated into `DATA_DIR` if blank |
-| `PUPPETEER_WS_ENDPOINT` | Remote browser (`ws://`/`wss://`), or several comma-separated; `PUPPETEER_WS_API_KEY` / `_USER` / `_PASSWORD` for gated endpoints. More browsers, each with its own keys, can be added in the app (admin → Browser servers) |
+| `PUPPETEER_WS_ENDPOINT` | Remote browser (`ws://`/`wss://`), or several comma-separated; `PUPPETEER_WS_API_KEY` / `_USER` / `_PASSWORD` for gated endpoints. More browsers, each with its own keys, can be added in the admin dashboard (*Browser servers*) |
 | `PUPPETEER_EXECUTABLE_PATH` | Local Chrome, used when the WS endpoint is blank |
 | `OPENROUTER_MODEL` / `_EXTRACTION_MODEL` / `_SMART_MODEL` / `_WEB_MODEL` | Server-key models per task |
 | `WEB_SEARCH_*`, `ENRICH_*` | Web lookup switch, searches per lookup, caps, prefetch and thresholds |
 | `MAX_PAGES`, `MAX_ITEMS`, `SCRAPE_MAX_CONCURRENT_PAGES` | Crawl limits |
-| `BURST_*` | Extra browser servers rented from DigitalOcean while pages queue up; admins can manage settings, status and images in **Browser servers** — see [on-demand browsers](docs/deployment.md#extra-browser-servers-on-demand) |
+| `BURST_*` | Extra browser servers rented from DigitalOcean while pages queue up; admins can manage settings, status and images in the admin dashboard's **Browser servers** — see [on-demand browsers](docs/deployment.md#extra-browser-servers-on-demand) |
 | `PUBLIC_URL`, `VAPID_*` | Links in notifications; Web Push keys (auto-generated if blank) |
 | `ADMIN_EMAIL`, `ADMIN_PASSWORD` | First admin, created on boot when no user exists |
 | `SESSION_COOKIE_SECURE` | Session cookie `Secure` flag (default: on when `PUBLIC_URL` is https) |

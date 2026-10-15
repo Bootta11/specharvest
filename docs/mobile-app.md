@@ -59,6 +59,9 @@ The web UI uses the httpOnly session cookie on its own origin. The app runs at
 
 A custom server needs this version of SpecHarvest or later. Older servers refuse the app's sign-in.
 
+The admin dashboard isn't part of the app: for admins, *Admin dashboard* in the avatar menu opens
+`<server>/admin/` in the phone's browser, where you sign in separately ([admin dashboard](auth.md#admin-dashboard)).
+
 ### Several accounts
 
 The app remembers every account you sign in to, on any server. Each one is a separate session, kept in

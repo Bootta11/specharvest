@@ -60,7 +60,7 @@ regular user could otherwise point it at internal addresses (SSRF).
 
 ## For admins
 
-*avatar menu → Users & sign-up → Server LLM key* chooses who may use the server
+*admin dashboard → Settings → Server LLM key* chooses who may use the server
 key when they have no key of their own: **Everyone** (default, as before
 per-user keys existed), **Admins only**, or **Nobody**. People's own keys always
 come first. Without `OPENROUTER_API_KEY` everyone needs a key of their own.

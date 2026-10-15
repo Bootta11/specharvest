@@ -42,10 +42,22 @@ curl -H "X-Api-Key: shk_…" https://specharvest.example/api/collections
 | `GET /api/api-keys` | | your active keys `[{id, label, keyPrefix, createdAt, lastUsedAt}]` |
 | `POST /api/api-keys` | `{label}` | key incl. the full `key` — shown only once (201) |
 | `DELETE /api/api-keys/:id` | | `{ok}` |
-| `GET /api/users` | admin | all users |
-| `POST /api/users` | admin; `{email, role?: "user"\|"admin"}` | user + `temporaryPassword` (shown once) (201) |
-| `PATCH /api/users/:id` | admin; `{disabled}` | user (disabling signs them out; their data stays) |
-| `GET /api/settings/admin`, `PUT /api/settings/admin` | admin; `{signupEnabled?, serverLlmAccess?: "everyone"\|"admins"\|"nobody", serverLlmDailyLimitUsd?}` | `{signupEnabled, serverLlmAccess, serverLlmDailyLimitUsd, serverLlmConfigured}` (daily limit per non-admin on the server key, USD, 0 = none) |
+
+## Admin (`/api/admin`)
+
+Everything admin-only lives under `/api/admin`, behind one check for the whole prefix: 401 when signed out, 403 for
+non-admins and extension tokens. The admin dashboard (`/admin/`) is its only client.
+
+| Endpoint | Body / query | Returns |
+| --- | --- | --- |
+| `GET /api/admin/users` | | all users |
+| `POST /api/admin/users` | `{email, role?: "user"\|"admin"}` | user + `temporaryPassword` (shown once) (201) |
+| `PATCH /api/admin/users/:id` | `{disabled}` | user (disabling signs them out; their data stays) |
+| `GET /api/admin/settings`, `PUT /api/admin/settings` | `{signupEnabled?, serverLlmAccess?: "everyone"\|"admins"\|"nobody", serverLlmDailyLimitUsd?}` | `{signupEnabled, serverLlmAccess, serverLlmDailyLimitUsd, serverLlmConfigured}` (daily limit per non-admin on the server key, USD, 0 = none) |
+| `GET /api/admin/usage` | | everyone's LLM spend, same shape as `GET /api/usage` |
+| `GET /api/admin/credits` | | Server key's OpenRouter balance `{provider, key, account, errors, fetchedAt}`: `key` = API key limit/remaining/usage (`/api/v1/key`); `account` = purchased/used/remaining credits, only when `OPENROUTER_MANAGEMENT_KEY` is set. Cached 60 s |
+| `/api/admin/browsers…` | | remote browsers and the capacity test ([deployment](deployment.md#crawl-capacity)) |
+| `/api/admin/burst…` | | on-demand DigitalOcean browser servers ([deployment](deployment.md#extra-browser-servers-on-demand)) |
 
 ## Browser extension
 
@@ -102,8 +114,7 @@ See [LLM providers](llm-providers.md). Tiers: `fast`, `smart`, `web`.
 | `GET /api/jobs`, `GET /api/jobs/:id` | | jobs (incl. `llmCost` so far, `resumable`, `runner`, `botWall`) |
 | `POST /api/jobs/:id/stop` | | running crawl → *stopped* once open pages finish; running web lookup → *stopped* once lookups already running finish (values found are kept, `itemsRemaining` = products not looked up); job (202), 409 if not running |
 | `POST /api/jobs/:id/resume` | `{runner?}` switches whose browser loads the pages from here on | continues a *stopped*/*interrupted* crawl in the same job; job (202), 409 if not resumable or the collection is busy |
-| `GET /api/usage` | `?scope=all` (admin: everyone's) | your LLM spend `{today, last30d, allTime, byFunding: {own, platform}, estimated, byPurpose, byModel: [{provider, model, …}], unpricedCalls}` (USD; exact from OpenRouter/Perplexity, estimated for other providers) |
-| `GET /api/usage/credits` | admin | Server key's OpenRouter balance `{provider, key, account, errors, fetchedAt}`: `key` = API key limit/remaining/usage (`/api/v1/key`); `account` = purchased/used/remaining credits, only when `OPENROUTER_MANAGEMENT_KEY` is set. Cached 60 s |
+| `GET /api/usage` | | your LLM spend `{today, last30d, allTime, byFunding: {own, platform}, estimated, byPurpose, byModel: [{provider, model, …}], unpricedCalls}` (USD; exact from OpenRouter/Perplexity, estimated for other providers) |
 | `GET /api/jobs/events` | SSE | your jobs (admins: all): `jobs` (active jobs snapshot on connect), then `job` on every change; `extension` (`{status: {online, deviceName, version, concurrency}}`) on connect and whenever your extension comes or goes |
 | `GET /api/jobs/:id/events` | SSE | events `job`, `log`, `item`, `queue` (history replayed). Event ids are `<boot>-<seq>`. `Last-Event-ID` (or `?lastEventId=`, for an EventSource reopened after a restart) replays only newer events, or everything when the id is from before a restart |
 | `GET /api/settings/notifications` | | your notification settings, secrets replaced by `********` |

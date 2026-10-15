@@ -32,8 +32,8 @@ the notification channels.
 | --- | --- | --- |
 | Own collections: crawl, rename, share, delete | ✓ | ✓ (everyone's) |
 | Search collections shared by others (read only) | ✓ | ✓ |
-| See others' private collections, jobs, spend | — | ✓ (spend via *Everyone* in the `$` menu) |
-| Add users, disable/enable users, toggle sign-up | — | ✓ (*Users & sign-up* in the avatar menu) |
+| See others' private collections, jobs, spend | — | ✓ (spend in the admin dashboard's *Usage*) |
+| Add users, disable/enable users, toggle sign-up | — | ✓ (*Users* and *Settings* in the admin dashboard) |
 | Choose who may use the server's LLM key; add a custom (self-hosted) LLM endpoint | — | ✓ (see [LLM providers](llm-providers.md)) |
 
 **Sharing:** the owner clicks *Share* on a collection. Every user can then pick
@@ -52,6 +52,36 @@ person who started it.
 **Shared by everyone:** the web-lookup fact cache (`web_facts`) and the
 parsed-query cache. Neither holds anything personal; caching across users only
 saves LLM calls.
+
+## Admin dashboard
+
+Admin tools live on their own page, `/admin/`, separate from the app. Admins
+get an *Admin dashboard* link in the avatar menu; regular users see no admin
+items. The Android app opens it in the phone's browser, so you sign in there
+once. The tabs:
+
+- **Users:** add people (a temporary password is shown once) and disable or
+  enable them.
+- **Settings:** self sign-up, and who may use the server's LLM key (with the
+  per-user daily limit).
+- **Browser servers:** remote browsers, the capacity test, and rented
+  DigitalOcean servers ([deployment](deployment.md#extra-browser-servers-on-demand)).
+- **Usage:** everyone's LLM spend and the OpenRouter balance.
+
+Two rules keep the admin side separate:
+
+- **Server:** every admin route is registered under `/api/admin` through one
+  plugin with a single admin check (`server/src/admin/routes.ts`). Handlers
+  never check the role themselves, and `admin/guard.test.ts` fails if any
+  route under the prefix answers a non-admin, or if `requireAdmin` is used
+  anywhere else.
+- **Client:** the dashboard is its own Vite entry (`client/src/admin/`). The
+  app never imports from it, and the Android build (`npm run cap:sync`,
+  `--mode app`) leaves the page out entirely.
+
+Admins keep their wider reach inside the app itself: everyone's jobs and
+collections, higher crawl limits, and custom LLM endpoints (see the table
+above).
 
 ## Accounts
 

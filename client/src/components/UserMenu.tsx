@@ -1,15 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import type { UserSummary } from "@specharvest/shared";
-import { accounts, activeAccount, isNative, serverUrl } from "../lib/platform.ts";
+import { accounts, activeAccount, apiUrl, isNative, serverUrl } from "../lib/platform.ts";
 import { AccountRow } from "./AccountRow.tsx";
 
-/** Header avatar with the account / admin / sign-out menu; in the app also the saved accounts to switch to. */
+/** Header avatar with the account / sign-out menu (admins: a link to the admin dashboard); in the app also the saved accounts to switch to. */
 export function UserMenu({
   user,
   onAccount,
   onLlm,
-  onAdmin,
-  onServers,
   onLogout,
   onSwitch,
   onAddAccount,
@@ -17,8 +15,6 @@ export function UserMenu({
   user: UserSummary;
   onAccount: () => void;
   onLlm: () => void;
-  onAdmin: () => void;
-  onServers: () => void;
   onLogout: () => void;
   onSwitch: (id: string) => void;
   onAddAccount: () => void;
@@ -73,15 +69,11 @@ export function UserMenu({
           <button role="menuitem" className={item} onClick={pick(onLlm)}>
             LLM provider
           </button>
+          {/* Its own page (src/admin). The Android app opens it in the system browser: a link to another origin (lib/native.ts). */}
           {user.role === "admin" && (
-            <>
-              <button role="menuitem" className={item} onClick={pick(onAdmin)}>
-                Users & sign-up
-              </button>
-              <button role="menuitem" className={item} onClick={pick(onServers)}>
-                Browser servers
-              </button>
-            </>
+            <a role="menuitem" className={item} href={isNative ? apiUrl("/admin/") : "/admin/"} onClick={() => setOpen(false)}>
+              Admin dashboard
+            </a>
           )}
           {isNative && (
             <div className="border-y border-stone-200 py-1 dark:border-stone-800">

@@ -172,7 +172,7 @@ async function adminAuth({ required }) {
 
 async function llmSpend(admin) {
   if (!admin) return null;
-  const r = await api("GET", "/api/usage?scope=all", { auth: admin, track: false });
+  const r = await api("GET", "/api/admin/usage", { auth: admin, track: false });
   return r.status === 200 && typeof r.data?.allTime === "number" ? r.data.allTime : null;
 }
 
@@ -189,7 +189,7 @@ async function setup() {
 
   for (let i = state.users.length; i < want; i++) {
     const email = `loadtest-${state.tag}-${i + 1}@example.com`;
-    const created = await api("POST", "/api/users", { auth: admin, body: { email, role: "user" }, track: false });
+    const created = await api("POST", "/api/admin/users", { auth: admin, body: { email, role: "user" }, track: false });
     if (created.status !== 201) throw new Error(`Creating ${email} failed: ${errText(created)}`);
     const password = created.data.temporaryPassword;
     if (i > 0) await sleep(CREDENTIAL_GAP_MS);
@@ -210,10 +210,10 @@ async function setup() {
   if (config.status !== 200) throw new Error(`Test user can't call the API: ${errText(config)}`);
   if (!config.data.llmConfigured) {
     if (!isLocal) {
-      throw new Error("Test users have no LLM access. As admin, allow the server key for everyone (Admin → LLM access) or give them a key, then run setup again.");
+      throw new Error("Test users have no LLM access. As admin, allow the server key for everyone (admin dashboard → Settings) or give them a key, then run setup again.");
     }
     console.log("  allowing the server LLM key for everyone on this local instance");
-    const put = await api("PUT", "/api/settings/admin", { auth: admin, body: { serverLlmAccess: "everyone" }, track: false });
+    const put = await api("PUT", "/api/admin/settings", { auth: admin, body: { serverLlmAccess: "everyone" }, track: false });
     if (put.status !== 200) throw new Error(`Couldn't change LLM access: ${errText(put)}`);
     config = await api("GET", "/api/config", { auth: user, track: false });
     if (!config.data.llmConfigured) throw new Error("Still no LLM for test users — is OPENROUTER_API_KEY set on the server?");

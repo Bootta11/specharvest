@@ -32,7 +32,7 @@ empty database. `setup` on a local instance also allows the server LLM key for e
 ## Against a deployed instance
 
 1. Sign in as an admin and create an API key under *Account*.
-2. Make sure test users can use an LLM: *Admin → LLM access* must allow the server key for everyone. Keep in mind
+2. Make sure test users can use an LLM: *admin dashboard → Settings → Server LLM key* must allow the server key for everyone. Keep in mind
    the per-user daily limit.
 3. Start small, then increase:
 
@@ -50,7 +50,7 @@ so re-runs don't hit the "unchanged item" shortcut.
 
 ## Browser capacity (admin UI)
 
-To find how many pages one browser handles at once, an admin opens **Browser servers** and presses **Test capacity**
+To find how many pages one browser handles at once, an admin opens **Browser servers** in the admin dashboard and presses **Test capacity**
 on that browser (`server/src/crawler/capacity.ts`). It loads books.toscrape.com product pages the way a crawl loads
 item pages: a fresh private context per page, with images, fonts and media blocked. It runs 30 s steps of 1, 2, 3,
 4, 6, 8, 10, 12 and 16 pages at once.

@@ -1,34 +1,22 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { createUserSchema, deleteAccountSchema, loginSchema, serverLlmAccessModes, signupSchema, updateAccountSchema, type AdminSettings, type AuthStatus, type UserCreated, type UserSummary } from "@specharvest/shared";
-import { env } from "../config.ts";
+import { deleteAccountSchema, loginSchema, signupSchema, updateAccountSchema, type AuthStatus, type UserSummary } from "@specharvest/shared";
 import { stopCrawl } from "../crawler/job.ts";
 import { deleteVectors } from "../db/lance.ts";
 import * as db from "../db/sqlite.ts";
 import { stopEnrichment } from "../enrich/web.ts";
 import { disconnectKey } from "../extension/gateway.ts";
 import { httpError } from "../lib/http-error.ts";
-import { serverDailyLimitUsd, serverLlmAccess, setServerDailyLimitUsd, setServerLlmAccess } from "../llm/resolve.ts";
 import { createApiKey, listApiKeys, listExtensionTokens, revokeApiKey } from "./api-keys.ts";
-import { hashToken, temporaryPassword } from "./crypto.ts";
-import { currentUser, isAppClient, requireAdmin, SESSION_COOKIE, sessionCookieOptions } from "./plugin.ts";
+import { hashToken } from "./crypto.ts";
+import { currentUser, isAppClient, SESSION_COOKIE, sessionCookieOptions } from "./plugin.ts";
 import { createSession, revokeSession } from "./sessions.ts";
-import { activeJobsOf, assertCanDeleteOwnAccount, createUser, deleteUser, getUser, listUsers, setUserDisabled, toSummary, updateOwnAccount, verifyLogin } from "./users.ts";
+import { activeJobsOf, assertCanDeleteOwnAccount, createUser, deleteUser, getUser, toSummary, updateOwnAccount, verifyLogin } from "./users.ts";
 
 const SIGNUP_KEY = "auth.signupEnabled";
-const signupEnabled = () => db.getSetting<boolean>(SIGNUP_KEY) === true;
-
-const adminSettings = (): AdminSettings => ({
-  signupEnabled: signupEnabled(),
-  serverLlmAccess: serverLlmAccess(),
-  serverLlmDailyLimitUsd: serverDailyLimitUsd(),
-  serverLlmConfigured: !!env.OPENROUTER_API_KEY,
-});
-const adminSettingsSchema = z.object({
-  signupEnabled: z.boolean().optional(),
-  serverLlmAccess: z.enum(serverLlmAccessModes).optional(),
-  serverLlmDailyLimitUsd: z.number().min(0).max(1000).optional(),
-});
+/** Whether anyone may create an account (set from the admin dashboard, admin/users-routes.ts). */
+export const signupEnabled = () => db.getSetting<boolean>(SIGNUP_KEY) === true;
+export const setSignupEnabled = (enabled: boolean) => db.setSetting(SIGNUP_KEY, enabled);
 
 const idParam = (p: unknown) => z.coerce.number().int().positive().parse((p as { id?: string }).id);
 
@@ -105,45 +93,5 @@ export function registerAuthRoutes(app: FastifyInstance) {
   app.delete("/api/api-keys/:id", async (req, reply) => {
     if (!revokeApiKey(currentUser(req).id, idParam(req.params))) return reply.status(404).send({ error: "Not found" });
     return { ok: true };
-  });
-
-  // ---------- Admin ----------
-
-  app.get("/api/users", async (req) => {
-    requireAdmin(req);
-    return listUsers();
-  });
-
-  // No email sending exists — the admin passes the temporary password on.
-  app.post("/api/users", async (req, reply) => {
-    requireAdmin(req);
-    const body = createUserSchema.parse(req.body);
-    const password = temporaryPassword();
-    const user = await createUser(body.email, password, body.role);
-    return reply.status(201).send({ ...user, temporaryPassword: password } satisfies UserCreated);
-  });
-
-  app.patch("/api/users/:id", async (req, reply) => {
-    const admin = requireAdmin(req);
-    const id = idParam(req.params);
-    const { disabled } = z.object({ disabled: z.boolean() }).parse(req.body);
-    if (id === admin.id && disabled) throw httpError(400, "You can't disable your own account");
-    const user = setUserDisabled(id, disabled);
-    return user ?? reply.status(404).send({ error: "Not found" });
-  });
-
-  app.get("/api/settings/admin", async (req): Promise<AdminSettings> => {
-    requireAdmin(req);
-    return adminSettings();
-  });
-
-  app.put("/api/settings/admin", async (req): Promise<AdminSettings> => {
-    requireAdmin(req);
-    const body = adminSettingsSchema.parse(req.body);
-    if (body.signupEnabled !== undefined) db.setSetting(SIGNUP_KEY, body.signupEnabled);
-    // Who may use the server's LLM key when they have no key of their own, and how much a day (llm/resolve.ts).
-    if (body.serverLlmAccess !== undefined) setServerLlmAccess(body.serverLlmAccess);
-    if (body.serverLlmDailyLimitUsd !== undefined) setServerDailyLimitUsd(body.serverLlmDailyLimitUsd);
-    return adminSettings();
   });
 }

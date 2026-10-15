@@ -27,8 +27,6 @@ import { embed } from "./embedding.ts";
 import { proxyConfigured } from "./crawler/browser.ts";
 import { inspectUrl } from "./crawler/inspect.ts";
 import { startBurstServers } from "./crawler/burst/index.ts";
-import { registerBurstRoutes } from "./crawler/burst/routes.ts";
-import { registerBrowserRoutes } from "./crawler/browsers-routes.ts";
 import { startConfiguredBrowsers } from "./crawler/browsers.ts";
 import { FatalDriverError } from "./crawler/driver.ts";
 import { connectionFor, extensionStatus, onExtensionConnected, registerExtensionGateway } from "./extension/gateway.ts";
@@ -41,7 +39,6 @@ import { autoConfirmMatches, groupForCollection, lookupIdentity, matchSuggestion
 import { search } from "./search/hybrid.ts";
 import { proposeKeyMerges } from "./llm/consolidate.ts";
 import { withLlmContext } from "./llm/usage.ts";
-import { getProviderCredits } from "./llm/credits.ts";
 import { llmReady, llmStatus, requireLlm } from "./llm/resolve.ts";
 import { registerLlmRoutes } from "./llm/routes.ts";
 import { startPriceRefresh } from "./llm/pricing.ts";
@@ -53,9 +50,10 @@ import { beginShutdown, isShuttingDown, restartingError } from "./lib/shutdown.t
 import { registerSecurityHeaders } from "./lib/security-headers.ts";
 import { bootstrapAdmin } from "./auth/bootstrap.ts";
 import { requireCollection, requireGroup, requireJob } from "./auth/ownership.ts";
-import { currentUser, registerAuth, requireAdmin, searchLimit, userLimit } from "./auth/plugin.ts";
+import { currentUser, registerAuth, searchLimit, userLimit } from "./auth/plugin.ts";
 import type { AuthUser } from "./auth/ownership.ts";
 import { registerAuthRoutes } from "./auth/routes.ts";
+import { registerAdminRoutes } from "./admin/routes.ts";
 import { pruneSessions } from "./auth/sessions.ts";
 
 const log = createLogger("server");
@@ -120,9 +118,8 @@ const notFound = (reply: FastifyReply) => reply.status(404).send({ error: "Not f
 
 registerAuthRoutes(app);
 const burst = startBurstServers();
-registerBurstRoutes(app, () => burst);
 void startConfiguredBrowsers();
-registerBrowserRoutes(app);
+await registerAdminRoutes(app, () => burst);
 registerLlmRoutes(app);
 await registerExtensionGateway(app);
 registerExtensionRoutes(app);
@@ -411,18 +408,8 @@ app.post("/api/enrich", userLimit(10), async (req, reply) => {
   return reply.status(202).send({ job });
 });
 
-// Your own spend; admins can ask for everyone's with ?scope=all.
-app.get("/api/usage", async (req) => {
-  const user = currentUser(req);
-  const all = user.role === "admin" && (req.query as { scope?: string }).scope === "all";
-  return db.usageSummary(Date.now(), all ? null : user.id);
-});
-
-// Remaining OpenRouter balance — the shared server account, so admins only.
-app.get("/api/usage/credits", async (req) => {
-  requireAdmin(req);
-  return getProviderCredits();
-});
+// Your own spend (everyone's: GET /api/admin/usage).
+app.get("/api/usage", async (req) => db.usageSummary(Date.now(), currentUser(req).id));
 
 app.get("/api/jobs", async (req) => db.listJobs(30, currentUser(req)));
 
@@ -535,6 +522,10 @@ if (fs.existsSync(clientDist)) {
   await app.register(fastifyStatic, { root: clientDist, wildcard: false });
   app.setNotFoundHandler((req, reply) => {
     if (req.url.startsWith("/api/")) return reply.status(404).send({ error: "Not found" });
+    // The admin dashboard is its own page (client/admin/index.html), separate from the app.
+    const pathname = req.url.split("?")[0];
+    if (pathname === "/admin") return reply.redirect(`/admin/${req.url.slice(pathname.length)}`);
+    if (pathname.startsWith("/admin/")) return reply.sendFile("admin/index.html");
     return reply.sendFile("index.html");
   });
 }

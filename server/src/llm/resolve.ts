@@ -55,7 +55,7 @@ export function setServerLlmAccess(mode: ServerLlmAccess) {
 const DAILY_LIMIT_KEY = "llm.serverDailyLimitUsd";
 export const DEFAULT_SERVER_DAILY_LIMIT_USD = 1;
 
-/** USD each non-admin may spend on the server key per day (Users & sign-up); 0 = no limit. */
+/** USD each non-admin may spend on the server key per day (admin dashboard → Settings); 0 = no limit. */
 export function serverDailyLimitUsd(): number {
   const v = db.getSetting<number>(DAILY_LIMIT_KEY);
   return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : DEFAULT_SERVER_DAILY_LIMIT_USD;

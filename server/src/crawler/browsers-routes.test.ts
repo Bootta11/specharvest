@@ -39,13 +39,14 @@ const users = await import("../auth/users.ts");
 const sessions = await import("../auth/sessions.ts");
 const { errorHandler } = await import("../lib/http-error.ts");
 const { registerBrowserRoutes } = await import("./browsers-routes.ts");
+const { adminScope } = await import("../admin/routes.ts");
 
 afterAll(() => fs.rmSync(dataDir, { recursive: true, force: true }));
 
 const app = Fastify();
 await registerAuth(app);
 app.setErrorHandler(errorHandler);
-registerBrowserRoutes(app);
+await adminScope(app, registerBrowserRoutes);
 await app.ready();
 
 const admin = await users.createUser("browsers-admin@example.com", "password1", "admin");

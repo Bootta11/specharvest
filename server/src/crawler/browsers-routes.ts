@@ -2,7 +2,6 @@ import type { FastifyInstance } from "fastify";
 import { browserTestSchema, type BrowserTestResult } from "@specharvest/shared";
 import { z } from "zod";
 import * as db from "../db/sqlite.ts";
-import { requireAdmin } from "../auth/plugin.ts";
 import { httpError } from "../lib/http-error.ts";
 import { errorMessage } from "../lib/logger.ts";
 import { browserFleet, testBrowserConnection } from "./browser.ts";
@@ -29,29 +28,25 @@ function capacityTarget(name: string): CapacityTarget {
   return { name, id: row.id, url: row.url, creds: credentialsOf(row) };
 }
 
-/** Admin: the remote browsers crawl pages run in (crawler/browsers.ts). */
+/** Admin: the remote browsers crawl pages run in (crawler/browsers.ts). Registered inside the admin scope (admin/routes.ts). */
 export function registerBrowserRoutes(app: FastifyInstance) {
-  app.get("/api/admin/browsers", async (request) => {
-    requireAdmin(request);
+  app.get("/browsers", async () => {
     return listBrowserStatus();
   });
 
-  app.post("/api/admin/browsers", async (request, reply) => {
-    requireAdmin(request);
+  app.post("/browsers", async (request, reply) => {
     createBrowser(request.body);
     return reply.status(201).send(listBrowserStatus());
   });
 
-  app.put("/api/admin/browsers/:id", async (request) => {
-    requireAdmin(request);
+  app.put("/browsers/:id", async (request) => {
     const id = idParam(request.params);
     assertNotUnderTest(id);
     updateBrowser(id, request.body);
     return listBrowserStatus();
   });
 
-  app.delete("/api/admin/browsers/:id", async (request) => {
-    requireAdmin(request);
+  app.delete("/browsers/:id", async (request) => {
     const id = idParam(request.params);
     assertNotUnderTest(id);
     deleteBrowser(id);
@@ -59,8 +54,7 @@ export function registerBrowserRoutes(app: FastifyInstance) {
   });
 
   /** Tries the entered URL and keys; empty fields fall back to the saved browser `id`. Never returns secrets. */
-  app.post("/api/admin/browsers/test", async (request): Promise<BrowserTestResult> => {
-    requireAdmin(request);
+  app.post("/browsers/test", async (request): Promise<BrowserTestResult> => {
     const input = browserTestSchema.parse(request.body ?? {});
     const saved = input.id !== undefined ? db.getBrowser(input.id) : null;
     if (input.id !== undefined && !saved) throw httpError(404, "Not found");
@@ -82,20 +76,17 @@ export function registerBrowserRoutes(app: FastifyInstance) {
 
   // ---------- Capacity test (crawler/capacity.ts) ----------
 
-  app.get("/api/admin/browsers/capacity", async (request) => {
-    requireAdmin(request);
+  app.get("/browsers/capacity", async () => {
     return { run: capacityTester().state() };
   });
 
-  app.post("/api/admin/browsers/capacity", async (request, reply) => {
-    requireAdmin(request);
+  app.post("/browsers/capacity", async (request, reply) => {
     const { name } = z.object({ name: z.string().trim().min(1).max(100) }).parse(request.body);
     const target = capacityTarget(name);
     return reply.status(202).send({ run: capacityTester().start(target) });
   });
 
-  app.delete("/api/admin/browsers/capacity", async (request) => {
-    requireAdmin(request);
+  app.delete("/browsers/capacity", async () => {
     capacityTester().stop();
     return { run: capacityTester().state() };
   });

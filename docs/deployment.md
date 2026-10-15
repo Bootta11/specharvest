@@ -178,7 +178,7 @@ with the most free pages (`server/src/crawler/browser-pool.ts`). A browser that 
 gets no pages for 30 s, and the page is tried once on another one. The page log lines name the
 browser (`[detail on main-2]`).
 
-Browsers can also be added in the app: an admin opens **Browser servers** in the user menu, then **Add browser**.
+Browsers can also be added in the [admin dashboard](auth.md#admin-dashboard) (`/admin/`): **Browser servers** → **Add browser**.
 Each one has its own URL, API key (`X-Api-Key`), username and password (Basic auth), and those keys are stored
 encrypted with `ENCRYPTION_KEY`. Each one can also have its own page limit (empty = `SCRAPE_MAX_CONCURRENT_PAGES`),
 be turned off without deleting it, and be kept away from proxy pages. **Test** connects with the entered keys and
@@ -240,7 +240,7 @@ Setup:
    scope shows up in the log as `DigitalOcean POST /droplets → 403: …`.
 2. Set `BURST_PROVIDER=digitalocean`. Set `BURST_DO_TOKEN` (or `BURST_DO_TOKEN_FILE`) and
    `BURST_ALLOWED_IP` in env to keep the feature on immediately, or enter them under
-   **Account menu → Browser servers** and switch it on there. Panel values override env; removing
+   **Admin dashboard → Browser servers** and switch it on there. Panel values override env; removing
    one returns to its env value. The token is encrypted with `ENCRYPTION_KEY` and is never returned
    by the API. If that key is lost, enter the token again.
 3. Optional: add an SSH key to the account and set `BURST_DO_SSH_KEY_ID`. Without it, DigitalOcean
@@ -300,7 +300,7 @@ longer exists, server starts fail with `422` in the log. The previous app-built 
 | `MAX_ACTIVE_JOBS_PER_USER` | `3` | Crawls + web lookups one non-admin may run at once (0 = no limit) |
 | `IMPORT_MAX_MB` | `50` | Largest collection file an import accepts |
 
-The daily limit on the server's LLM key is set in the app (*Users & sign-up*).
+The daily limit on the server's LLM key is set in the admin dashboard (*Settings*).
 
 **Outbound requests.** The app refuses to crawl loopback, private, link-local
 (cloud metadata) and other non-public addresses. That covers the start URL and
