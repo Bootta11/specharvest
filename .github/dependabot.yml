@@ -1,26 +1,49 @@
+# One batch of PRs per ecosystem, every Monday morning. Updates are grouped so a week
+# brings at most: npm minor+patch, npm majors, docker, docker-compose, actions.
 version: 2
 updates:
   - package-ecosystem: npm
     directory: /
-    schedule: { interval: weekly }
+    schedule: { interval: weekly, day: monday, time: "06:00", timezone: Europe/Belgrade }
+    # Skip brand-new releases (and their quick x.y.1 follow-ups).
+    cooldown:
+      default-days: 3
+      semver-major-days: 7
     groups:
       minor-and-patch:
         update-types: [minor, patch]
+      # Majors may break things, so they come in their own PR — but only one.
+      major:
+        update-types: [major]
+      security:
+        applies-to: security-updates
+        patterns: ["*"]
     # Node types track the runtime's major (.nvmrc); bump it together with Node.
     ignore:
       - dependency-name: "@types/node"
-        update-types: [version-update:semver-major]
+        update-types: ["version-update:semver-major"]
   # Base image digests pinned in the Dockerfile
   - package-ecosystem: docker
     directory: /
-    schedule: { interval: weekly }
+    schedule: { interval: weekly, day: monday, time: "06:00", timezone: Europe/Belgrade }
+    groups:
+      docker:
+        patterns: ["*"]
     # Stay on the Node LTS major from .nvmrc; bump it deliberately with the runtime image.
     ignore:
       - dependency-name: node
-        update-types: [version-update:semver-major]
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: docker-compose
     directory: /
-    schedule: { interval: weekly }
+    schedule: { interval: weekly, day: monday, time: "06:00", timezone: Europe/Belgrade }
+    groups:
+      docker-compose:
+        patterns: ["*"]
   - package-ecosystem: github-actions
     directory: /
-    schedule: { interval: weekly }
+    schedule: { interval: weekly, day: monday, time: "06:00", timezone: Europe/Belgrade }
+    cooldown:
+      default-days: 3
+    groups:
+      actions:
+        patterns: ["*"]
