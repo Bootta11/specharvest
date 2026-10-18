@@ -15,14 +15,14 @@ import { withLlmContext } from "../llm/usage.ts";
 import { createLogger, errorMessage } from "../lib/logger.ts";
 import { httpError } from "../lib/http-error.ts";
 import { getUser } from "../auth/users.ts";
-import { notifyJobFinished, notifyJobInterrupted } from "../notify/index.ts";
+import { notifyJobFinished, notifyJobInterrupted, notifyJobPicking } from "../notify/index.ts";
 import { publish, retireChannel, reviveChannel } from "../sse/hub.ts";
 import { prepareBrowserRunner } from "../extension/driver.ts";
 import { BlockedPageError, BotWallError, gotoAndSettle, waitForStableText, withPage, type WithPageOptions } from "./browser.ts";
 import { FatalDriverError } from "./driver.ts";
-import { detectListingStructure } from "./detect.ts";
+import { detectListingStructure, tighterItemUrlPattern } from "./detect.ts";
 import { changedTokens, fingerprint, removedShare } from "./fingerprint.ts";
-import { collectItemUrls, walkListing } from "./paginate.ts";
+import { collectItemUrls, walkListing, type ItemCard } from "./paginate.ts";
 import { snapshotDetail, toDetailSnapshot, type DetailSnapshot, type OtherListingHints } from "./sanitize.ts";
 import { safeItemUrlPattern } from "./url-pattern.ts";
 
@@ -188,6 +188,7 @@ function launch(jobId: number, collectionId: number, req: CrawlRequest, resumeSi
       } else {
         patchJob(jobId, { status: "failed", error: errorMessage(err), finishedAt: Date.now() });
         jobLog(jobId, `Crawl failed: ${errorMessage(err)}`, "error");
+        db.clearJobCandidates(jobId);
       }
       retireChannel(jobChannel(jobId));
     })
@@ -229,6 +230,7 @@ export function startCrawl(req: CrawlRequest, userId: number | null, collectionI
     mode: req.mode ?? (req.refresh ? "full" : "quick"),
     ...(addItem ? { kind: "item" as const } : {}),
     ...(runner === "browser" ? { runner } : {}),
+    ...(req.pickItems && !addItem ? { pickItems: true } : {}),
   };
   const job = db.createJob("crawl", targetId, params, userId);
   emitJob(job);
@@ -239,6 +241,12 @@ export function startCrawl(req: CrawlRequest, userId: number | null, collectionI
 /** Asks a running crawl to stop; in-flight pages finish first. False if it isn't running here. */
 export function stopCrawl(jobId: number): Job | null {
   const job = db.getJob(jobId);
+  // Waiting for the user's pick: nothing runs, so stopping discards the list (Resume walks the listing again).
+  if (job?.status === "picking") {
+    db.clearJobCandidates(jobId);
+    jobLog(jobId, "Pick discarded — nothing extracted");
+    return patchJob(jobId, { status: "stopped", message: "Discarded — nothing extracted", finishedAt: Date.now() });
+  }
   // Held after a restart, waiting for the user's browser: nothing runs yet.
   if (job?.userId != null && heldForBrowser.get(job.userId)?.delete(jobId)) {
     db.setAutoResume(jobId, false);
@@ -284,6 +292,26 @@ function continueCrawl(jobId: number, runner?: Runner): Job {
   const resumed = patchJob(jobId, { status: "running", error: null, finishedAt: null, itemsFailed: 0, message: "Resuming" });
   launch(jobId, job.collectionId, params, job.startedAt);
   return resumed;
+}
+
+/**
+ * The user chose which of a parked pick-first crawl's items to extract: the same job continues with only those
+ * (the listing isn't walked again). Throws 409 when the job isn't waiting for a pick, 400 for URLs it didn't find.
+ */
+export function pickItems(jobId: number, urls: string[]): Job {
+  const job = db.getJob(jobId);
+  const params = db.getJobParams<CrawlRequest>(jobId);
+  if (!job || job.status !== "picking" || !params || job.collectionId == null) throw httpError(409, "This crawl isn't waiting for a pick");
+  const candidates = new Set(db.listJobCandidates(jobId).map((c) => c.url));
+  const unknown = urls.filter((u) => !candidates.has(u));
+  if (unknown.length > 0) throw httpError(400, `${unknown.length} of the picked items aren't on this crawl's list`);
+  assertJobSlot(job.userId);
+  const picked = db.setPickedCandidates(jobId, urls);
+  reviveChannel(jobChannel(jobId));
+  const started = patchJob(jobId, { status: "running", error: null, finishedAt: null, itemsIndexed: 0, itemsFailed: 0, message: `Extracting ${picked} picked items` });
+  jobLog(jobId, `${picked} of ${candidates.size} items picked`);
+  launch(jobId, job.collectionId, params);
+  return started;
 }
 
 const PAUSED_MESSAGE = "Paused for a server update — continues on its own";
@@ -359,6 +387,22 @@ export function resumeAfterRestart() {
   }, BROWSER_WAIT_MS).unref();
 }
 
+/**
+ * Startup: narrows item-URL patterns saved before inference looked past the first path segment (they also matched the
+ * site's listing pages, so the page check took listings for item pages), using the items each collection found.
+ */
+export function repairItemUrlPatterns() {
+  const rows = db.listItemUrlPatterns();
+  for (const { id, host, pattern, urls } of rows) {
+    // Too few items of its own to tell (a pattern needs 3): the site's other collections' items vouch for it.
+    const sample = urls.length >= 3 ? urls : rows.filter((r) => r.host === host).flatMap((r) => r.urls);
+    const tighter = tighterItemUrlPattern(pattern, sample);
+    if (!tighter) continue;
+    db.setItemUrlPattern(id, tighter);
+    log.info(`collection ${id}: item address pattern narrowed ${pattern} → ${tighter}`);
+  }
+}
+
 /** The user's extension connected: their crawls held since the restart continue. */
 export function continueHeldCrawls(userId: number) {
   const ids = heldForBrowser.get(userId);
@@ -411,15 +455,24 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
   // Without a listing card to compare, a quick check would call everything unchanged — open the pages.
   const requested: CrawlMode = req.mode ?? (req.refresh ? "full" : "quick");
   const mode: CrawlMode = (addItem || itemsOnly) && requested === "quick" ? "deep" : requested;
-  patchJob(jobId, { status: "running", message: addItem ? "Opening item page" : itemsOnly ? "Re-checking items" : "Opening listing page" });
+  // Pick-first: walk the listing and park the cards for the user (choosing), then — once they picked — extract only those.
+  const pickFirst = !!req.pickItems && !addItem && !itemsOnly;
+  const picks = pickFirst ? db.pickedWalk(jobId) : null;
+  const choosing = pickFirst && !picks;
+  patchJob(jobId, {
+    status: "running",
+    message: addItem ? "Opening item page" : itemsOnly ? "Re-checking items" : picks ? `Extracting ${picks.picked.size} picked items` : "Opening listing page",
+  });
   if (resumeSince) jobLog(jobId, "Resuming — skipping items already handled");
   if (inBrowser) {
     jobLog(jobId, "Pages load in your own browser (SpecHarvest extension)");
     await prepareBrowserRunner(ownerId, url, pageOpts);
-    if (!snapshot) patchJob(jobId, { message: addItem ? "Opening item page in your browser" : itemsOnly ? "Re-checking items in your browser" : "Opening listing page in your browser" });
+    if (!snapshot && !picks) patchJob(jobId, { message: addItem ? "Opening item page in your browser" : itemsOnly ? "Re-checking items in your browser" : "Opening listing page in your browser" });
   }
   if (addItem) jobLog(jobId, `Adding item ${url} to "${target.name}"${req.useProxy ? " (via proxy)" : ""}`);
   else if (itemsOnly) jobLog(jobId, `Re-checking the ${target.itemCount} items of "${target.name}" (${mode} check${req.useProxy ? ", via proxy" : ""})`);
+  else if (picks) jobLog(jobId, `Extracting the ${picks.picked.size} picked items of ${url} (${mode} check${req.useProxy ? ", via proxy" : ""})`);
+  else if (choosing) jobLog(jobId, `Reading the item titles of ${url} (max ${maxPages} pages, ${maxItems} items) — you pick which to extract`);
   else jobLog(jobId, `Crawling ${url} (max ${maxPages} pages, ${maxItems} items, ${mode} check${req.useProxy ? ", via proxy" : ""})`);
 
   // Detail pages open while the listing is still being walked: each listing page's cards are sorted
@@ -584,7 +637,7 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
   };
 
   /** A walk without a listing (fixed item URLs): everything is known up front. */
-  const queueFixed = (w: ReturnType<typeof fixedWalk>) => {
+  const queueFixed = (w: Pick<ReturnType<typeof fixedWalk>, "items" | "complete" | "detection">) => {
     hints = hintsFor(w.detection);
     patchJob(jobId, { itemsFound: w.items.size });
     for (const [itemUrl, cardText] of w.items) classify(itemUrl, cardText);
@@ -611,7 +664,11 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
       throwIfStopped(signal);
     }
     // Detection and the walk go before item pages other crawls have queued: they produce the first results.
-    walk = addItem || itemsOnly ? queueFixed(fixedWalk(target, addItem ? [url] : [...known.keys()])) : await withPage(async (page) => {
+    /** Choosing: the walked cards, with titles, for the picker. */
+    const cards: ItemCard[] = [];
+    walk = picks
+      ? queueFixed({ ...fixedWalk(target, []), items: picks.picked, complete: picks.complete })
+      : addItem || itemsOnly ? queueFixed(fixedWalk(target, addItem ? [url] : [...known.keys()])) : await withPage(async (page) => {
       // The user's browser hides crawl pages by default, and hidden pages don't scroll: check once per site.
       const scroll = await page.checkScrollLoading?.(url);
       if (scroll?.message) jobLog(jobId, scroll.message);
@@ -660,7 +717,7 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
       }
       releaseHost();
 
-      patchJob(jobId, { message: "Walking listing pages — indexing items as they're found" });
+      patchJob(jobId, { message: choosing ? "Walking listing pages — reading item titles" : "Walking listing pages — indexing items as they're found" });
       hints = hintsFor(detection);
       const result = await walkListing(page, url, detection, {
         maxPages,
@@ -668,7 +725,8 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
         onPage: (pageNum, fresh, total) => {
           throwIfStopped(signal);
           if (halt) throw new StopError(halt.message);
-          for (const card of fresh) classify(card.url, card.cardText);
+          if (choosing) cards.push(...fresh);
+          else for (const card of fresh) classify(card.url, card.cardText);
           patchJob(jobId, { pagesSeen: pageNum, itemsFound: total, itemsIndexed: indexed });
           jobLog(jobId, `Listing page ${pageNum}: +${fresh.length} items (${total} total)`);
         },
@@ -677,14 +735,35 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
           jobLog(jobId, message, warn ? "warn" : "info");
         },
       });
+      // Patterns saved before item-URL inference looked past the first path segment also match listing pages.
+      const tighter = save ? tighterItemUrlPattern(detection.itemUrlPattern, [...result.items.keys()]) : null;
+      if (tighter) {
+        detection = { ...detection, itemUrlPattern: tighter };
+        db.saveDetection(collectionId, detection, inBrowser);
+        jobLog(jobId, `Item address pattern narrowed to ${tighter}`);
+      }
       return { ...result, detection };
     }, { ...pageOpts, priority: "listing" });
 
     throwIfStopped(signal);
     if (walk.items.size === 0) throw new Error(itemsOnly ? "This collection has no items to re-check" : "No item links found on the listing page");
 
-    // Hand-added items aren't on the listing: open their pages too (LLM only if they changed).
-    if (!addItem && !itemsOnly) {
+    // Pick-first: the titles are read — park the crawl until its user picks (no slot or browser held meanwhile).
+    if (choosing) {
+      db.saveJobCandidates(jobId, cards, walk.complete);
+      logJobTiming(jobId);
+      const saved = cards.filter((c) => known.has(c.url)).length;
+      const message = `${cards.length} items found${saved ? ` (${saved} already saved)` : ""} — pick which to extract`;
+      const parked = patchJob(jobId, { status: "picking", itemsFound: cards.length, message, finishedAt: Date.now() });
+      jobLog(jobId, `${message}. Nothing is extracted until you pick.`);
+      void notifyJobPicking(parked);
+      retireChannel(jobChannel(jobId));
+      return;
+    }
+
+    // Hand-added items aren't on the listing: open their pages too (LLM only if they changed). Not in a pick: the
+    // user chose what to open.
+    if (!addItem && !itemsOnly && !picks) {
       for (const [itemUrl, fp] of known) {
         if (!fp.manual || walk.items.has(itemUrl) || handled.has(itemUrl)) continue;
         if (mode === "full") enqueueNew({ url: itemUrl, cardHash: fp.cardHash ?? "" });
@@ -702,7 +781,7 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
       jobId,
       mode === "full"
         ? `Re-extracting all ${walk.items.size - skipped + byHand} items`
-        : addItem || itemsOnly
+        : addItem || itemsOnly || picks
           ? `${newCount} new · ${checkCount} to re-check`
           : `${newCount} new · ${checkCount - byHand} to re-check (${mode === "deep" ? "every detail page" : "listing card changed"})${byHand ? ` · ${byHand} added by hand to re-check` : ""} · ${unchanged} unchanged (skipped)`,
     );
@@ -735,14 +814,16 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
   if (extracted + reused > 0) await timed("group", () => groupProducts(jobId, collectionId));
 
   // ---- 4. Listings missing from a complete walk are gone (sold/removed) ----
+  // A pick's unpicked cards were on the listing too: seen, never gone.
+  const seen: ReadonlySet<string> | ReadonlyMap<string, string> = picks ? picks.seen : walk.items;
   let gone = 0;
   if (walk.complete) {
     const active = [...known.values()].filter((f) => f.goneAt === null).length;
-    const missing = [...known.keys()].filter((u) => !walk.items.has(u) && known.get(u)!.goneAt === null).length;
+    const missing = [...known.keys()].filter((u) => !seen.has(u) && known.get(u)!.goneAt === null).length;
     if (missing > 0 && active >= 4 && missing / active > MAX_GONE_SHARE) {
       jobLog(jobId, `${missing} of ${active} saved items were not on the listing — too many to trust, not marking them gone`, "warn");
     } else {
-      gone = db.markGone(collectionId, walk.items.keys());
+      gone = db.markGone(collectionId, seen.keys());
       if (gone) jobLog(jobId, `${gone} items are no longer listed — marked as gone`);
     }
   } else if (known.size > 0 && !addItem && !itemsOnly) {
@@ -759,6 +840,7 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
     finishedAt: Date.now(),
   });
   jobLog(jobId, `Done: ${summary} — ${extracted} LLM extractions${reused ? `, ${reused} ads reused from cache (no LLM call)` : ""}`);
+  if (picks) db.clearJobCandidates(jobId);
   retireChannel(jobChannel(jobId));
 }
 

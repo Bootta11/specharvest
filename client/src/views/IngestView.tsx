@@ -66,6 +66,7 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
   const browserOnline = !!feed.extension?.online;
   const inBrowser = browserOnline && (browserChoice ?? true);
   const [mode, setMode] = useState<CrawlMode>(() => (storageGet("crawlMode") as CrawlMode | null) ?? "quick");
+  const [pickFirst, setPickFirst] = useState(() => storageGet("pickItems") === "1");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [jobId, setJobId] = useState<number | null>(() => Number(storageGet("crawlJobId")) || null);
@@ -149,6 +150,12 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
     setMode(m);
     storageSet("crawlMode", m);
   };
+  const choosePickFirst = (on: boolean) => {
+    setPickFirst(on);
+    storageSet("pickItems", on ? "1" : "0");
+  };
+  /** Listing crawls only: walk the listing, then let the user pick which items to extract. */
+  const pickField: Pick<CrawlRequest, "pickItems"> = pickFirst ? { pickItems: true } : {};
 
   const start = async (body: CrawlRequest) => {
     setBusy(true);
@@ -187,13 +194,27 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
       maxItems: maxItems || undefined,
       ...runnerFields,
       mode,
+      ...pickField,
     });
   };
 
   const stopJob = async (j: Job) => {
     setError(null);
     await api.stopJob(j.id).catch((err) => setError((err as Error).message));
+    // A discarded pick: its stream closed when it parked — reconnect to show the stopped job.
+    if (j.status === "picking") {
+      setStreamNonce((n) => n + 1);
+      loadJobs();
+    }
   };
+
+  // Picked items of a parked crawl: the same job runs again — reconnect its stream.
+  const onPicked = (j: Job) => {
+    selectJob(j.id);
+    setStreamNonce((n) => n + 1);
+    loadJobs();
+  };
+  const waitingForPick = recentJobs.filter((j) => j.status === "picking");
 
   const resumeJob = async (j: Job, runner?: Runner) => {
     setError(null);
@@ -287,6 +308,7 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
                       url: sharedMatch.startUrl,
                       collectionId: sharedMatch.id,
                       mode,
+                      ...(sharedMatch.kind === "items" ? {} : pickField),
                     })
                   }
                 >
@@ -455,6 +477,15 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
                 </div>
                 <p className="mt-1.5 text-xs text-stone-500">{MODES.find((m) => m.value === mode)!.hint}</p>
               </fieldset>
+              <label className="flex items-start gap-2 text-sm">
+                <input type="checkbox" className="mt-0.5 size-4 shrink-0 accent-brand-700" checked={pickFirst} onChange={(e) => choosePickFirst(e.target.checked)} />
+                <span>
+                  Let me pick items first
+                  <span className="block text-xs text-stone-500">
+                    Reads only the listing&apos;s item titles, then you choose which items to extract — only those use the LLM. Also applies to Re-crawl.
+                  </span>
+                </span>
+              </label>
             </>
           )}
           <BrowserRunnerToggle
@@ -486,11 +517,41 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
             onStop={stopJob}
             onResume={resumeJob}
             browserOnline={browserOnline}
+            onPicked={onPicked}
           />
         )}
       </section>
 
       <section className="space-y-4">
+        {waitingForPick.length > 0 && (
+          <div className="card">
+            <div className="flex items-center gap-2 border-b border-stone-200 px-4 py-3 dark:border-stone-800">
+              <span className="size-2 rounded-full bg-violet-500" aria-hidden />
+              <h2 className="font-semibold">Waiting for your pick</h2>
+              <span className="ml-auto text-sm text-stone-500">{waitingForPick.length}</span>
+            </div>
+            <ul className="divide-y divide-stone-200 dark:divide-stone-800">
+              {waitingForPick.map((j) => (
+                <li key={j.id} className={j.id === jobId ? "bg-brand-50 dark:bg-brand-900/30" : ""}>
+                  <button
+                    className="block w-full px-4 py-3 text-left hover:bg-stone-50 dark:hover:bg-stone-800/50"
+                    onClick={() => selectJob(j.id)}
+                    aria-current={j.id === jobId ? "true" : undefined}
+                  >
+                    <div className="flex items-center gap-2 text-sm">
+                      <span className="shrink-0 font-medium">{jobLabel(j)}</span>
+                      <span className="min-w-0 flex-1 truncate text-stone-500" title={collectionName(j.collectionId) ?? undefined}>
+                        {collectionName(j.collectionId)}
+                      </span>
+                      <span className="shrink-0 text-xs tabular-nums text-stone-500">{j.itemsFound} items</span>
+                    </div>
+                    {j.message && <div className="mt-1 truncate text-xs text-stone-500">{j.message}</div>}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         {feed.active.length > 0 && (
           <div className="card">
             <div className="flex items-center gap-2 border-b border-stone-200 px-4 py-3 dark:border-stone-800">
@@ -612,7 +673,7 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
                         <button
                           className="btn-ghost btn-sm"
                           disabled={busy}
-                          onClick={() => start({ url: c.startUrl, collectionId: c.id, mode })}
+                          onClick={() => start({ url: c.startUrl, collectionId: c.id, mode, ...(c.kind === "items" ? {} : pickField) })}
                           title={
                             c.kind === "items" ? "Open each saved item page again and update what changed" : `Crawl again — ${MODES.find((m) => m.value === mode)!.label.toLowerCase()} of saved ads`
                           }

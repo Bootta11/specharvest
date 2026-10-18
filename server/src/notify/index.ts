@@ -192,6 +192,18 @@ export async function notifyJobInterrupted(job: Job) {
   }));
 }
 
+/** A pick-first crawl read the listing's titles and waits for its user to choose what to extract. Sent like a finished crawl. */
+export async function notifyJobPicking(job: Job) {
+  await notifyJob(job, "crawlDone", (collection) => ({
+    event: "crawlDone",
+    title: `Pick items${collection ? ` · ${collection}` : ""}`,
+    body: job.message ?? "The listing is read — choose which items to extract",
+    url: env.PUBLIC_URL ? `${env.PUBLIC_URL}/?job=${job.id}` : null,
+    job,
+    collection,
+  }));
+}
+
 async function notifyJob(job: Job, event: NotifyEvent, message: (collection: string | null) => NotifyMessage) {
   try {
     if (job.userId === null) return;

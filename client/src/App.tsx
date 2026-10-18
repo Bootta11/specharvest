@@ -80,7 +80,7 @@ function Workspace({ user, auth }: { user: UserSummary; auth: Auth }) {
       const name = collections.find((c) => c.id === job.collectionId)?.name;
       const detail = job.status === "failed" ? (job.error ?? job.message ?? "Failed") : (job.message ?? "Finished");
       const body = job.llmCost ? `${detail}\n${formatUsd(job.llmCost)} LLM` : detail;
-      const title = `${what} ${job.status === "done" ? "done" : job.status}${name ? ` · ${name}` : ""}`;
+      const title = `${job.status === "picking" ? "Pick items" : `${what} ${job.status === "done" ? "done" : job.status}`}${name ? ` · ${name}` : ""}`;
       if (!isNative) return void showLocalNotification(title, body, `job-${job.id}`, `/?job=${job.id}`);
       void import("./lib/native.ts").then(({ isAppForeground, notifyJob }) => {
         // Like cursor-agent-remote: no notification for the job you're looking at.

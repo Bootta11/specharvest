@@ -70,6 +70,9 @@ CI tests, scans and publishes the image on every push to `master`. See
    tiles, *Deep check* every ad page) and marks vanished ads as gone. *Stop* a
    running crawl, or one cut off by a restart, and *Resume* it later — ads
    already read are skipped ([details](docs/crawling.md#stop--resume)).
+   *Let me pick items first* reads only the listing's titles; you then tick the
+   ads to extract, and only those use the LLM
+   ([details](docs/crawling.md#pick-items-before-extracting)).
    With the [browser extension](docs/extension.md) connected, *Run in my browser*
    loads the pages in your own Chrome — free, and past most bot checks.
    *Export* downloads a collection (items, specs, web lookup results) as

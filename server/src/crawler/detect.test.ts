@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { inferItemUrlPattern } from "./detect.ts";
+import { inferItemUrlPattern, tighterItemUrlPattern } from "./detect.ts";
 import { normalizeItemUrl } from "./paginate.ts";
 import { findRepeatedClassNames, sanitizeForLlm } from "./sanitize.ts";
 import { isSafeItemUrlPattern, safeItemUrlPattern, withSafeUrlPattern } from "./url-pattern.ts";
@@ -10,6 +10,25 @@ describe("inferItemUrlPattern", () => {
     const re = new RegExp(inferItemUrlPattern(urls)!);
     expect(re.test("https://olx.ba/artikal/99")).toBe(true);
     expect(re.test("https://olx.ba/shop/x")).toBe(false);
+  });
+
+  it("takes the deepest shared directory, so listing pages of the site don't match", () => {
+    const items = [31, 32, 33, 34, 35, 36].map((id) => `https://webscraper.io/test-sites/e-commerce/static/product/${id}`);
+    const pattern = inferItemUrlPattern(items)!;
+    expect(pattern).toBe("^https://webscraper\\.io/test-sites/e-commerce/static/product/");
+    expect(isSafeItemUrlPattern(pattern)).toBe(true);
+    expect(new RegExp(pattern).test("https://webscraper.io/test-sites/e-commerce/static/computers/tablets")).toBe(false);
+    // Ids under one item directory: the item's own segment never becomes the prefix.
+    expect(inferItemUrlPattern(["https://olx.ba/artikal/1/a", "https://olx.ba/artikal/2/b", "https://olx.ba/artikal/3/c"])).toBe("^https://olx\\.ba/artikal/");
+  });
+
+  it("narrows a saved broad pattern when a tighter one fits every walked item", () => {
+    const items = [31, 32, 33].map((id) => `https://webscraper.io/test-sites/e-commerce/static/product/${id}`);
+    expect(tighterItemUrlPattern("^https://webscraper\\.io/test-sites/", items)).toBe(inferItemUrlPattern(items));
+    expect(tighterItemUrlPattern(inferItemUrlPattern(items), items)).toBeNull();
+    expect(tighterItemUrlPattern(null, items)).toBeNull();
+    // An item outside the tighter prefix keeps the saved pattern.
+    expect(tighterItemUrlPattern("^https://webscraper\\.io/test-sites/", [...items, "https://webscraper.io/test-sites/other/9"])).toBeNull();
   });
 
   it("returns null without a clear majority", () => {

@@ -139,3 +139,61 @@ describe("crawls continued after a restart", () => {
     expect(candidates(c)[0].crashRestarts).toBe(0);
   });
 });
+
+describe("pick-first crawl candidates", () => {
+  it("keeps the walked cards in order, flags saved ones and builds the extract phase's walk from the picks", () => {
+    const c = db.createCollection("pick", "https://shop.example/p", "shop.example");
+    db.upsertItem(item(c, "https://shop.example/i/2"));
+    const job = db.createJob("crawl", c, { url: "https://shop.example/p", pickItems: true });
+    db.saveJobCandidates(
+      job.id,
+      [
+        { url: "https://shop.example/i/1", title: "Bike one", cardText: "Bike one\n1.200 KM\nSarajevo", image: "https://img.example/1.jpg" },
+        { url: "https://shop.example/i/2", title: "Bike two", cardText: "Bike two\n900 KM", image: null },
+        { url: "https://shop.example/i/3", title: "Bike three, carbon frame", cardText: "$300\nBike three, car...\nCarbon", image: null },
+      ],
+      true,
+    );
+    expect(db.listJobCandidates(job.id)).toEqual([
+      { url: "https://shop.example/i/1", title: "Bike one", snippet: "1.200 KM · Sarajevo", image: "https://img.example/1.jpg", saved: false },
+      { url: "https://shop.example/i/2", title: "Bike two", snippet: "900 KM", image: null, saved: true },
+      { url: "https://shop.example/i/3", title: "Bike three, carbon frame", snippet: "$300 · Carbon", image: null, saved: false },
+    ]);
+    expect(db.pickedWalk(job.id)).toBeNull();
+    expect(db.setPickedCandidates(job.id, ["https://shop.example/i/3", "https://shop.example/i/1", "https://shop.example/nope"])).toBe(2);
+    const walk = db.pickedWalk(job.id)!;
+    expect([...walk.picked]).toEqual([
+      ["https://shop.example/i/1", "Bike one\n1.200 KM\nSarajevo"],
+      ["https://shop.example/i/3", "$300\nBike three, car...\nCarbon"],
+    ]);
+    expect(walk.seen.size).toBe(3);
+    expect(walk.complete).toBe(true);
+    db.clearJobCandidates(job.id);
+    expect(db.listJobCandidates(job.id)).toEqual([]);
+  });
+
+  it("a parked pick blocks another crawl of the collection but holds no job slot and isn't resumable", () => {
+    const owner = Number(db.getDb().prepare("INSERT INTO users (email, password_hash, role, created_at) VALUES ('pick@example.com', 'x', 'user', 0)").run().lastInsertRowid);
+    const c = db.createCollection("parked", "https://shop.example/q", "shop.example", owner);
+    const job = db.createJob("crawl", c, { url: "https://shop.example/q", pickItems: true }, owner);
+    const parked = db.updateJob(job.id, { status: "picking" });
+    expect(parked.resumable).toBe(false);
+    expect(db.activeJobForCollection(c, "crawl")?.id).toBe(job.id);
+    expect(db.countActiveJobs(owner)).toBe(0);
+    expect(db.listActiveJobs().some((j) => j.id === job.id)).toBe(false);
+  });
+});
+
+describe("item-URL pattern repair", () => {
+  it("lists listing collections' patterns with their walked item URLs and replaces only the pattern", () => {
+    const c = db.createCollection("ws", "https://ws.example/shop/tablets", "ws.example");
+    db.saveDetection(c, { listItemSelector: ".card", paginationType: "pages", itemUrlPattern: "^https://ws\\.example/shop/" }, true);
+    db.upsertItem(item(c, "https://ws.example/shop/product/1"));
+    const row = db.listItemUrlPatterns().find((r) => r.id === c)!;
+    expect(row).toEqual({ id: c, host: "ws.example", pattern: "^https://ws\\.example/shop/", urls: ["https://ws.example/shop/product/1"] });
+    db.setItemUrlPattern(c, "^https://ws\\.example/shop/product/");
+    expect(db.getCollection(c)?.detection).toEqual({ listItemSelector: ".card", paginationType: "pages", itemUrlPattern: "^https://ws\\.example/shop/product/" });
+    // Still from the user's browser: only the pattern changed.
+    expect(db.findDetectionForHost("ws.example", 0)).toBeNull();
+  });
+});

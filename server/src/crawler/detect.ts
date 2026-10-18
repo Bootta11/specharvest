@@ -11,24 +11,47 @@ const log = createLogger("detect");
 const MIN_ITEMS = 2;
 const PAGE_PARAM_CANDIDATES = ["page", "p", "pg", "paged", "strana", "stranica", "pageNumber", "pagenum", "seite", "pagina"];
 
-/** Regex for the dominant URL shape among item URLs (e.g. ^https://olx\.ba/artikal/), or null if no clear one. */
+/**
+ * Regex for the dominant URL shape among item URLs: the deepest directory prefix ≥ 80% of them share
+ * (e.g. ^https://olx\.ba/artikal/, ^https://shop\.example/catalog/product/), or null if there is no clear one.
+ * The deepest one, so it doesn't also match the site's listing pages (/catalog/phones).
+ */
 export function inferItemUrlPattern(urls: string[]): string | null {
   if (urls.length < 3) return null;
-  const counts = new Map<string, number>();
-  for (const u of urls) {
+  const parsed = urls.flatMap((u) => {
     try {
       const url = new URL(u);
-      const first = url.pathname.split("/").filter(Boolean)[0];
-      const key = `${url.origin}/${first ? first + "/" : ""}`;
-      counts.set(key, (counts.get(key) ?? 0) + 1);
+      return [{ origin: url.origin, segs: url.pathname.split("/").filter(Boolean) }];
     } catch {
-      /* skip */
+      return [];
     }
+  });
+  let best: string | null = null;
+  for (let depth = 1; ; depth++) {
+    // Directory prefixes only: the item's own last segment (its slug or id) never counts.
+    const counts = new Map<string, number>();
+    for (const p of parsed) {
+      if (p.segs.length <= depth) continue;
+      const key = `${p.origin}/${p.segs.slice(0, depth).join("/")}/`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    const [key, n] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0] ?? [null, 0];
+    if (!key || n / urls.length < 0.8 || key.split("/").some((seg) => seg.endsWith("."))) break;
+    best = key;
   }
-  const [best, n] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0] ?? [null, 0];
-  // Only meaningful when the first segment is a real prefix (not every same-origin page).
-  if (!best || n / urls.length < 0.8 || best.endsWith(".") || new URL(best).pathname === "/") return inferSlugWordPattern(urls);
-  return "^" + best.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return best ? "^" + escapeRe(best) : inferSlugWordPattern(urls);
+}
+
+/**
+ * A saved item-URL pattern made stricter from the item URLs a walk found, when one fits them all — patterns saved
+ * before inferItemUrlPattern looked past the first path segment also matched listing pages. Null to keep it.
+ */
+export function tighterItemUrlPattern(current: string | null | undefined, urls: string[]): string | null {
+  if (!current) return null;
+  const next = inferItemUrlPattern(urls);
+  if (!next || next === current || !next.startsWith(current)) return null;
+  const re = new RegExp(next);
+  return urls.every((u) => re.test(u)) ? next : null;
 }
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

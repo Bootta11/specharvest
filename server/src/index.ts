@@ -9,6 +9,7 @@ import {
   CRAWL_MAX_PAGES,
   crawlRequestSchema,
   inspectRequestSchema,
+  pickRequestSchema,
   resumeRequestSchema,
   enrichRequestSchema,
   groupInputSchema,
@@ -31,7 +32,7 @@ import { startConfiguredBrowsers } from "./crawler/browsers.ts";
 import { FatalDriverError } from "./crawler/driver.ts";
 import { connectionFor, extensionStatus, onExtensionConnected, registerExtensionGateway } from "./extension/gateway.ts";
 import { registerExtensionRoutes } from "./extension/routes.ts";
-import { continueHeldCrawls, embeddingText, emitJob, interruptCrawls, jobChannel, JOBS_CHANNEL, markUndrainedCrawls, ResumeError, resumeAfterRestart, resumeCrawl, startCrawl, stopCrawl } from "./crawler/job.ts";
+import { continueHeldCrawls, embeddingText, emitJob, interruptCrawls, jobChannel, JOBS_CHANNEL, markUndrainedCrawls, pickItems, repairItemUrlPatterns, ResumeError, resumeAfterRestart, resumeCrawl, startCrawl, stopCrawl } from "./crawler/job.ts";
 import { getNotificationSettings, maskSettings, saveNotificationSettings, sendTest } from "./notify/index.ts";
 import { vapidKeys } from "./notify/push.ts";
 import { interruptLookups, markUndrainedLookups, startEnrichment, stopEnrichment } from "./enrich/web.ts";
@@ -94,6 +95,7 @@ const REFUSED_WHILE_STOPPING = new Set([
   "POST /api/crawl/inspect",
   "POST /api/enrich",
   "POST /api/jobs/:id/resume",
+  "POST /api/jobs/:id/pick",
   "POST /api/collections/import",
   "POST /api/collections/:id/consolidate",
   "POST /api/admin/browsers/capacity",
@@ -458,6 +460,17 @@ app.post("/api/jobs/:id/resume", async (req, reply) => {
   }
 });
 
+// A pick-first crawl's walked cards, and the user's choice of which to extract.
+app.get("/api/jobs/:id/candidates", async (req) => db.listJobCandidates(requireJob(idParam(req.params), currentUser(req)).id));
+
+app.post("/api/jobs/:id/pick", async (req, reply) => {
+  const job = requireJob(idParam(req.params), currentUser(req));
+  if (job.collectionId) requireCollection(job.collectionId, currentUser(req), "write");
+  requireLlm(job.userId ?? currentUser(req).id, "fast");
+  const { urls } = pickRequestSchema.parse(req.body ?? {});
+  return reply.status(202).send(pickItems(job.id, urls));
+});
+
 app.get("/api/jobs/:id", async (req) => requireJob(idParam(req.params), currentUser(req)));
 
 app.get("/api/jobs/:id/events", async (req, reply) => {
@@ -562,6 +575,7 @@ process.on("SIGTERM", shutdown);
 
 // After a restart, crawls in a user's Chrome continue once their extension is back.
 onExtensionConnected(continueHeldCrawls);
+repairItemUrlPatterns();
 // Before listening, so clients' first snapshot already shows them running again (no "finished" toast).
 resumeAfterRestart();
 await app.listen({ port: env.PORT, host: "0.0.0.0" });

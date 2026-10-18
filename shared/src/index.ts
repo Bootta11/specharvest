@@ -233,8 +233,11 @@ export interface SearchResponse {
 // ---------- Jobs ----------
 
 export type JobKind = "crawl" | "enrich";
-/** stopped — by the user; interrupted — by a server restart. Both can be resumed (crawls only). */
-export type JobStatus = "queued" | "running" | "done" | "failed" | "stopped" | "interrupted";
+/**
+ * stopped — by the user; interrupted — by a server restart. Both can be resumed (crawls only).
+ * picking — a crawl with `pickItems` walked the listing and waits for its user to choose the items to extract.
+ */
+export type JobStatus = "queued" | "running" | "done" | "failed" | "stopped" | "interrupted" | "picking";
 
 export interface Job {
   id: number;
@@ -383,8 +386,27 @@ export const crawlRequestSchema = z.object({
    * Used once — a re-crawl or resume opens the page.
    */
   snapshot: pageSnapshotSchema.optional(),
+  /**
+   * Listing crawls: only walk the listing and read the cards' titles, then wait (status picking) for the user to
+   * choose which items to extract (POST /api/jobs/:id/pick).
+   */
+  pickItems: z.boolean().optional(),
 });
 export type CrawlRequest = z.infer<typeof crawlRequestSchema>;
+
+/** One listing card of a crawl waiting for its user's pick (GET /api/jobs/:id/candidates). */
+export interface PickCandidate {
+  url: string;
+  title: string;
+  /** The card's other text (price, location…), shortened. */
+  snippet: string;
+  image: string | null;
+  /** Already in the collection. */
+  saved: boolean;
+}
+
+/** POST /api/jobs/:id/pick — the candidates to open and extract. */
+export const pickRequestSchema = z.object({ urls: z.array(httpUrlSchema).min(1).max(CRAWL_MAX_ITEMS) });
 
 // ---------- Page check (before crawling) ----------
 

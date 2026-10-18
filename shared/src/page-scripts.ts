@@ -85,10 +85,44 @@ function visibleTextLength(): number {
  * the title): links matching `pattern` win; then a link the card repeats (image and title both point to the
  * item) or that sits in its title, minus links shared by many cards (brand, category, "compare").
  */
-function collectCards(args: { selector: string; pattern: string }): Array<{ url: string; cardText: string }> {
+function collectCards(args: { selector: string; pattern: string }): Array<{ url: string; cardText: string; title: string; image: string | null }> {
   const isReal = (href: string | null | undefined) => !!href && /^https?:/.test(href) && href !== location.href && !href.startsWith(location.href + "#");
   const textOf = (el: Element) => ((el as HTMLElement).innerText ?? el.textContent ?? "").slice(0, 1000);
-  const out: Array<{ url: string; cardText: string }> = [];
+  const clean = (t: string | null | undefined) => (t ?? "").replace(/\s+/g, " ").trim().slice(0, 200);
+  /** Words, not just a price or a number ("$69.99", "1.200 KM"). */
+  const hasWords = (t: string) => /\p{L}{2,}/u.test(t.replace(/\b(KM|BAM|EUR|USD|GBP|CHF|RSD|HRK|kn|zł|Kč|Ft|lei)\b/gi, ""));
+  /**
+   * The card's name: the item link's title attribute (often the untruncated name), else its heading / title element,
+   * else the item link's text, else an image's alt — skipping texts that are only a price.
+   */
+  const titleOf = (card: Element, url: string) => {
+    const links = (card.tagName === "A" ? [card] : Array.from(card.querySelectorAll("a[href]"))).filter((a) => (a as HTMLAnchorElement).href.split("#")[0] === url);
+    const texts = [
+      ...links.map((a) => a.getAttribute("title")),
+      ...Array.from(card.querySelectorAll("h1, h2, h3, h4, h5, h6, [class*=title i], [class*=name i]")).map((el) => (el as HTMLElement).innerText ?? el.textContent),
+      ...links.map((a) => (a as HTMLElement).innerText ?? a.textContent),
+      ...Array.from(card.querySelectorAll("img[alt]")).map((img) => img.getAttribute("alt")),
+    ];
+    for (const t of texts) {
+      const name = clean(t);
+      if (name && hasWords(name)) return name;
+    }
+    return "";
+  };
+  const imageOf = (card: Element) => {
+    for (const img of Array.from(card.querySelectorAll("img"))) {
+      const src = (img as HTMLImageElement).currentSrc || (img as HTMLImageElement).src || img.getAttribute("data-src") || "";
+      try {
+        const abs = new URL(src, location.href).href;
+        if (/^https?:/.test(abs)) return abs;
+      } catch {
+        // not a usable URL
+      }
+    }
+    return null;
+  };
+  const toCard = (el: Element, url: string) => ({ url, cardText: textOf(el), title: titleOf(el, url), image: imageOf(el) });
+  const out: Array<{ url: string; cardText: string; title: string; image: string | null }> = [];
   if (args.selector) {
     let els: Element[] = [];
     try {
@@ -108,7 +142,7 @@ function collectCards(args: { selector: string; pattern: string }): Array<{ url:
     const shared = Math.max(3, Math.ceil(els.length * 0.3));
     els.forEach((card, i) => {
       const self = card.tagName === "A" ? (card as HTMLAnchorElement).href : null;
-      if (isReal(self)) return void out.push({ url: self!, cardText: textOf(card) });
+      if (isReal(self)) return void out.push(toCard(card, self!));
       const scores = new Map<string, number>();
       perCard[i]!.forEach((l, order) => {
         let score = (scores.get(l.url) ?? 0) + 1;
@@ -123,14 +157,14 @@ function collectCards(args: { selector: string; pattern: string }): Array<{ url:
         const score = base + (re && re.test(url) ? 100 : 0) - ((spread.get(url) ?? 0) >= shared ? 5 : 0);
         if (score > bestScore) [best, bestScore] = [url, score];
       }
-      if (best) out.push({ url: best, cardText: textOf(card) });
+      if (best) out.push(toCard(card, best));
     });
   } else if (args.pattern) {
     const re = new RegExp(args.pattern);
     for (const a of Array.from(document.querySelectorAll("a[href]"))) {
       if (a.closest("nav, header, footer")) continue;
       const href = (a as HTMLAnchorElement).href;
-      if (isReal(href) && re.test(href)) out.push({ url: href, cardText: textOf(a.closest("li, article, [class*=card i], [class*=item i]") ?? a) });
+      if (isReal(href) && re.test(href)) out.push(toCard(a.closest("li, article, [class*=card i], [class*=item i]") ?? a, href));
     }
   }
   return out;

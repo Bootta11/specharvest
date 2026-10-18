@@ -27,6 +27,7 @@ import type {
   RecentSearch,
   Runner,
   SearchRequest,
+  PickCandidate,
   SearchResponse,
   SpecKey,
   UsageSummary,
@@ -221,6 +222,9 @@ export const api = {
   jobs: () => request<Job[]>("GET", "/api/jobs"),
   stopJob: (id: number) => request<Job>("POST", `/api/jobs/${id}/stop`),
   resumeJob: (id: number, runner?: Runner) => request<Job>("POST", `/api/jobs/${id}/resume`, runner ? { runner } : {}),
+  /** A pick-first crawl's walked cards, and starting extraction of the chosen ones. */
+  jobCandidates: (id: number) => request<PickCandidate[]>("GET", `/api/jobs/${id}/candidates`),
+  pickItems: (id: number, urls: string[]) => request<Job>("POST", `/api/jobs/${id}/pick`, { urls }),
   search: (body: SearchRequest) => request<SearchResponse>("POST", "/api/search", body),
   usage: () => request<UsageSummary>("GET", "/api/usage"),
   notificationSettings: () => request<NotificationSettings>("GET", "/api/settings/notifications"),

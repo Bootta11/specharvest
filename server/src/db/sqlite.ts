@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import { COLLECTION_EXPORT_FORMAT, COLLECTIONS_EXPORT_FORMAT, type Collection, type CollectionExport, type GroupingMode, type CollectionGroup, type CollectionKind, type CollectionsExport, type Item, type Job, type JobKind, type LlmFunding, type LlmPurpose, type LookupStats, type Runner, type SpecKey, type SpecOrigin, type SpecSource, type SpecType, type SpecValue, type UsageSummary } from "@specharvest/shared";
+import { COLLECTION_EXPORT_FORMAT, COLLECTIONS_EXPORT_FORMAT, type Collection, type CollectionExport, type GroupingMode, type CollectionGroup, type CollectionKind, type CollectionsExport, type Item, type Job, type JobKind, type LlmFunding, type LlmPurpose, type LookupStats, type PickCandidate, type Runner, type SpecKey, type SpecOrigin, type SpecSource, type SpecType, type SpecValue, type UsageSummary } from "@specharvest/shared";
 import { env } from "../config.ts";
 import { withSafeUrlPattern } from "../crawler/url-pattern.ts";
 
@@ -250,6 +250,17 @@ CREATE TABLE IF NOT EXISTS llm_keys (
   last_error TEXT,
   PRIMARY KEY (user_id, provider)
 );
+-- Listing cards of a crawl that waits for its user's pick (crawler/job.ts, CrawlRequest.pickItems); picked = chosen to extract.
+CREATE TABLE IF NOT EXISTS job_candidates (
+  job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  url TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  card_text TEXT NOT NULL,
+  image TEXT,
+  picked INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (job_id, url)
+);
 `;
 
 export function getDb(): DatabaseSync {
@@ -315,6 +326,8 @@ export function getDb(): DatabaseSync {
   // (set when it starts, cleared by the user's Stop); crash_restarts = crashes in a row while it ran.
   addColumnIfMissing("jobs", "auto_resume", "INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing("jobs", "crash_restarts", "INTEGER NOT NULL DEFAULT 0");
+  // Pick-first crawls: whether the walk that produced the job's candidates reached the end of the listing (gone-marking).
+  addColumnIfMissing("jobs", "walk_complete", "INTEGER NOT NULL DEFAULT 0");
   // Jobs still running here were cut off without a clean pause (a crash, or a shutdown past its drain): crawls with
   // saved options can be resumed; lookups keep what they found ("Look up N more"); anything else can never finish.
   const now = Date.now();
@@ -463,6 +476,19 @@ export function findDetectionForHost(host: string, excludeCollectionId: number):
   return r ? withSafeUrlPattern(parseJson<CollectionDetection | null>(r.detection, null)) : null;
 }
 
+/** A listing collection (anyone's) whose structure this server detected starts at this URL — the page check trusts it over an item-URL pattern. */
+export function isListingStartUrl(host: string, url: string): boolean {
+  let normalized: string;
+  try {
+    normalized = new URL(url).toString();
+  } catch {
+    return false;
+  }
+  return !!getDb()
+    .prepare("SELECT 1 FROM collections WHERE host = ? AND start_url = ? AND kind = 'listing' AND detection IS NOT NULL AND detection_imported = 0 AND detection_from_browser = 0 LIMIT 1")
+    .get(host, normalized);
+}
+
 /** The user's own collection for a start URL — re-crawling someone else's (shared) URL makes a new one. */
 export function findCollectionByUrl(startUrl: string, userId: number | null) {
   const r = getDb().prepare("SELECT id FROM collections WHERE start_url = ? AND user_id IS ?").get(startUrl, userId) as Row | undefined;
@@ -488,6 +514,19 @@ export function saveDetection(id: number, detection: CollectionDetection | null,
   getDb()
     .prepare("UPDATE collections SET detection = ?, detection_imported = 0, detection_from_browser = ? WHERE id = ?")
     .run(detection ? JSON.stringify(detection) : null, fromBrowser ? 1 : 0, id);
+}
+
+/** Listing collections with a saved item-URL pattern, with the URLs of items their walks found (newest 500). */
+export function listItemUrlPatterns(): Array<{ id: number; host: string; pattern: string; urls: string[] }> {
+  const d = getDb();
+  const rows = d.prepare("SELECT id, host, json_extract(detection, '$.itemUrlPattern') AS pattern FROM collections WHERE kind = 'listing' AND json_extract(detection, '$.itemUrlPattern') IS NOT NULL").all() as Row[];
+  const urlsOf = d.prepare("SELECT url FROM items WHERE collection_id = ? AND manual = 0 ORDER BY id DESC LIMIT 500");
+  return rows.map((r) => ({ id: Number(r.id), host: String(r.host), pattern: String(r.pattern), urls: (urlsOf.all(Number(r.id)) as Row[]).map((u) => String(u.url)) }));
+}
+
+/** Replaces only the item-URL pattern of a collection's saved structure (where it came from stays as it was). */
+export function setItemUrlPattern(id: number, pattern: string) {
+  getDb().prepare("UPDATE collections SET detection = json_set(detection, '$.itemUrlPattern', ?) WHERE id = ?").run(pattern, id);
 }
 
 export function renameCollection(id: number, name: string) {
@@ -1522,14 +1561,99 @@ export function markPausedForRestart(id: number, message: string) {
     .run(RESTART_ERROR, message, Date.now(), id);
 }
 
+// ---------- Pick-first crawls: the walked cards the user chooses from ----------
+
+/** The card's other text for the picker (price, location…): its lines minus the title, also shortened copies of it ("iPad Mini Reti..."). */
+function candidateSnippet(title: string, cardText: string): string {
+  const name = title.toLowerCase();
+  const isTitle = (line: string) => {
+    const l = line.toLowerCase().replace(/(\.\.\.|…)$/, "").trim();
+    return l === name || (l.length >= 8 && l.length < line.length && name.startsWith(l));
+  };
+  return cardText
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l && !isTitle(l))
+    .join(" · ")
+    .slice(0, 300);
+}
+
+/** Replaces a job's candidates with the cards its walk found (in discovery order), nothing picked yet. */
+export function saveJobCandidates(jobId: number, cards: Array<{ url: string; title: string; cardText: string; image: string | null }>, walkComplete: boolean) {
+  const d = getDb();
+  d.exec("BEGIN");
+  try {
+    d.prepare("DELETE FROM job_candidates WHERE job_id = ?").run(jobId);
+    const insert = d.prepare("INSERT OR IGNORE INTO job_candidates (job_id, url, position, title, card_text, image) VALUES (?, ?, ?, ?, ?, ?)");
+    cards.forEach((c, i) => insert.run(jobId, c.url, i, c.title, c.cardText, c.image));
+    d.prepare("UPDATE jobs SET walk_complete = ? WHERE id = ?").run(walkComplete ? 1 : 0, jobId);
+    d.exec("COMMIT");
+  } catch (err) {
+    d.exec("ROLLBACK");
+    throw err;
+  }
+}
+
+/** A job's candidates in listing order; `saved` = the URL is already in the job's collection. */
+export function listJobCandidates(jobId: number): PickCandidate[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT c.url, c.title, c.card_text, c.image, EXISTS (SELECT 1 FROM items i WHERE i.collection_id = j.collection_id AND i.url = c.url) AS saved
+       FROM job_candidates c JOIN jobs j ON j.id = c.job_id WHERE c.job_id = ? ORDER BY c.position`,
+    )
+    .all(jobId) as Row[];
+  return rows.map((r) => ({
+    url: String(r.url),
+    title: String(r.title),
+    snippet: candidateSnippet(String(r.title), String(r.card_text)),
+    image: r.image == null ? null : String(r.image),
+    saved: Number(r.saved) === 1,
+  }));
+}
+
+/** Marks exactly these URLs picked. Returns how many of them are candidates of the job. */
+export function setPickedCandidates(jobId: number, urls: string[]): number {
+  const d = getDb();
+  d.exec("BEGIN");
+  try {
+    d.prepare("UPDATE job_candidates SET picked = 0 WHERE job_id = ?").run(jobId);
+    const pick = d.prepare("UPDATE job_candidates SET picked = 1 WHERE job_id = ? AND url = ?");
+    let n = 0;
+    for (const url of new Set(urls)) n += Number(pick.run(jobId, url).changes);
+    d.exec("COMMIT");
+    return n;
+  } catch (err) {
+    d.exec("ROLLBACK");
+    throw err;
+  }
+}
+
+/**
+ * What a pick-first crawl's extract phase works from: the picked cards (URL → card text, listing order), every
+ * candidate URL (all were on the listing, so none of them is gone) and whether that walk was complete.
+ * Null before anything was picked.
+ */
+export function pickedWalk(jobId: number): { picked: Map<string, string>; seen: Set<string>; complete: boolean } | null {
+  const rows = getDb().prepare("SELECT url, card_text, picked FROM job_candidates WHERE job_id = ? ORDER BY position").all(jobId) as Row[];
+  const picked = new Map(rows.filter((r) => Number(r.picked) === 1).map((r) => [String(r.url), String(r.card_text)]));
+  if (picked.size === 0) return null;
+  const job = getDb().prepare("SELECT walk_complete FROM jobs WHERE id = ?").get(jobId) as Row | undefined;
+  return { picked, seen: new Set(rows.map((r) => String(r.url))), complete: Number(job?.walk_complete ?? 0) === 1 };
+}
+
+export function clearJobCandidates(jobId: number) {
+  getDb().prepare("DELETE FROM job_candidates WHERE job_id = ?").run(jobId);
+}
+
 /** Queued or running jobs started by one user. */
 export function countActiveJobs(userId: number): number {
   return Number((getDb().prepare("SELECT COUNT(*) AS n FROM jobs WHERE user_id = ? AND status IN ('queued','running')").get(userId) as Row).n);
 }
 
+/** The collection's queued or running job of this kind — or a crawl waiting for its user's pick, which also blocks a new one. */
 export function activeJobForCollection(collectionId: number, kind: JobKind): Job | null {
   const r = getDb()
-    .prepare("SELECT * FROM jobs WHERE collection_id = ? AND kind = ? AND status IN ('queued','running') ORDER BY id DESC LIMIT 1")
+    .prepare("SELECT * FROM jobs WHERE collection_id = ? AND kind = ? AND status IN ('queued','running','picking') ORDER BY id DESC LIMIT 1")
     .get(collectionId, kind) as Row | undefined;
   return r ? toJob(r) : null;
 }

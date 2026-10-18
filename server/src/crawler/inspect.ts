@@ -29,6 +29,8 @@ export interface PageSignals {
   knownItemUrl: boolean;
   /** Item links the site's known listing structure finds on this page. */
   knownListingItems: number;
+  /** A collection already crawls this URL as its listing. */
+  knownListingUrl?: boolean;
 }
 
 const LISTING_MIN_CARDS = 10;
@@ -39,6 +41,7 @@ const LISTING_TYPES = /^(ItemList|OfferCatalog|SearchResultsPage|CollectionPage)
 export function classify(s: PageSignals): { kind: PageKind; reason: string } | null {
   // A few matching cards can be an item page's "similar ads" strip; a real listing shows many.
   if (s.knownListingItems >= LISTING_MIN_CARDS) return { kind: "listing", reason: `Shows ${s.knownListingItems} items like this site's listings` };
+  if (s.knownListingUrl && s.knownListingItems >= 1) return { kind: "listing", reason: "A listing page of this site" };
   if (s.knownItemUrl) return { kind: "item", reason: "Has the address of an item page on this site" };
   if (s.productNodes >= 2 || s.ldTypes.some((t) => LISTING_TYPES.test(t))) return { kind: "listing", reason: "The page describes itself as a list of products" };
   if (s.productNodes === 1 || s.ogType === "product" || s.ogType === "og:product") return { kind: "item", reason: "The page describes itself as one product" };
@@ -99,7 +102,8 @@ async function runInspect(url: string, opts: WithPageOptions): Promise<InspectRe
   }, { ...opts, priority: "interactive" });
 
   const knownItemUrl = !!known?.itemUrlPattern && new RegExp(known.itemUrlPattern).test(url);
-  const signals: PageSignals = { url, ldTypes: page.ldTypes, productNodes: page.productNodes, ogType: page.ogType, knownItemUrl, knownListingItems: page.knownListingItems };
+  const knownListingUrl = db.isListingStartUrl(host, url);
+  const signals: PageSignals = { url, ldTypes: page.ldTypes, productNodes: page.productNodes, ogType: page.ogType, knownItemUrl, knownListingItems: page.knownListingItems, knownListingUrl };
   const verdict = classify(signals) ?? (await classifyPage({ url, title: page.title, text: page.text, links: page.links, prices: page.prices }));
   const title = page.title?.replace(/\s+/g, " ").trim().slice(0, 200) || null;
   log.info(`${url} → ${verdict.kind} (${verdict.reason})`);

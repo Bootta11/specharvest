@@ -25,6 +25,12 @@ describe("classify", () => {
     expect(classify(signals({ knownListingItems: 24 }))?.kind).toBe("listing");
   });
 
+  it("a URL a collection crawls as its listing stays a listing, even with few cards and a broad item pattern", () => {
+    expect(classify(signals({ knownListingUrl: true, knownItemUrl: true, knownListingItems: 6 }))?.kind).toBe("listing");
+    // Nothing found there any more: no longer trusted.
+    expect(classify(signals({ knownListingUrl: true, knownItemUrl: true, knownListingItems: 0 }))?.kind).toBe("item");
+  });
+
   it("leaves unclear pages to the LLM", () => {
     expect(classify(signals({ ldTypes: ["WebSite", "Organization"] }))).toBeNull();
     expect(classify(signals({ knownListingItems: 4 }))).toBeNull();

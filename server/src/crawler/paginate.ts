@@ -10,6 +10,14 @@ export interface ItemCard {
   url: string;
   /** Visible text of the listing card (title, price, short specs) — used to spot changes cheaply. */
   cardText: string;
+  /** The card's name (heading, link text or image alt; else its first line). */
+  title: string;
+  image: string | null;
+}
+
+/** First non-empty line of a card's text — the title when the page script found none (older extension builds, no name). */
+export function firstLine(text: string): string {
+  return (text.split("\n").map((l) => l.trim()).find(Boolean) ?? "").slice(0, 200);
 }
 
 /**
@@ -24,12 +32,14 @@ export async function collectItemCards(page: PageDriver, detection: Pick<Collect
   const pattern = safeItemUrlPattern(detection.itemUrlPattern);
   const cards = await page.run("collectCards", { selector: detection.listItemSelector || "", pattern: pattern || "" });
   const re = pattern ? new RegExp(pattern) : null;
-  const byUrl = new Map<string, string>();
+  const byUrl = new Map<string, ItemCard>();
   for (const c of cards) {
     const url = normalizeItemUrl(c.url);
-    if ((!re || re.test(url)) && !byUrl.has(url)) byUrl.set(url, c.cardText);
+    if ((!re || re.test(url)) && !byUrl.has(url)) {
+      byUrl.set(url, { url, cardText: c.cardText, title: c.title || firstLine(c.cardText), image: typeof c.image === "string" && /^https?:/.test(c.image) ? c.image : null });
+    }
   }
-  return [...byUrl].map(([url, cardText]) => ({ url, cardText }));
+  return [...byUrl.values()];
 }
 
 /** Item detail URLs on the current page (see collectItemCards). */

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { isActiveJob, type Job, type Runner } from "@specharvest/shared";
 import { formatUsd, type JobStream } from "../lib/api.ts";
 import { LookupSummary } from "./LookupSummary.tsx";
+import { PickItemsModal } from "./PickItemsModal.tsx";
 
 const statusStyle: Record<Job["status"], string> = {
   queued: "bg-stone-100 text-stone-700 dark:bg-stone-800 dark:text-stone-300",
@@ -10,19 +11,24 @@ const statusStyle: Record<Job["status"], string> = {
   failed: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200",
   stopped: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200",
   interrupted: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200",
+  picking: "bg-violet-100 text-violet-800 dark:bg-violet-950 dark:text-violet-200",
 };
 
+const statusLabel: Partial<Record<Job["status"], string>> = { picking: "pick items" };
+
 const barStyle = (status: Job["status"]) =>
-  status === "failed" ? "bg-red-500" : status === "stopped" || status === "interrupted" ? "bg-amber-500" : "bg-brand-600";
+  status === "failed" ? "bg-red-500" : status === "stopped" || status === "interrupted" ? "bg-amber-500" : status === "picking" ? "bg-violet-500" : "bg-brand-600";
 
 /** Share of found items processed, 0–100. */
 export function jobPercent(job: Job): number {
+  // Parked for a pick: the walk it was doing is finished.
+  if (job.status === "picking") return 100;
   const done = job.itemsIndexed + job.itemsFailed;
   return job.itemsFound > 0 ? Math.min(100, Math.round((done / job.itemsFound) * 100)) : job.status === "done" ? 100 : 0;
 }
 
 export function StatusBadge({ status }: { status: Job["status"] }) {
-  return <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${statusStyle[status]}`}>{status}</span>;
+  return <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${statusStyle[status]}`}>{statusLabel[status] ?? status}</span>;
 }
 
 function Stat({ label, value }: { label: string; value: number | string }) {
@@ -42,11 +48,14 @@ interface JobProgressProps {
   onResume?: (job: Job, runner?: Runner) => Promise<void>;
   /** The user's browser extension is connected (offers "Resume in my browser"). */
   browserOnline?: boolean;
+  /** A pick-first crawl's items were picked and it runs again (same job). */
+  onPicked?: (job: Job) => void;
 }
 
-export function JobProgress({ stream, title, onStop, onResume, browserOnline }: JobProgressProps) {
+export function JobProgress({ stream, title, onStop, onResume, browserOnline, onPicked }: JobProgressProps) {
   const { job, logs, recentItems, queue } = stream;
   const [showLog, setShowLog] = useState(false);
+  const [picking, setPicking] = useState(false);
   const [acting, setActing] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
 
@@ -75,6 +84,18 @@ export function JobProgress({ stream, title, onStop, onResume, browserOnline }: 
             <span className="ml-2 rounded-full bg-stone-100 px-2 py-0.5 align-middle text-[11px] font-medium text-stone-600 dark:bg-stone-800 dark:text-stone-300">in your browser</span>
           )}
         </h3>
+        {onPicked && job.status === "picking" && (
+          <>
+            {onStop && (
+              <button className="btn-ghost btn-sm" disabled={acting} onClick={act(onStop)} title="Throw the list away without extracting anything">
+                Discard
+              </button>
+            )}
+            <button className="btn-primary btn-sm" onClick={() => setPicking(true)}>
+              Pick items
+            </button>
+          </>
+        )}
         {onStop && job.status === "running" && (
           <button className="btn-ghost btn-sm" disabled={acting || stopping} onClick={act(onStop)}>
             {stopping ? "Stopping…" : "Stop"}
@@ -103,6 +124,16 @@ export function JobProgress({ stream, title, onStop, onResume, browserOnline }: 
         <StatusBadge status={job.status} />
       </div>
       {job.message && <p className="mt-1 text-sm text-stone-600 dark:text-stone-400">{job.message}</p>}
+      {picking && onPicked && (
+        <PickItemsModal
+          job={job}
+          onClose={() => setPicking(false)}
+          onPicked={(j) => {
+            setPicking(false);
+            onPicked(j);
+          }}
+        />
+      )}
       {job.error && <p className="mt-1 text-sm text-red-700 dark:text-red-300">{job.error}</p>}
 
       <div className="mt-3 h-2 overflow-hidden rounded-full bg-stone-100 dark:bg-stone-800">

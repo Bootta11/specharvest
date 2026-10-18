@@ -66,6 +66,23 @@ describe("page scripts", () => {
     expect(runSerialized("collectCards", { selector: "", pattern: "^https://shop\\.example/item/" }).map((c) => c.url)).toEqual(["https://shop.example/item/3"]);
   });
 
+  it("collectCards: each card's title (heading, else link text, else image alt) and image", () => {
+    setPage(
+      "https://shop.example/list",
+      `<div class="card"><a href="/brand">Brand</a><h3><a href="/item/1">  Road   bike </a></h3><img src="/img/1.jpg">100 €</div>
+       <div class="card"><a href="/item/2">Gravel bike</a> 200 €</div>
+       <div class="card"><a href="/item/3"><img alt="City bike" data-src="https://cdn.example/3.jpg"></a></div>
+       <div class="card"><h4 class="price card-title">$69.99</h4><h4><a class="title" href="/item/4" title="Lenovo IdeaTab A3500L">Lenovo IdeaTab…</a></h4></div>`,
+    );
+    expect(runSerialized("collectCards", { selector: ".card", pattern: "^https://shop\\.example/item/" }).map(({ url, title, image }) => ({ url, title, image }))).toEqual([
+      { url: "https://shop.example/item/1", title: "Road bike", image: "https://shop.example/img/1.jpg" },
+      { url: "https://shop.example/item/2", title: "Gravel bike", image: null },
+      { url: "https://shop.example/item/3", title: "City bike", image: "https://cdn.example/3.jpg" },
+      // A price heading comes first; the item link's title attribute holds the full name.
+      { url: "https://shop.example/item/4", title: "Lenovo IdeaTab A3500L", image: null },
+    ]);
+  });
+
   it("collectCards: invalid selector yields nothing instead of throwing", () => {
     expect(runSerialized("collectCards", { selector: "div[", pattern: "" })).toEqual([]);
   });

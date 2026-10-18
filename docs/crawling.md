@@ -9,7 +9,8 @@ Before anything is crawled, the form asks `POST /api/crawl/inspect` what the URL
 (`crawler/inspect.ts`) — as soon as it's typed (debounced) or shared:
 
 1. **What we know about the site**: a saved listing structure for the host whose card
-   selector finds ≥ 10 items here → *listing*; the URL matches its item-URL pattern →
+   selector finds ≥ 10 items here, or a URL a collection already crawls as its listing (with
+   at least one card still there) → *listing*; the URL matches its item-URL pattern →
    *item* (a few matching cards can be an item page's "similar ads" strip).
 2. **Structured data**: one JSON-LD `Product`/`Vehicle` (related products inside it don't
    count) or `og:type=product` → *item*; several products, `ItemList` or `CollectionPage` →
@@ -45,7 +46,11 @@ Strategy adapted from twinlisting:
    retry once with a grounding hint (classes that repeat 3+ times), then fall
    back to a link-shape heuristic (most common same-origin path pattern).
 5. An item-URL prefix pattern (e.g. `^https://olx\.ba/artikal/`) is inferred
-   from the found links to drop promos/ads inside the grid.
+   from the found links to drop promos/ads inside the grid: the deepest directory ≥ 80 % of
+   them share, so it doesn't also match the site's listing pages (the page check would take
+   those for item pages). Patterns saved before this looked at the first path segment only;
+   a walk that finds a tighter one fitting all its items saves it, and the server narrows
+   them at startup from each collection's items (or the site's, for one with < 3).
 6. **Page-param probing**: load `?page=2` (then `p`, `pg`, `paged`, `strana`, …).
    If it yields new items, URL paging wins — it is the most reliable mechanism
    and handles SPA "next" buttons that have no `href` (OLX.ba is one).
@@ -259,6 +264,27 @@ or confirmed unchanged before the stop. Failed items were never touched, so they
 are retried. Key consolidation and gone-marking only run when a crawl completes,
 so a stopped crawl skips them until it is resumed. Jobs created before params
 were saved can't be resumed — start a new crawl instead.
+
+## Pick items before extracting
+
+With *Let me pick items first* (`pickItems: true`, listing crawls and re-crawls only), a crawl runs in two phases
+in the same job:
+
+1. **Walk**: detection and the listing walk run as usual, but no card is queued for extraction. Each card's title
+   (its heading, else the item link's text, else an image's alt; the first line of the card text as a last resort)
+   and image are kept with its card text in `job_candidates`. The only LLM call is listing detection on a site we
+   don't know yet. The job then **parks** in status `picking`: it holds no job slot or browser page, waits without
+   a time limit, survives restarts as is, and its user gets a notification (the *crawl done* setting).
+2. **Extract**: the user ticks items in the picker (nothing is ticked by default; filter, *Pick all/shown*,
+   *Only new*) and starts it (`POST /api/jobs/:id/pick`). Only the picked URLs are sorted like walked cards
+   (new → extract; saved → change check per `mode`, using the card text from the walk), without loading the
+   listing again. Hand-added items aren't re-checked.
+
+Saved items left unticked are untouched: no change check, and never marked gone, since they were on the listing.
+Gone-marking still runs after a complete walk, counting every candidate as seen. *Stop*/*Resume* and restarts
+during the extract phase continue with the same picks. *Discard* (stop while `picking`) drops the list; *Resume*
+then walks the listing again and offers a new pick. While a crawl waits for a pick, a new crawl of the same
+collection returns that job instead.
 
 ## Whose browser loads the pages
 
