@@ -40,7 +40,7 @@ export default function App() {
   const [path, setPath] = useState(() => location.pathname);
   if (auth.unreachable) return <UnreachableView auth={auth} />;
   // Booting: nothing to show unless the server takes long to answer (e.g. it's restarting for an update).
-  if (auth.user === undefined) return <ReconnectingBanner fullscreen />;
+  if (auth.user === undefined) return <ReconnectingBanner fullscreen auth={auth} />;
   if (auth.user === null) return <LoginView auth={auth} />;
   // The browser extension's "approve on the website" page (sign-in above first when needed).
   if (path === CONNECT_EXTENSION_PATH && !isNative) return <ConnectExtensionView user={auth.user} onDone={() => setPath(location.pathname)} />;

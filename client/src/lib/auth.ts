@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { UserSummary } from "@specharvest/shared";
 import { api, ApiError, UNAUTHORIZED_EVENT } from "./api.ts";
 import { accounts, activeAccount, isNative, markSignedOut, saveAccount, sessionToken, setActiveAccount } from "./platform.ts";
@@ -32,14 +32,18 @@ export function useAuth(): Auth {
   const [user, setUser] = useState<UserSummary | null | undefined>(undefined);
   const [unreachable, setUnreachable] = useState(false);
   const [addingFrom, setAddingFrom] = useState<string | null>(null);
+  // Bumped by each check and by leaving for another account: a check still retrying after that is ignored.
+  const generation = useRef(0);
 
   const check = useCallback(() => {
+    const gen = ++generation.current;
     setUnreachable(false);
     // The app with no signed-in account has nothing to check.
     if (isNative && !sessionToken()) return setUser(null);
     setUser(undefined);
     api.me().then(
       (me) => {
+        if (gen !== generation.current) return;
         // Fills in an account carried over from an older build, and keeps email/role current.
         const account = activeAccount();
         if (account && (account.email !== me.email || account.role !== me.role || account.id !== `${account.server}#${me.id}`)) {
@@ -48,6 +52,7 @@ export function useAuth(): Auth {
         setUser(me);
       },
       (err) => {
+        if (gen !== generation.current) return;
         if (err instanceof ApiError && err.status === 401) {
           const account = activeAccount();
           if (account) void markSignedOut(account.id);
@@ -103,6 +108,7 @@ export function useAuth(): Auth {
   );
 
   const addAccount = useCallback(async () => {
+    generation.current++;
     setAddingFrom(activeAccount()?.id ?? null);
     await setActiveAccount(null);
     setUnreachable(false);

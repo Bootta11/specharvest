@@ -75,6 +75,10 @@ native storage (Capacitor Preferences, `src/lib/platform.ts`):
 - If the server can't be reached at startup (no network, server down, 5xx), the app shows *Can't reach the
   server* with *Retry* and keeps the sign-in. Only a real 401 signs you out. It retries when the app comes
   back to the foreground.
+- You don't have to wait for the retries to end, which take up to ~45 s while a server may be restarting.
+  The waiting screen offers *Back to …*, which goes back to the account you used before the last switch,
+  and *Use another account or server*, which opens the sign-in screen with your saved accounts and the
+  server picker.
 - Notifications follow the jobs of the active account only.
 - A sign-in saved by an older build carries over as an account on first launch.
 
@@ -85,7 +89,8 @@ they can't match a login to the server. Pick it from the manager by hand.
 
 They work like cursor-agent-remote's: the app follows your jobs while it's open or in the
 background, and posts a phone notification when a crawl or web lookup finishes or fails. Tapping it
-opens the job. There's no notification for the job you're already looking at. When the app comes
+opens the job. A long message shows as one line ending in "…"; expand the notification in the drawer
+to read it in full. There's no notification for the job you're already looking at. When the app comes
 back to the foreground, it reconnects and catches up on jobs that finished in the meantime.
 
 **Turn off battery optimization for SpecHarvest** (Settings → Apps → SpecHarvest → Battery →

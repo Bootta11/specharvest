@@ -12,6 +12,8 @@ export const DEFAULT_SERVER = "https://specharvest.bootta.dev";
 const SERVER_KEY = "serverUrl";
 const ACCOUNTS_KEY = "accounts";
 const ACTIVE_KEY = "activeAccount";
+/** The account used before the last switch, to go back when the new one's server doesn't answer. */
+const PREVIOUS_KEY = "previousAccount";
 /** Before saved accounts, the app kept one token here; loadNativeSettings turns it into an account. */
 const LEGACY_TOKEN_KEY = "sessionToken";
 
@@ -52,10 +54,10 @@ function write(key: string, value: string | null): Promise<void> {
 /** Call before rendering in the app. Also adopts values an older build kept in localStorage or as one token. */
 export async function loadNativeSettings() {
   if (!isNative) return;
-  for (const key of [SERVER_KEY, ACCOUNTS_KEY, ACTIVE_KEY, LEGACY_TOKEN_KEY]) {
+  for (const key of [SERVER_KEY, ACCOUNTS_KEY, ACTIVE_KEY, PREVIOUS_KEY, LEGACY_TOKEN_KEY]) {
     const { value } = await Preferences.get({ key });
     let v = value;
-    if (v === null && key !== ACCOUNTS_KEY && key !== ACTIVE_KEY) {
+    if (v === null && key !== ACCOUNTS_KEY && key !== ACTIVE_KEY && key !== PREVIOUS_KEY) {
       try {
         v = localStorage.getItem(key);
         if (v !== null) await Preferences.set({ key, value: v });
@@ -94,6 +96,8 @@ export function activeAccount(): SavedAccount | null {
 
 /** Makes an account the one the app uses (null: none — the sign-in screen, with the others kept). */
 export async function setActiveAccount(id: string | null) {
+  const prev = read(ACTIVE_KEY);
+  if (prev && id && prev !== id) await write(PREVIOUS_KEY, prev);
   await write(ACTIVE_KEY, id);
   const account = activeAccount();
   if (account) await setServerUrl(account.server);
@@ -119,6 +123,15 @@ export async function markSignedOut(id: string) {
 export async function forgetAccount(id: string) {
   await writeAccounts(accounts().filter((a) => a.id !== id));
   if (read(ACTIVE_KEY) === id) await write(ACTIVE_KEY, null);
+  if (read(PREVIOUS_KEY) === id) await write(PREVIOUS_KEY, null);
+}
+
+/** The signed-in account used before the active one (null when there's none to go back to). */
+export function previousAccount(): SavedAccount | null {
+  if (!isNative) return null;
+  const id = read(PREVIOUS_KEY);
+  if (!id || id === read(ACTIVE_KEY)) return null;
+  return accounts().find((a) => a.id === id && a.token) ?? null;
 }
 
 /** "" on the web (same origin); the active account's server in the app, else the one picked on the sign-in screen. */

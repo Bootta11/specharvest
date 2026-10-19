@@ -83,7 +83,7 @@ export async function initNative(onOpenJob: (jobId: number) => void): Promise<()
 /** A notification for a finished job; tapping it opens the job. */
 export async function notifyJob(jobId: number, title: string, body: string) {
   try {
-    await LocalNotifications.schedule({ notifications: [{ id: jobId, title, body, extra: { jobId } }] });
+    await LocalNotifications.schedule({ notifications: [{ id: jobId, title, body, largeBody: body, extra: { jobId } }] });
   } catch (err) {
     console.error("Failed to post a notification:", err);
   }

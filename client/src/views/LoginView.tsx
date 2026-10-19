@@ -3,6 +3,7 @@ import { api } from "../lib/api.ts";
 import type { Auth } from "../lib/auth.ts";
 import { Field, Notice } from "../components/Modal.tsx";
 import { AccountRow, host } from "../components/AccountRow.tsx";
+import { LeaveServerButtons } from "../components/ReconnectingBanner.tsx";
 import { accounts, activeAccount, DEFAULT_SERVER, isNative, normalizeServerUrl, serverUrl, setActiveAccount, setServerUrl, type SavedAccount } from "../lib/platform.ts";
 
 /** The Android app's server choice: specharvest.bootta.dev, or a custom (e.g. self-hosted) one. */
@@ -111,11 +112,7 @@ export function UnreachableView({ auth }: { auth: Auth }) {
           <button className="btn-primary w-full" onClick={auth.retry}>
             Retry
           </button>
-          {isNative && (
-            <button className="btn-ghost w-full" onClick={() => void auth.addAccount()}>
-              Switch account
-            </button>
-          )}
+          <LeaveServerButtons auth={auth} switchLabel="Switch account or server" />
         </div>
       </div>
     </div>
