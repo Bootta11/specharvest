@@ -111,6 +111,10 @@ Push doesn't work inside the app, so its toggle is hidden there.
   Check the settings and tap *Start crawl*. If the link is already one of
   your collections' start URLs, it offers *Re-crawl* too. Shared while signed out, the link waits until you
   sign in. (`MainActivity` turns the share into a `specharvest://share?text=…` link; see `src/lib/share.ts`.)
+- **Crawls in your desktop browser** (*Run in my browser*, with the [extension](extension.md) connected) can
+  be started from the phone. A site the extension hasn't been allowed on yet waits for a click on the
+  computer, because Chrome only grants that there. Allow sites ahead of time, or turn on *Allow on all
+  sites*, in the extension's settings (see [site permissions](extension.md#site-permissions)).
 - The back button closes the open dialog or menu, otherwise it sends the app to the background.
 - Links to shops and sources open in the system browser.
 - *Export* saves the `.json` file and opens the share sheet (Files, Drive, mail…).

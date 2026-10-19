@@ -11,19 +11,47 @@ export interface PendingPermission {
   at: number;
 }
 
-export interface LiveState {
+/** One server's connection, for the UI. */
+export interface ServerStatus {
   status: ConnectionStatus;
-  /** Why it's offline / in error, for the UI. */
+  /** Why it's offline / in error. */
   message: string;
-  /** Tabs the server is using right now. */
+}
+
+export interface LiveState {
+  /** By ServerEntry id. A server missing here hasn't connected since Chrome started. */
+  servers: Record<string, ServerStatus>;
+  /** Tabs the servers are using right now (all of them). */
   openTabs: number;
   /** Sites a crawl waits to be allowed on. */
   pendingPermissions: PendingPermission[];
-  /** Approve-in-the-web-app pairing in progress: the code the web page shows too. */
-  pairingCode: string | null;
+  /** Approve-in-the-web-app pairing in progress: the server, the code the web page shows too, and how it's going. */
+  pairing: { serverUrl: string; code: string | null; message: string } | null;
 }
 
-const DEFAULT_STATE: LiveState = { status: "unconfigured", message: "", openTabs: 0, pendingPermissions: [], pairingCode: null };
+const DEFAULT_STATE: LiveState = { servers: {}, openTabs: 0, pendingPermissions: [], pairing: null };
+const OFFLINE: ServerStatus = { status: "offline", message: "" };
+
+export const serverStatus = (state: LiveState, id: string): ServerStatus => state.servers[id] ?? OFFLINE;
+
+/** One server's status changed. */
+export const setServerStatus = (id: string, status: ConnectionStatus, message = "") =>
+  updateState((s) => ({ servers: { ...s.servers, [id]: { status, message } } }));
+
+export const forgetServerStatus = (id: string) =>
+  updateState((s) => {
+    const { [id]: _, ...rest } = s.servers;
+    return { servers: rest };
+  });
+
+/** The popup's header dot over all paired servers: online when all are, "connecting" while some are missing. */
+export function overallStatus(state: LiveState, serverIds: string[]): { status: ConnectionStatus; label?: string } {
+  if (!serverIds.length) return { status: "unconfigured" };
+  const online = serverIds.filter((id) => serverStatus(state, id).status === "online").length;
+  if (online === serverIds.length) return { status: "online" };
+  if (serverIds.length === 1) return { status: serverStatus(state, serverIds[0]).status };
+  return online ? { status: "connecting", label: `${online} of ${serverIds.length} connected` } : { status: "offline" };
+}
 
 export async function getState(): Promise<LiveState> {
   const { live } = (await chrome.storage.session.get("live")) as { live?: LiveState };
@@ -54,8 +82,8 @@ export function onStateChange(fn: (s: LiveState) => void): () => void {
 
 /** Messages from the popup / options page to the background worker. */
 export type BackgroundRequest =
-  | { type: "reconnect" }
-  | { type: "disconnect" }
+  | { type: "reconnect"; serverId: string }
+  | { type: "removeServer"; serverId: string }
   | { type: "startPairing"; serverUrl: string; deviceName: string }
   | { type: "cancelPairing" }
   | { type: "settingsChanged" };

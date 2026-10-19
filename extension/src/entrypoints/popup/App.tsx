@@ -3,7 +3,9 @@ import { isActiveJob, type Collection, type InspectResult, type Job, type PageSn
 import { PAGE_SCRIPTS } from "@specharvest/shared/page-scripts";
 import { Logo, StatusDot, useLiveState, useSettings } from "../../components/ui.tsx";
 import { inspect, listCollections, listJobs, startCrawl, stopJob } from "../../lib/api.ts";
-import { requestSitePermission } from "../../lib/permissions.ts";
+import { requestAllSites, requestSitePermission } from "../../lib/permissions.ts";
+import { saveSettings, type ServerEntry } from "../../lib/settings.ts";
+import { overallStatus, serverStatus } from "../../lib/state.ts";
 import { blockedReason, siteOf } from "../../lib/url-guard.ts";
 
 export function PopupApp() {
@@ -16,8 +18,14 @@ export function PopupApp() {
   }, []);
 
   if (!state || !settings) return null;
-  const connected = !!settings.token;
-  const online = state.status === "online";
+  const signedIn = settings.servers.filter((x) => x.token);
+  const target = signedIn.find((x) => x.id === settings.popupServerId) ?? signedIn[0] ?? null;
+  const overall = overallStatus(
+    state,
+    signedIn.map((x) => x.id),
+  );
+  const targetStatus = target ? serverStatus(state, target.id) : null;
+  const host = (x: ServerEntry) => new URL(x.serverUrl).host;
 
   return (
     <div className="flex flex-col gap-3 p-3">
@@ -25,14 +33,14 @@ export function PopupApp() {
         <Logo />
         <span className="font-semibold">SpecHarvest</span>
         <span className="ml-auto">
-          <StatusDot status={state.status} />
+          <StatusDot status={overall.status} label={overall.label} />
         </span>
         <button className="btn-ghost btn-sm px-2" title="Settings" aria-label="Settings" onClick={() => void chrome.runtime.openOptionsPage()}>
           ⚙
         </button>
       </header>
 
-      {!connected ? (
+      {!target ? (
         <div className="card flex flex-col gap-2 p-3 text-sm">
           <p>Connect this browser to your SpecHarvest account so crawls can run here.</p>
           <button className="btn-primary" onClick={() => void chrome.runtime.openOptionsPage()}>
@@ -41,7 +49,20 @@ export function PopupApp() {
         </div>
       ) : (
         <>
-          {state.message && <p className="text-xs text-stone-500">{state.message}</p>}
+          {signedIn.length > 1 && (
+            <label className="flex items-center gap-2 text-xs text-stone-500">
+              Send to
+              <select className="input h-8 min-w-0 flex-1" value={target.id} onChange={(e) => void saveSettings({ popupServerId: e.target.value })}>
+                {signedIn.map((x) => (
+                  <option key={x.id} value={x.id}>
+                    {host(x)}
+                    {serverStatus(state, x.id).status === "online" ? "" : " (offline)"}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {targetStatus?.message && <p className="text-xs text-stone-500">{targetStatus.message}</p>}
 
           {state.pendingPermissions.map((p) => (
             <div key={p.origin} className="card flex items-center gap-2 border-amber-300 p-2 pl-3 text-sm dark:border-amber-700">
@@ -53,15 +74,27 @@ export function PopupApp() {
               </button>
             </div>
           ))}
+          {state.pendingPermissions.length > 0 && (
+            <button
+              className="self-start text-xs text-stone-500 underline"
+              title="Crawls never wait for approval again — handy when you start them from your phone. Change it in the settings."
+              onClick={() => void requestAllSites()}
+            >
+              Allow all sites instead
+            </button>
+          )}
 
-          {tab?.url && tab.id != null && !blockedReason(tab.url) && online && <ThisPage tabId={tab.id} url={tab.url} title={tab.title ?? ""} />}
+          {tab?.url && tab.id != null && !blockedReason(tab.url) && targetStatus?.status === "online" && (
+            // Keyed by server: switching "Send to" starts over instead of finishing a step against the other server.
+            <ThisPage key={target.id} server={target} tabId={tab.id} url={tab.url} title={tab.title ?? ""} />
+          )}
 
-          <Jobs serverUrl={settings.serverUrl} />
+          <Jobs servers={signedIn} />
 
           <footer className="flex items-center justify-between text-xs text-stone-500">
             <span>{state.openTabs ? `${state.openTabs} crawl tab${state.openTabs === 1 ? "" : "s"} open` : "Idle"}</span>
-            <a className="underline" href={settings.serverUrl} target="_blank" rel="noreferrer">
-              Open SpecHarvest
+            <a className="underline" href={target.serverUrl} target="_blank" rel="noreferrer">
+              Open SpecHarvest{signedIn.length > 1 ? ` (${host(target)})` : ""}
             </a>
           </footer>
         </>
@@ -79,7 +112,7 @@ type Step =
   | { kind: "error"; message: string };
 
 /** The page in the current tab: crawl it as a listing, or add it as one item. */
-function ThisPage({ tabId, url, title }: { tabId: number; url: string; title: string }) {
+function ThisPage({ server, tabId, url, title }: { server: ServerEntry; tabId: number; url: string; title: string }) {
   const [step, setStep] = useState<Step>({ kind: "idle" });
   const site = siteOf(new URL(url).hostname);
 
@@ -100,11 +133,11 @@ function ThisPage({ tabId, url, title }: { tabId: number; url: string; title: st
     try {
       if (!force) {
         setStep({ kind: "busy", label: "Checking the page…" });
-        const result = await inspect(url);
+        const result = await inspect(server, url);
         if (result.kind !== "listing") return setStep({ kind: "verdict", result });
       }
       setStep({ kind: "busy", label: "Starting…" });
-      setStep({ kind: "started", job: await startCrawl({ url, runner: "browser" }), what: "Crawl started" });
+      setStep({ kind: "started", job: await startCrawl(server, { url, runner: "browser" }), what: "Crawl started" });
     } catch (err) {
       fail(err);
     }
@@ -118,7 +151,7 @@ function ThisPage({ tabId, url, title }: { tabId: number; url: string; title: st
       const snapshot = res?.result as PageSnapshot | undefined;
       if (!snapshot?.text) throw new Error("Couldn't read this page");
       const host = new URL(url).hostname;
-      const options = (await listCollections()).filter((c) => c.canEdit && c.host === host).sort((a, b) => b.createdAt - a.createdAt);
+      const options = (await listCollections(server)).filter((c) => c.canEdit && c.host === host).sort((a, b) => b.createdAt - a.createdAt);
       setStep({ kind: "pickCollection", snapshot, options });
     } catch (err) {
       fail(err);
@@ -128,7 +161,7 @@ function ThisPage({ tabId, url, title }: { tabId: number; url: string; title: st
   const confirmAdd = async (snapshot: PageSnapshot, collectionId: number | null) => {
     try {
       setStep({ kind: "busy", label: "Adding…" });
-      const job = await startCrawl({ url, kind: "item", runner: "browser", snapshot, ...(collectionId ? { collectionId } : { name: title.slice(0, 200) || site }) });
+      const job = await startCrawl(server, { url, kind: "item", runner: "browser", snapshot, ...(collectionId ? { collectionId } : { name: title.slice(0, 200) || site }) });
       setStep({ kind: "started", job, what: "Adding the item" });
     } catch (err) {
       fail(err);
@@ -172,7 +205,7 @@ function ThisPage({ tabId, url, title }: { tabId: number; url: string; title: st
                 className="btn-ghost btn-sm"
                 onClick={async () => {
                   setStep({ kind: "busy", label: "Starting…" });
-                  await startCrawl({ url: step.result.category!.url, runner: "browser" }).then((job) => setStep({ kind: "started", job, what: `Crawling ${step.result.category!.name}` }), fail);
+                  await startCrawl(server, { url: step.result.category!.url, runner: "browser" }).then((job) => setStep({ kind: "started", job, what: `Crawling ${step.result.category!.name}` }), fail);
                 }}
               >
                 Crawl “{step.result.category.name}”
@@ -229,38 +262,41 @@ function PickCollection({ options, onPick, onCancel }: { options: Collection[]; 
   );
 }
 
-/** The user's running crawls, refreshed while the popup is open. */
-function Jobs({ serverUrl }: { serverUrl: string }) {
-  const [jobs, setJobs] = useState<Job[] | null>(null);
+/** The user's running crawls on every paired server, refreshed while the popup is open. */
+function Jobs({ servers }: { servers: ServerEntry[] }) {
+  const [jobs, setJobs] = useState<Array<{ server: ServerEntry; job: Job }> | null>(null);
+  const key = servers.map((x) => x.id + x.token).join();
   useEffect(() => {
     let alive = true;
-    const load = () =>
-      listJobs().then(
-        (all) => alive && setJobs(all.filter(isActiveJob)),
-        () => alive && setJobs([]),
-      );
+    const load = async () => {
+      // One server being down doesn't hide the others' jobs.
+      const lists = await Promise.all(servers.map((server) => listJobs(server).then((all) => all.filter(isActiveJob).map((job) => ({ server, job })), () => [])));
+      if (alive) setJobs(lists.flat());
+    };
     void load();
     const t = setInterval(load, 2000);
     return () => {
       alive = false;
       clearInterval(t);
     };
-  }, []);
+  }, [key]);
   if (!jobs?.length) return null;
+  const several = servers.length > 1;
   return (
     <section className="flex flex-col gap-2">
       <h2 className="text-xs font-semibold uppercase tracking-wide text-stone-500">Running</h2>
-      {jobs.map((j) => (
-        <div key={j.id} className="card flex flex-col gap-1.5 p-2.5 text-xs">
+      {jobs.map(({ server, job: j }) => (
+        <div key={`${server.id}:${j.id}`} className="card flex flex-col gap-1.5 p-2.5 text-xs">
           <div className="flex items-center gap-2">
-            <a className="font-medium underline-offset-2 hover:underline" href={serverUrl} target="_blank" rel="noreferrer">
+            <a className="min-w-0 truncate font-medium underline-offset-2 hover:underline" href={server.serverUrl} target="_blank" rel="noreferrer">
               #{j.id} {j.kind === "crawl" ? "Crawl" : "Web lookup"}
               {j.runner === "browser" ? " · in this browser" : ""}
             </a>
-            <button className="btn-ghost btn-sm ml-auto h-6 px-2" onClick={() => void stopJob(j.id).catch(() => {})}>
+            <button className="btn-ghost btn-sm ml-auto h-6 px-2" onClick={() => void stopJob(server, j.id).catch(() => {})}>
               Stop
             </button>
           </div>
+          {several && <div className="truncate text-stone-500">{new URL(server.serverUrl).host}</div>}
           <div className="h-1.5 overflow-hidden rounded bg-stone-200 dark:bg-stone-800">
             <div className="h-full bg-brand-600 transition-all" style={{ width: `${j.itemsFound ? Math.round((100 * j.itemsIndexed) / j.itemsFound) : 5}%` }} />
           </div>

@@ -13,6 +13,9 @@ import { siteOf } from "./url-guard.ts";
  * scroll and "load more on scroll" never fires. A site that needs that gets its tabs moved to a second,
  * visible place — a normal window behind the user's own (showTab) — and is remembered, so later crawls of
  * it open there right away.
+ *
+ * Several servers share the window, but each tab belongs to the server that opened it: one server can't
+ * drive (or close) another's tabs.
  */
 
 const CLOSE_WHEN_IDLE_MS = 60_000;
@@ -29,7 +32,8 @@ interface Place {
 let place: Place | null = null;
 /** The visible window for sites that need rendering, when the user's mode hides pages. */
 let visible: Place | null = null;
-const tabs = new Set<number>();
+/** Crawl tab → the server (ServerEntry id) that opened it. */
+const tabs = new Map<number, string>();
 let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
 async function windowExists(id: number) {
@@ -83,7 +87,7 @@ async function publishCount() {
   await updateState({ openTabs: tabs.size });
 }
 
-export async function openCrawlTab(origin?: string): Promise<number> {
+export async function openCrawlTab(serverId: string, origin?: string): Promise<number> {
   if (idleTimer) clearTimeout(idleTimer);
   idleTimer = null;
   const { tabMode } = await getSettings();
@@ -95,7 +99,7 @@ export async function openCrawlTab(origin?: string): Promise<number> {
     p.groupId = await chrome.tabs.group({ tabIds: [tabId], ...(groupStillThere ? { groupId: p.groupId } : { createProperties: { windowId: p.windowId } }) });
     if (!groupStillThere) await chrome.tabGroups.update(p.groupId, { title: "SpecHarvest", color: "cyan", collapsed: true });
   }
-  tabs.add(tabId);
+  tabs.set(tabId, serverId);
   await publishCount();
   return tabId;
 }
@@ -167,7 +171,8 @@ export async function rememberSite(url: string, needsVisible: boolean) {
 
 export const pagesRender = async () => renders((await getSettings()).tabMode);
 
-export const isCrawlTab = (tabId: number) => tabs.has(tabId);
+/** Whether `tabId` is a crawl tab `serverId` opened. */
+export const isCrawlTab = (tabId: number, serverId: string) => tabs.get(tabId) === serverId;
 
 export async function closeCrawlTab(tabId: number) {
   tabs.delete(tabId);
@@ -186,10 +191,10 @@ async function closePlaceIfIdle() {
   place = visible = null;
 }
 
-/** Everything closes (disconnect): tabs, and the crawl window. */
-export async function closeAllCrawlTabs() {
-  for (const id of [...tabs]) await closeCrawlTab(id);
-  await closePlaceIfIdle();
+/** A server went away: its tabs close, and the crawl window too once no other server has tabs there. */
+export async function closeAllCrawlTabs(serverId: string) {
+  for (const [id, owner] of [...tabs]) if (owner === serverId) await closeCrawlTab(id);
+  if (tabs.size === 0) await closePlaceIfIdle();
 }
 
 /** The user closed a crawl tab or the window: forget it. */

@@ -26,14 +26,14 @@ async function needPermission(url: string): Promise<never> {
   throw new OpError("needs_permission", `Not allowed on ${new URL(url).hostname} yet`, origin);
 }
 
-/** Only tabs this extension opened for the server can be driven — never the user's own tabs. */
-function requireCrawlTab(tabId: number) {
-  if (!isCrawlTab(tabId)) throw new OpError("tab_closed", "That crawl tab is gone");
+/** Only tabs this extension opened for that server can be driven — never the user's own tabs, nor another server's. */
+function requireCrawlTab(serverId: string, tabId: number) {
+  if (!isCrawlTab(tabId, serverId)) throw new OpError("tab_closed", "That crawl tab is gone");
 }
 
 /** Navigates and waits for the page's load event (like puppeteer's waitUntil: "load"). */
-async function goto(tabId: number, url: string, timeoutMs: number) {
-  requireCrawlTab(tabId);
+async function goto(serverId: string, tabId: number, url: string, timeoutMs: number) {
+  requireCrawlTab(serverId, tabId);
   const blocked = blockedReason(url);
   if (blocked) throw new OpError("blocked_url", blocked);
   if (!(await hasSitePermission(url))) await needPermission(url);
@@ -98,8 +98,8 @@ async function describeTab(tabId: number): Promise<string> {
 }
 
 /** Runs one of the bundled page scripts in the tab (the extension's isolated world — the page can't see it). */
-async function run(tabId: number, script: string, args: unknown[]) {
-  requireCrawlTab(tabId);
+async function run(serverId: string, tabId: number, script: string, args: unknown[]) {
+  requireCrawlTab(serverId, tabId);
   if (!Object.hasOwn(PAGE_SCRIPTS, script)) throw new OpError("bad_command", `Unknown page script ${script}`);
   const func = PAGE_SCRIPTS[script as PageScriptName] as (...a: unknown[]) => unknown;
   let results: chrome.scripting.InjectionResult<unknown>[];
@@ -136,23 +136,23 @@ const MIN_NEW_LINKS = 3;
  * the tab is shown in the visible window, scrolled a few times, and the links counted. It stays there when
  * more appeared; otherwise it goes back. The answer is remembered for the site.
  */
-async function probeScroll(tabId: number, url: string, timeoutMs: number) {
-  requireCrawlTab(tabId);
+async function probeScroll(serverId: string, tabId: number, url: string, timeoutMs: number) {
+  requireCrawlTab(serverId, tabId);
   if ((await pagesRender()) || !(await getSettings()).autoVisible) return { checked: false, needsVisible: false };
   const known = await siteNeedsVisible(url);
   if (known !== null) {
     if (known) await moveToVisible(tabId);
     return { checked: false, needsVisible: known };
   }
-  await goto(tabId, url, timeoutMs);
+  await goto(serverId, tabId, url, timeoutMs);
   const moved = await moveToVisible(tabId);
   await sleep(800);
-  const before = (await run(tabId, "scrollMetrics", [])) as { links: number };
+  const before = (await run(serverId, tabId, "scrollMetrics", [])) as { links: number };
   let after = before;
   for (let i = 0; i < 3; i++) {
-    await run(tabId, "scrollToBottom", []);
+    await run(serverId, tabId, "scrollToBottom", []);
     await sleep(1_500);
-    after = (await run(tabId, "scrollMetrics", [])) as { links: number };
+    after = (await run(serverId, tabId, "scrollMetrics", [])) as { links: number };
   }
   const needsVisible = after.links - before.links >= MIN_NEW_LINKS;
   await rememberSite(url, needsVisible);
@@ -160,28 +160,29 @@ async function probeScroll(tabId: number, url: string, timeoutMs: number) {
   return { checked: true, needsVisible };
 }
 
-export async function handleCommand(command: ExtensionCommand): Promise<unknown> {
+/** A command from the server `serverId` (a ServerEntry id). */
+export async function handleCommand(serverId: string, command: ExtensionCommand): Promise<unknown> {
   switch (command.op) {
     case "openTab":
-      return { tabId: await openCrawlTab(command.origin) };
+      return { tabId: await openCrawlTab(serverId, command.origin) };
     case "showTab":
-      requireCrawlTab(command.tabId);
+      requireCrawlTab(serverId, command.tabId);
       return showTab(command.tabId);
     case "probeScroll":
-      return probeScroll(command.tabId, command.url, command.timeoutMs);
+      return probeScroll(serverId, command.tabId, command.url, command.timeoutMs);
     case "closeTab":
       forgetTab(command.tabId);
-      if (isCrawlTab(command.tabId)) await closeCrawlTab(command.tabId);
+      if (isCrawlTab(command.tabId, serverId)) await closeCrawlTab(command.tabId);
       return null;
     case "goto":
-      return goto(command.tabId, command.url, command.timeoutMs);
+      return goto(serverId, command.tabId, command.url, command.timeoutMs);
     case "run":
-      return run(command.tabId, command.script, command.args);
+      return run(serverId, command.tabId, command.script, command.args);
     case "click":
-      if (!(await run(command.tabId, "clickSelector", [{ selector: command.selector }]))) throw new OpError("script_failed", `No element matches ${command.selector}`);
+      if (!(await run(serverId, command.tabId, "clickSelector", [{ selector: command.selector }]))) throw new OpError("script_failed", `No element matches ${command.selector}`);
       return null;
     case "waitIdle":
-      requireCrawlTab(command.tabId);
+      requireCrawlTab(serverId, command.tabId);
       await waitForIdle(command.tabId, command.idleMs, command.timeoutMs);
       return null;
     case "ensurePermission": {

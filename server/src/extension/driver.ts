@@ -57,9 +57,12 @@ async function withPermission<T>(c: Connection, wait: WaitOptions, send: () => P
       if (!(err instanceof ExtensionCommandError) || err.code !== "needs_permission") throw err;
       const site = siteOf(err.origin);
       if (waitMs <= 0) throw new FatalDriverError(`The extension isn't allowed on ${site} yet`);
-      wait.notice?.(`Waiting for you to allow the SpecHarvest extension on ${site} — click its notification or toolbar icon`);
+      // Chrome grants site access only in answer to a click on that computer — say so: the job may have been started from a phone.
+      wait.notice?.(
+        `Waiting for you to allow the SpecHarvest extension on ${site} on your computer — click its notification or toolbar icon. To skip this next time, turn on “Allow on all sites” in the extension's settings`,
+      );
       if (!(await waitForPermissionGrant(c, waitMs, wait.signal))) {
-        throw new FatalDriverError(wait.signal?.aborted ? "Stopped" : `The extension wasn't allowed on ${site} — allow it, then resume`);
+        throw new FatalDriverError(wait.signal?.aborted ? "Stopped" : `The extension wasn't allowed on ${site} — allow it on your computer (or turn on “Allow on all sites” in the extension's settings), then resume`);
       }
       wait.notice?.(`Allowed on ${site} — continuing`);
     }

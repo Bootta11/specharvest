@@ -33,12 +33,12 @@ const STATUS: Record<ConnectionStatus, { label: string; dot: string }> = {
   unconfigured: { label: "Not connected", dot: "bg-stone-300 dark:bg-stone-600" },
 };
 
-export function StatusDot({ status }: { status: ConnectionStatus }) {
+export function StatusDot({ status, label }: { status: ConnectionStatus; label?: string }) {
   const s = STATUS[status];
   return (
     <span className="inline-flex items-center gap-2 text-sm font-medium">
       <span className={`size-2.5 rounded-full ${s.dot}`} aria-hidden />
-      {s.label}
+      {label ?? s.label}
     </span>
   );
 }

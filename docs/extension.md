@@ -29,6 +29,28 @@ enter your SpecHarvest address and connect in one of two ways:
 state. *Disconnect* revokes it at once: crawls running there stop, and you can
 resume them.
 
+### Several servers
+
+One extension can serve several SpecHarvest servers at once, for example a local
+one and one on your VPS. In the extension's settings, click *+ Add another
+server* and connect it the same way. Each server gets its own row with its
+status, *Reconnect* and *Disconnect* (which removes it from the list). Connecting
+an address that's already listed replaces its token.
+
+- **Tabs at once** covers the whole browser. It is split evenly between the
+  servers that are online (4 = 2 + 2), and a server that goes offline gives
+  its share back. Each server's *Tabs* select can set a fixed number instead
+  of *Auto*. The automatic servers then share what's left (at least 1 each).
+- **Isolation**: each crawl tab belongs to the server that opened it. A
+  server can't drive or close another server's tabs, and when one server
+  disconnects only its tabs close. They share the crawl window and the site
+  permissions.
+- **Popup**: *Send to* picks which server *Crawl this listing* and *Add this
+  item* use (remembered). *Running* lists the jobs of every server, labelled
+  by address.
+- Updating from a single-server version keeps the existing connection. It
+  becomes the first server in the list.
+
 ## Use
 
 - **Crawl form**: *Run in my browser* is on while your extension is connected.
@@ -56,6 +78,21 @@ The extension has no access to any site until you allow it, one site at a time
 The crawl then goes on by itself. If nobody allows it within 5 minutes, the job
 stops and you can resume it later. *Stop* ends the wait at once. Allowed sites
 are listed in the extension's settings, where you can remove them.
+
+**Allow in advance (crawls started from the phone).** Chrome grants site access
+only in answer to a click inside the extension on that computer. A phone, the
+server or a web page can't grant it. So a crawl you start from the phone on a
+new site waits until someone clicks at the computer. To avoid that, in the
+extension's settings → *Sites*:
+
+- **Allow sites in advance**: type the sites you plan to crawl (`olx.ba,
+  njuskalo.hr`, URLs work too) and click *Allow these sites*. Chrome asks
+  once for all of them. Local and private addresses are rejected.
+- **Allow on all sites**: one switch, and no crawl ever waits again. The
+  trade-off: every server you connected can then open any public site in this
+  Chrome, signed in with your cookies. Local and private addresses stay blocked
+  either way. Turning it off keeps the sites you allowed one by one. The popup
+  offers *Allow all sites instead* while a crawl is waiting.
 
 ### Where the tabs open
 
@@ -177,6 +214,16 @@ the address. Only localhost may be plain http.
 - **After a rebuild, reload the extension** in `chrome://extensions`. Chrome
   can keep running the previous service worker otherwise. End-to-end runs with a
   reused profile hit this.
+- **Dev build (`dist/chrome-mv3-dev`) needs the WXT dev server.** Its pages load
+  their code from `localhost:4719`. If the popup is blank or stuck on "Loading…",
+  or the dev server answers `504 Outdated Optimize Dep`, its dependency cache is
+  stale (for example after `npm install` while it was running). Restart it and
+  reload the extension. `wxt.config.ts` limits Vite's dependency scan to
+  `src/entrypoints/**/*.html`: the default scan also read the built pages in
+  `dist/`, failed, and set off exactly that.
+- **Server down**: before each connection attempt the extension sends `HEAD /api/health`.
+  It opens the WebSocket only on a 2xx, so an outage doesn't fill the Errors
+  page with failed WebSocket handshakes. The popup shows "Can't reach … — retrying".
 - **Automated tests**: automation can't click Chrome's permission prompt.
   `SPECHARVEST_TEST_HOSTS="https://olx.ba/*,https://*.olx.ba/*" npm run build:extension`
   builds into `extension/dist-test/` with those sites allowed at install. Never upload
@@ -199,7 +246,8 @@ the address. Only localhost may be plain http.
    - `alarms`: reconnect.
    - `notifications`: ask for site access.
    - `activeTab`: *Add this item* on the open tab.
-   - Optional host access: per site, on request.
+   - Optional host access: per site, on request, or all sites if the user
+     turns on *Allow on all sites* in the settings.
 4. Privacy policy: [extension-privacy.md](extension-privacy.md), published at a
    public URL.
 5. Set `EXTENSION_STORE_URL` on the server so the crawl form links to the store.

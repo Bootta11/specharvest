@@ -10,7 +10,16 @@ export default defineConfig({
   srcDir: "src",
   outDir: testHosts.length ? "dist-test" : "dist", // not dot-folders: macOS file pickers hide those (Load unpacked)
   modules: ["@wxt-dev/module-react"],
-  vite: () => ({ plugins: [tailwindcss()] }),
+  vite: () => ({
+    plugins: [tailwindcss()],
+    // Dev server: scan only the source pages. By default Vite also scans the built HTML in dist/ and dist-test/,
+    // which WXT empties during startup, so the scan fails and pre-bundling is skipped. React is then bundled on
+    // first request under a new hash, and pages already open get "504 Outdated Optimize Dep" (a blank popup).
+    optimizeDeps: {
+      entries: ["src/entrypoints/**/*.html"],
+      include: ["react", "react-dom/client", "react/jsx-dev-runtime"],
+    },
+  }),
   // Dev-reload server; off 3000, where a Puppeteer ssh tunnel usually sits.
   dev: { server: { port: 4719 } },
   manifest: {

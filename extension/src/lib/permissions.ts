@@ -12,6 +12,21 @@ export const hasSitePermission = (url: string) => chrome.permissions.contains({ 
 /** Asks Chrome for access to `url`'s site. Must run in a click handler (popup / extension page). */
 export const requestSitePermission = (url: string) => chrome.permissions.request({ origins: originPatterns(url) });
 
+/**
+ * Every site at once (opt-in, from the settings or the popup). Chrome grants site access only in answer to a
+ * click on this computer, so a crawl started from the phone otherwise waits for someone at the desk.
+ * Local and private addresses stay blocked by blockedReason() whatever is granted.
+ */
+export const ALL_SITES = ["http://*/*", "https://*/*"];
+export const hasAllSites = () => chrome.permissions.contains({ origins: ALL_SITES });
+/** Must run in a click handler. */
+export const requestAllSites = () => chrome.permissions.request({ origins: ALL_SITES });
+/** Per-site grants are kept. */
+export const removeAllSites = () => chrome.permissions.remove({ origins: ALL_SITES });
+
+/** Several sites in one Chrome prompt (allowing sites in advance). Must run in a click handler. */
+export const requestSites = (urls: string[]) => chrome.permissions.request({ origins: [...new Set(urls.flatMap((u) => originPatterns(u)))] });
+
 const NOTIFICATION_PREFIX = "permission:";
 
 /** A crawl needs `origin`: remember it, badge the icon, and notify (once per site until it's answered). */

@@ -5,8 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SpecHarvest</title>
   </head>
-  <body class="w-[360px] max-w-full">
-    <div id="root"></div>
+  <!-- Inline, not Tailwind: the width must hold even when the stylesheet never loads. -->
+  <body style="width: 360px; max-width: 100%">
+    <!-- Replaced when the page's script mounts; stays only if it never loads (a dev build with no WXT dev server). -->
+    <div id="root"><p style="padding: 12px; font: 13px system-ui, sans-serif; color: #78716c">Loading SpecHarvest… If this stays, reload the extension (dev build: restart <code>npm run dev -w extension</code>).</p></div>
     <script type="module" src="./main.tsx"></script>
   </body>
 </html>

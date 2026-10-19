@@ -7,7 +7,8 @@
     <meta name="manifest.open_in_tab" content="true" />
   </head>
   <body>
-    <div id="root"></div>
+    <!-- Replaced when the page's script mounts; stays only if it never loads (a dev build with no WXT dev server). -->
+    <div id="root"><p style="padding: 24px; font: 14px system-ui, sans-serif; color: #78716c">Loading SpecHarvest… If this stays, reload the extension (dev build: restart <code>npm run dev -w extension</code>).</p></div>
     <script type="module" src="./main.tsx"></script>
   </body>
 </html>
