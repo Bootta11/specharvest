@@ -183,6 +183,17 @@ kept and cached. The job ends as *stopped* with `itemsRemaining` set, so
   item modal shows a "Same product" section (from `GET /api/items/:id` →
   `sameProduct`) listing the other listings you can see and the name variant
   each was grouped from.
+- **Same product only.** A lookup sends the title, identity, known specs (brand
+  and model first), the listing URL and the start of its description. The model
+  may use only values stated for that exact product (same brand, model and
+  sizes). For a generic or unbranded item, it may use only the shop's own page or
+  a page that clearly shows the same item. Each answer names the product and
+  brand it came from (`matched_product`, `matched_brand`). When the item has a
+  brand spec and the source names a different brand, the value is dropped and
+  cached as not found, whatever the model's confidence. The job log says
+  `weight_kg skipped — source is "…" (other brand)`. `sourceUrl` is the page
+  the model read the value from. A search citation stands in only when it is
+  the only one.
 - Before a paid lookup, a value that another listing of the same product states
   on **its own page** is copied (saved as a web fact with that listing's URL,
   confidence 0.95).

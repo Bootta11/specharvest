@@ -29,6 +29,8 @@ const answerSchema = z.object({
         unit: z.string().nullable().optional(),
         confidence: z.coerce.number().min(0).max(1).nullable().optional(),
         source_url: z.string().nullable().optional(),
+        matched_product: z.string().nullable().optional(),
+        matched_brand: z.string().nullable().optional(),
       }),
     )
     .default([]),
@@ -37,18 +39,27 @@ const answerSchema = z.object({
 const SYSTEM = `You research product specifications on the web. Use web search to find the requested attributes for the exact product described (match brand, model, variant/engine and year as closely as possible; manufacturer pages and reputable spec databases are best).
 
 Return ONLY one JSON object:
-{ "results": [ { "key": string, "value": number | boolean | string | null, "unit": string | null, "confidence": number, "source_url": string | null } ] }
+{ "results": [ { "key": string, "value": number | boolean | string | null, "unit": string | null, "confidence": number, "source_url": string | null, "matched_product": string | null, "matched_brand": string | null } ] }
 
 - One result per requested key, using the key exactly as given.
+- Only use values stated for this exact product: same brand, model and sizes/variant. A similar product from another brand, or in other sizes, does not count — value null.
+- When the brand is unknown or generic, take a value only from the shop listing itself or a page that clearly shows the same item (same sizes, article number); otherwise null.
 - value in the requested unit and type (convert if the source uses another unit, e.g. hp -> kW: kW = hp × 0.7355). null if you could not find it.
 - confidence 0..1: how sure you are this value applies to this exact variant (lower it when only a different engine/trim/year was found).
-- source_url: the page the value came from.
+- source_url: the page the value was read from; null rather than a guess.
+- matched_product / matched_brand: the product name and brand as written on that page (null when value is null).
 - If sources disagree, pick the value for the standard configuration (e.g. boot volume with rear seats up, base engine of the named variant) and lower the confidence a little.
 - Your final message must be the JSON object only — no explanations before or after it.`;
 
+/** Spec keys naming the maker or model — always sent with a lookup and used to check its source. */
+const BRAND_KEY = /brand|manufacturer|maker|marka|proizvo/i;
+const MODEL_KEY = /model/i;
+
 function contextSpecs(item: Item): string {
+  const rank = (k: string) => (BRAND_KEY.test(k) ? 0 : MODEL_KEY.test(k) ? 1 : 2);
   return Object.entries(item.specs)
     .filter(([, v]) => typeof v !== "boolean")
+    .sort((a, b) => rank(a[0]) - rank(b[0]))
     .slice(0, 15)
     .map(([k, v]) => `${k}: ${v}`)
     .join(", ");
@@ -60,6 +71,32 @@ interface LookupResult {
   unit: string | null;
   confidence: number | null;
   sourceUrl: string | null;
+  /** The source's product name, set when its brand differs from the item's (the value was dropped). */
+  otherProduct?: string;
+}
+
+const normalizeName = (s: string) =>
+  ` ${s
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()} `;
+
+/**
+ * False when the item states a brand and the page the value came from names another one
+ * ("was" vs "Rorence Set zdjela…"). Nothing to compare (no brand, no matched name) counts as a match.
+ */
+export function sourceMatches(item: Item, matched: { matched_product?: string | null; matched_brand?: string | null }): boolean {
+  const brand = Object.entries(item.specs).find(([k, v]) => BRAND_KEY.test(k) && typeof v === "string" && v.trim())?.[1] as string | undefined;
+  const source = [matched.matched_brand, matched.matched_product].filter((s) => s?.trim()).join(" ");
+  if (!brand || !source) return true;
+  return normalizeName(source).includes(normalizeName(brand));
+}
+
+function listingContext(item: Item): string {
+  const description = item.description?.replace(/\s+/g, " ").trim().slice(0, 600);
+  return `${isHttpUrl(item.url) ? `\nShop listing: ${item.url}` : ""}${description ? `\nDescription: ${description}` : ""}`;
 }
 
 const attrLines = (attrs: MissingAttribute[]) => attrs.map((a) => `- ${a.key}: ${a.label} (${a.type}${a.unit ? `, unit: ${a.unit}` : ""})`).join("\n");
@@ -72,20 +109,21 @@ async function lookup(item: Item, attrs: MissingAttribute[], extras: MissingAttr
   const also = extras.length
     ? `\n\nAlso fill these if the pages you found state them for this exact product — don't search specifically for them; null otherwise:\n${attrLines(extras)}`
     : "";
-  const user = `Product: ${item.title}\nIdentity: ${lookupIdentity(item)}\nKnown specs: ${contextSpecs(item) || "(none)"}\n\nFind:\n${attrLines(attrs)}${also}`;
+  const user = `Product: ${item.title}\nIdentity: ${lookupIdentity(item)}${listingContext(item)}\nKnown specs: ${contextSpecs(item) || "(none)"}\n\nFind:\n${attrLines(attrs)}${also}`;
   // The provider's own web search (OpenRouter: WEB_SEARCH_ENGINE / WEB_SEARCH_MAX_USES, see llm/providers.ts).
   const res = await askForJson(answerSchema, SYSTEM, user, { purpose: "web-lookup", maxTokens: 1500 + 60 * extras.length, webSearch: true });
   const byKey = new Map(res.data.results.map((r) => [r.key, r]));
-  const results = [...attrs, ...extras].map((a) => {
+  // The first search hit isn't necessarily where a value came from: only a lone citation stands in for a missing source_url.
+  const onlyCitation = res.citations.length === 1 && isHttpUrl(res.citations[0].url) ? res.citations[0].url : null;
+  const results = [...attrs, ...extras].map((a): LookupResult => {
     const r = byKey.get(a.key);
     const value = r?.value == null ? null : coerceToType(r.value, a.type);
-    return {
-      key: a.key,
-      value,
-      unit: r?.unit ?? a.unit ?? null,
-      confidence: r?.confidence ?? null,
-      sourceUrl: [r?.source_url, res.citations[0]?.url].find(isHttpUrl) ?? null,
-    };
+    const base = { key: a.key, unit: r?.unit ?? a.unit ?? null, sourceUrl: isHttpUrl(r?.source_url) ? r.source_url : onlyCitation };
+    // Another brand's product: not found (cached as such), whatever the model's confidence.
+    if (value !== null && r && !sourceMatches(item, r)) {
+      return { ...base, value: null, confidence: Math.min(r.confidence ?? 0, 0.3), otherProduct: (r.matched_product || r.matched_brand)!.trim() };
+    }
+    return { ...base, value, confidence: r?.confidence ?? null };
   });
   return { results, webSearches: res.webSearches };
 }
@@ -410,6 +448,7 @@ async function runEnrichment(jobId: number, input: EnrichInput, signal: AbortSig
         const extraFound: string[] = [];
         for (const r of res.results) {
           const attr = attrs.find((a) => a.key === r.key);
+          if (r.otherProduct) jobLog(jobId, `${identity}: ${r.key} skipped — source is "${r.otherProduct.slice(0, 80)}" (other brand)`, "warn");
           const found = r.value !== null && (r.confidence ?? 0) >= env.ENRICH_MIN_CONFIDENCE;
           const key = db.canonicalKey(r.key);
           if (!attr) {
@@ -423,7 +462,8 @@ async function runEnrichment(jobId: number, input: EnrichInput, signal: AbortSig
           db.saveWebFact({ identity, key, value: found ? r.value : null, unit: r.unit, sourceUrl: r.sourceUrl, confidence: r.confidence, found });
           const fact = db.getWebFact(identity, key)!;
           for (const item of g.items) if (applyFact(item, attr, fact)) (applied++, changed.add(item));
-          jobLog(jobId, found ? `${identity}: ${r.key} = ${r.value}${r.unit ? " " + r.unit : ""} (${Math.round((r.confidence ?? 0) * 100)}%)` : `${identity}: ${r.key} not found${r.value !== null ? ` (low confidence ${r.confidence})` : ""}`);
+          if (!r.otherProduct)
+            jobLog(jobId, found ? `${identity}: ${r.key} = ${r.value}${r.unit ? " " + r.unit : ""} (${Math.round((r.confidence ?? 0) * 100)}%)` : `${identity}: ${r.key} not found${r.value !== null ? ` (low confidence ${r.confidence})` : ""}`);
         }
         if (extraFound.length) jobLog(jobId, `${identity}: +${extraFound.length} extra specs cached for later searches (${extraFound.join(", ")})`);
       } catch (err) {
