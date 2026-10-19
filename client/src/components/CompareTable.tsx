@@ -1,7 +1,7 @@
 import type { Item, QueryPlan, SpecKey } from "@specharvest/shared";
 import { formatSpecValue, specLabel } from "@specharvest/shared";
-import { safeUrl } from "../lib/api.ts";
 import { formatPrice, GlobeIcon, GoneBadge, PageIcon, SourceBadge } from "./ItemCard.tsx";
+import { Thumb } from "./ViewToggle.tsx";
 
 interface Props {
   items: Item[];
@@ -73,11 +73,7 @@ export function CompareTable({ items, keys, fieldKeys, sort, onSort, pendingKeys
                 <td className="px-3 py-2 align-top text-stone-400">{i + 1}</td>
                 <td className="sticky left-0 z-10 max-w-80 bg-white px-3 py-2 align-top group-hover:bg-stone-50 dark:bg-stone-900 dark:group-hover:bg-stone-800">
                   <button onClick={() => onOpen(item)} className="flex w-full min-w-0 items-center gap-3 text-left">
-                    {safeUrl(item.mainImage) ? (
-                      <img src={safeUrl(item.mainImage)} alt="" loading="lazy" referrerPolicy="no-referrer" className="size-10 shrink-0 rounded object-cover" />
-                    ) : (
-                      <span className="size-10 shrink-0 rounded bg-stone-100 dark:bg-stone-800" />
-                    )}
+                    <Thumb src={item.mainImage} className="size-10 shrink-0 rounded" />
                     <span className="line-clamp-2 min-w-0 font-medium leading-snug hover:text-brand-700 dark:hover:text-brand-500">{item.title}</span>
                     <GoneBadge item={item} />
                   </button>
@@ -104,6 +100,7 @@ export function CompareTable({ items, keys, fieldKeys, sort, onSort, pendingKeys
           <li key={item.id} className="p-3">
             <button onClick={() => onOpen(item)} className="flex w-full items-start gap-3 text-left">
               <span className="w-5 shrink-0 pt-0.5 text-sm text-stone-400">{i + 1}</span>
+              <Thumb src={item.mainImage} className="size-12 shrink-0 rounded" />
               <span className="line-clamp-2 min-w-0 flex-1 font-medium leading-snug">{item.title}</span>
               <GoneBadge item={item} />
             </button>

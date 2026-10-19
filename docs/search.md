@@ -108,10 +108,14 @@ searches the English name and the page's own wording.
 
 ## Results list & sources
 
-When the plan names any fields (sort, filters, `show`, missing attributes), the
-UI defaults to a **List** view: one row per item, a column per requested field
-(sorted-by first), e.g. `biggest boot space` → Boot capacity 540 L, 420 L,
-350 L… The Cards/List choice is remembered per browser.
+Results switch between **List** and **Tiles** at any time. List is one row per
+item with a small photo and a column per requested field (price first, then the
+sorted-by one), e.g. `biggest boot space` → Boot capacity 540 L, 420 L, 350 L…
+Tiles show a large photo per item, for telling items apart by how they look; the
+*can't be judged yet* list follows the same choice. Every items list in the app
+(search, the [crawl picker](crawling.md#pick-items-before-extracting), a
+collection's products) has this switch, each remembered separately per browser
+or app.
 
 Every value carries its source: **Listing** (scraped from the item's page,
 links to it) or 🌐 *host* (web lookup, links to `sourceUrl`, confidence in the

@@ -48,7 +48,7 @@ export function sameProductOf(item: Pick<Item, "id" | "identity" | "title">, sco
   if (totalOthers <= 0) return null;
   return {
     canonical,
-    listings: others.map(({ id, collectionId, title, url, identity, price, currency, goneAt }) => ({ id, collectionId, title, url, identity, price, currency, goneAt })),
+    listings: others.map(({ id, collectionId, title, url, identity, price, currency, goneAt, mainImage }) => ({ id, collectionId, title, url, identity, price, currency, goneAt, mainImage })),
     more: Math.max(0, totalOthers - others.length),
   };
 }
@@ -59,8 +59,8 @@ export function productGroups(items: Item[]): ProductGroup[] {
   for (const item of items) {
     const canonical = resolvedIdentity(item);
     const g = groups.get(canonical) ?? { canonical, listings: [] };
-    const { id, collectionId, title, url, identity, price, currency, goneAt } = item;
-    g.listings.push({ id, collectionId, title, url, identity, price, currency, goneAt });
+    const { id, collectionId, title, url, identity, price, currency, goneAt, mainImage } = item;
+    g.listings.push({ id, collectionId, title, url, identity, price, currency, goneAt, mainImage });
     groups.set(canonical, g);
   }
   return [...groups.values()].sort((a, b) => b.listings.length - a.listings.length || a.canonical.localeCompare(b.canonical));

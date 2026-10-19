@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import type { Collection, CollectionProducts, GroupingMode, MatchSuggestion } from "@specharvest/shared";
+import type { Collection, CollectionProducts, GroupingMode, MatchSuggestion, ProductGroup } from "@specharvest/shared";
 import { api, safeUrl } from "../lib/api.ts";
 import { formatPrice, GoneBadge } from "./ItemCard.tsx";
 import { Modal, Notice } from "./Modal.tsx";
+import { Thumb, useViewMode, ViewToggle } from "./ViewToggle.tsx";
+
+type Listing = ProductGroup["listings"][number];
 
 /** A collection's products: listings grouped by product, name variants included. */
 export function ProductsModal({ collection, onClose, onGrouped }: { collection: Collection; onClose: () => void; onGrouped?: () => void }) {
@@ -13,6 +16,7 @@ export function ProductsModal({ collection, onClose, onGrouped }: { collection: 
   const [busy, setBusy] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
   const [grouping, setGrouping] = useState<GroupingMode>(collection.grouping);
+  const [view, setView] = useViewMode("specharvest.view.products");
 
   useEffect(() => {
     let live = true;
@@ -43,6 +47,8 @@ export function ProductsModal({ collection, onClose, onGrouped }: { collection: 
       setBusy(null);
     }
   };
+
+  const split = (identity: string) => act(`split:${identity}`, () => api.splitProductName(collection.id, identity));
 
   const multi = useMemo(() => data?.products.filter((p) => p.listings.length > 1).length ?? 0, [data]);
   const shown = useMemo(() => {
@@ -105,6 +111,7 @@ export function ProductsModal({ collection, onClose, onGrouped }: { collection: 
               <input type="checkbox" className="size-4 accent-brand-700" checked={multiOnly} onChange={(e) => setMultiOnly(e.target.checked)} />
               Only products with several listings
             </label>
+            <ViewToggle value={view} onChange={setView} />
           </div>
 
           {shown.length === 0 ? (
@@ -128,35 +135,41 @@ export function ProductsModal({ collection, onClose, onGrouped }: { collection: 
                         </span>
                       )}
                     </div>
-                    <ul className="mt-1 space-y-0.5 pl-3 text-sm">
-                      {p.listings.map((l) => (
-                        <li key={l.id} className="flex flex-wrap items-baseline gap-x-2">
-                          <a href={safeUrl(l.url)} target="_blank" rel="noreferrer" className="min-w-0 flex-1 truncate text-brand-700 hover:underline dark:text-brand-500" title={l.title}>
-                            {l.title} ↗
-                          </a>
-                          <GoneBadge item={l} />
-                          {l.price != null && <span className="shrink-0 text-xs text-stone-500">{formatPrice(l.price, l.currency)}</span>}
-                          {l.identity && l.identity !== p.canonical && (
-                            <span className="flex w-full min-w-0 items-baseline gap-2 text-xs text-stone-500">
-                              <span className="min-w-0 truncate" title={l.identity}>
-                                as “{l.identity}”
-                              </span>
-                              {collection.canEdit && (
-                                <button
-                                  type="button"
-                                  className="shrink-0 font-medium text-red-700 hover:underline disabled:opacity-50 dark:text-red-300"
-                                  disabled={busy !== null}
-                                  onClick={() => act(`split:${l.identity}`, () => api.splitProductName(collection.id, l.identity!))}
-                                  title="Take this name out of the group — it won't be grouped with it again"
-                                >
-                                  {busy === `split:${l.identity}` ? "Separating…" : "Not the same"}
-                                </button>
-                              )}
-                            </span>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
+                    {view === "list" ? (
+                      <ul className="mt-1.5 space-y-1.5 pl-3 text-sm">
+                        {p.listings.map((l) => (
+                          <li key={l.id} className="flex min-w-0 items-start gap-2.5">
+                            <Thumb src={l.mainImage} className="size-10 shrink-0 rounded" />
+                            <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2">
+                              <a href={safeUrl(l.url)} target="_blank" rel="noreferrer" className="min-w-0 flex-1 truncate text-brand-700 hover:underline dark:text-brand-500" title={l.title}>
+                                {l.title} ↗
+                              </a>
+                              <GoneBadge item={l} />
+                              {l.price != null && <span className="shrink-0 text-xs text-stone-500">{formatPrice(l.price, l.currency)}</span>}
+                              {variantOf(l, p.canonical) && <SplitName listing={l} canEdit={collection.canEdit} busy={busy} onSplit={split} />}
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <ul className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+                        {p.listings.map((l) => (
+                          <li key={l.id} className={`flex min-w-0 flex-col overflow-hidden rounded-lg border border-stone-200 dark:border-stone-800 ${l.goneAt ? "opacity-60" : ""}`}>
+                            <a href={safeUrl(l.url)} target="_blank" rel="noreferrer" className="relative block" title={l.title} aria-label={`Open ${l.title}`}>
+                              <Thumb src={l.mainImage} placeholder className="aspect-[4/3] w-full" />
+                              <GoneBadge item={l} className="absolute left-1.5 top-1.5 shadow-sm" />
+                            </a>
+                            <div className="flex min-w-0 flex-1 flex-col gap-0.5 p-2 text-sm">
+                              <a href={safeUrl(l.url)} target="_blank" rel="noreferrer" className="line-clamp-2 leading-snug text-brand-700 hover:underline dark:text-brand-500" title={l.title}>
+                                {l.title}
+                              </a>
+                              {l.price != null && <span className="text-xs font-medium text-stone-600 dark:text-stone-300">{formatPrice(l.price, l.currency)}</span>}
+                              {variantOf(l, p.canonical) && <SplitName listing={l} canEdit={collection.canEdit} busy={busy} onSplit={split} />}
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
                   </li>
                 );
               })}
@@ -165,6 +178,32 @@ export function ProductsModal({ collection, onClose, onGrouped }: { collection: 
         </div>
       )}
     </Modal>
+  );
+}
+
+/** A listing grouped under a differently spelled name. */
+const variantOf = (l: Listing, canonical: string) => !!l.identity && l.identity !== canonical;
+
+/** The name a listing was grouped by, and (for owners) "Not the same" to take it out of the group. */
+function SplitName({ listing, canEdit, busy, onSplit }: { listing: Listing; canEdit: boolean; busy: string | null; onSplit: (identity: string) => void }) {
+  const identity = listing.identity!;
+  return (
+    <span className="flex w-full min-w-0 flex-wrap items-baseline gap-x-2 text-xs text-stone-500">
+      <span className="min-w-0 truncate" title={identity}>
+        as “{identity}”
+      </span>
+      {canEdit && (
+        <button
+          type="button"
+          className="shrink-0 py-1 font-medium text-red-700 hover:underline disabled:opacity-50 dark:text-red-300"
+          disabled={busy !== null}
+          onClick={() => onSplit(identity)}
+          title="Take this name out of the group — it won't be grouped with it again"
+        >
+          {busy === `split:${identity}` ? "Separating…" : "Not the same"}
+        </button>
+      )}
+    </span>
   );
 }
 

@@ -9,22 +9,13 @@ import { CompareTable } from "../components/CompareTable.tsx";
 import { FilterIcon, FilterPanel } from "../components/FilterPanel.tsx";
 import { Modal } from "../components/Modal.tsx";
 import { SortMenu, type Sort } from "../components/SortMenu.tsx";
+import { Thumb, useViewMode, ViewToggle } from "../components/ViewToggle.tsx";
 
-type ViewMode = "list" | "cards";
-const VIEW_STORAGE = "specharvest.resultsView";
 const FILTERS_STORAGE = "specharvest.filtersOpen";
 /** Panel changes are batched this long before searching (one request for quick clicks). */
 const FILTER_DEBOUNCE_MS = 350;
 /** Tailwind `lg`: the filter panel is a sidebar from here up, a bottom sheet below. */
 const DESKTOP_QUERY = "(min-width: 64rem)";
-
-function readView(): ViewMode {
-  try {
-    return localStorage.getItem(VIEW_STORAGE) === "cards" ? "cards" : "list";
-  } catch {
-    return "list";
-  }
-}
 
 function useDesktop(): boolean {
   const [desktop, setDesktop] = useState(() => window.matchMedia(DESKTOP_QUERY).matches);
@@ -99,15 +90,7 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
   const [showUnknown, setShowUnknown] = useState(false);
   const [includeGone, setIncludeGoneState] = useState(() => storageGet("specharvest.includeGone") === "1");
   const [recent, setRecent] = useState<RecentSearch[]>([]);
-  const [view, setViewState] = useState<ViewMode>(readView);
-  const setView = (v: ViewMode) => {
-    setViewState(v);
-    try {
-      localStorage.setItem(VIEW_STORAGE, v);
-    } catch {
-      /* storage unavailable — keep it for this session only */
-    }
-  };
+  const [view, setView] = useViewMode("specharvest.resultsView");
   const enrich = useJobStream(enrichJobId);
   const seq = useRef(0);
   /** Keys set in the filter panel: their conditions stay when a new request is typed. */
@@ -275,8 +258,6 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
   const mixedCurrencySort = plan?.sort?.key === "price" && new Set(result?.items.map((i) => i.currency).filter(Boolean)).size > 1;
   const enriching = enrichJobId !== null && enrich.job && (enrich.job.status === "running" || enrich.job.status === "queued");
   const pendingKeys = enriching ? new Set(highlightKeys) : new Set<string>();
-  const hasFields = highlightKeys.some((k) => k !== "price");
-  const mode: ViewMode = hasFields ? view : "cards";
 
   // What "can't be judged yet" items lack that a web lookup can fill in: specs only (not price or other listing
   // fields), and not what the banner already offers to look up.
@@ -285,6 +266,7 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
     .filter((k) => keys.has(k) && !isListingField(k) && !offered.has(k) && result?.unknown.some((i) => i.specs[k] === undefined))
     .map((k) => ({ key: k, type: keys.get(k)!.type, unit: keys.get(k)!.unit, label: humanizeKey(k).toLowerCase() }))
     .slice(0, 5);
+  const tileGrid = `grid grid-cols-1 gap-4 sm:grid-cols-2 ${sidebar ? "xl:grid-cols-3" : "lg:grid-cols-3 xl:grid-cols-4"}`;
   const missingIn = (item: Item) => [
     ...(item.price === null && plan?.filters.some((f) => f.key === "price") ? ["price"] : []),
     ...new Set(plan?.filters.filter((f) => item.specs[f.key] === undefined && !isListingField(f.key)).map((f) => humanizeKey(f.key).toLowerCase())),
@@ -557,29 +539,15 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
                 </label>
                 {loading && <span className="animate-pulse">updating…</span>}
                 <SortMenu sort={plan?.sort ?? null} keys={keys} semantic={!!plan?.semanticText} onChange={chooseSort} />
-                {hasFields && (
-                  <span className="inline-flex rounded-lg border border-stone-200 p-0.5 text-xs dark:border-stone-700" role="group" aria-label="Results view">
-                    {(["list", "cards"] as const).map((v) => (
-                      <button
-                        key={v}
-                        type="button"
-                        onClick={() => setView(v)}
-                        aria-pressed={mode === v}
-                        className={`rounded-md px-2.5 py-1 font-medium ${mode === v ? "bg-brand-600 text-white" : "text-stone-600 hover:text-stone-900 dark:text-stone-400 dark:hover:text-stone-100"}`}
-                      >
-                        {v === "list" ? "List" : "Cards"}
-                      </button>
-                    ))}
-                  </span>
-                )}
+                <ViewToggle value={view} onChange={setView} />
               </span>
             </div>
           )}
 
-          {result && result.items.length > 0 && mode === "list" ? (
+          {result && result.items.length > 0 && view === "list" ? (
             <CompareTable items={result.items} keys={keys} fieldKeys={highlightKeys} sort={plan?.sort ?? null} onSort={chooseSort} pendingKeys={pendingKeys} onOpen={setOpen} />
           ) : (
-            <div className={`grid grid-cols-1 gap-4 sm:grid-cols-2 ${sidebar ? "xl:grid-cols-3" : "lg:grid-cols-3 xl:grid-cols-4"}`}>
+            <div className={tileGrid}>
               {result?.items.map((item) => (
                 <ItemCard key={item.id} item={item} keys={keys} highlightKeys={highlightKeys} onOpen={() => setOpen(item)} />
               ))}
@@ -602,11 +570,19 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
                   </button>
                 )}
               </div>
-              {showUnknown && (
+              {showUnknown && view === "tiles" && (
+                <div className={`border-t border-stone-200 p-3 dark:border-stone-800 ${tileGrid}`}>
+                  {result.unknown.map((item) => (
+                    <ItemCard key={item.id} item={item} keys={keys} highlightKeys={highlightKeys} onOpen={() => setOpen(item)} />
+                  ))}
+                </div>
+              )}
+              {showUnknown && view === "list" && (
                 <ul className="divide-y divide-stone-200 border-t border-stone-200 text-sm dark:divide-stone-800 dark:border-stone-800">
                   {result.unknown.map((item) => (
                     <li key={item.id}>
                       <button className="flex w-full items-center gap-3 px-4 py-2 text-left hover:bg-stone-50 dark:hover:bg-stone-800/50" onClick={() => setOpen(item)}>
+                        <Thumb src={item.mainImage} className="size-10 shrink-0 rounded" />
                         <span className="min-w-0 flex-1 truncate">{item.title}</span>
                         <span className="shrink-0 text-stone-500">{formatPrice(item.price, item.currency)}</span>
                         <span className="hidden shrink-0 text-xs text-stone-400 sm:inline">

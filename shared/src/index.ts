@@ -74,7 +74,7 @@ export interface SameProduct {
   /** The name web facts are stored under. */
   canonical: string;
   /** Other listings of this product the viewer can see (not including the item itself). */
-  listings: Array<Pick<Item, "id" | "collectionId" | "title" | "url" | "identity" | "price" | "currency" | "goneAt">>;
+  listings: Array<Pick<Item, "id" | "collectionId" | "title" | "url" | "identity" | "price" | "currency" | "goneAt" | "mainImage">>;
   /** How many more matched than are listed. */
   more: number;
 }

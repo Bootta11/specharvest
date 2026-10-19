@@ -278,7 +278,7 @@ in the same job:
    don't know yet. The job then **parks** in status `picking`: it holds no job slot or browser page, waits without
    a time limit, survives restarts as is, and its user gets a notification (the *crawl done* setting).
 2. **Extract**: the user ticks items in the picker (nothing is ticked by default; filter, *Pick all/shown*,
-   *Only new*) and starts it (`POST /api/jobs/:id/pick`). Only the picked URLs are sorted like walked cards
+   *Only new*; *List* or *Tiles* with large card images) and starts it (`POST /api/jobs/:id/pick`). Only the picked URLs are sorted like walked cards
    (new → extract; saved → change check per `mode`, using the card text from the walk), without loading the
    listing again. Hand-added items aren't re-checked.
 
