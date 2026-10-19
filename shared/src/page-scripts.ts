@@ -180,7 +180,9 @@ function nextControl(args: { selector: string }): { found: boolean; href: string
   }
   if (!el || el.hasAttribute("disabled") || el.getAttribute("aria-disabled") === "true") return { found: false, href: null };
   const a = (el.tagName === "A" ? el : el.closest("a")) as HTMLAnchorElement | null;
-  return { found: true, href: a?.href && /^https?:/.test(a.href) ? a.href : null };
+  // href="#" (Bootstrap-Vue pagers and the like) points back at this page: a JS control to click, not a link to follow.
+  const samePage = !!a?.href && a.href.split("#")[0] === location.href.split("#")[0];
+  return { found: true, href: a?.href && /^https?:/.test(a.href) && !samePage ? a.href : null };
 }
 
 /** True once a card matching `selector` links somewhere not in `prev` (a JS "next" click swapped the cards). */

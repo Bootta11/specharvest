@@ -75,7 +75,9 @@ proper structure.
 
 Walkers collect item URLs (deduped, tracking params stripped) until
 `maxPages` / `maxItems`, an empty page, or a page with nothing new. A JS-only
-"next" button is clicked and the walker waits for the card set to change.
+"next" button is clicked and the walker waits for the card set to change. A
+"next" link that only points back at the same page (`href="#"`, as in
+Bootstrap-Vue pagers) counts as such a button: it is clicked, not followed.
 
 Items are **indexed while the walk goes on**: each listing page's new cards are
 sorted right away (new → extract, existing → change check) and queued for the

@@ -94,6 +94,13 @@ describe("page scripts", () => {
     expect(runSerialized("nextControl", { selector: ".missing" })).toEqual({ found: false, href: null });
   });
 
+  it("nextControl: a link back to this page (href=\"#\") is a control to click, not a link", () => {
+    setPage("https://shop.example/list?query=x", `<a class="hash" href="#">›</a><a class="anchor" href="#top">›</a><a class="self" href="/list?query=x">›</a>`);
+    expect(runSerialized("nextControl", { selector: ".hash" })).toEqual({ found: true, href: null });
+    expect(runSerialized("nextControl", { selector: ".anchor" })).toEqual({ found: true, href: null });
+    expect(runSerialized("nextControl", { selector: ".self" })).toEqual({ found: true, href: null });
+  });
+
   it("cardsChangedSince: true only when a new card link shows up", () => {
     setPage("https://shop.example/list", `<a class="card" href="/item/1">1</a>`);
     expect(runSerialized("cardsChangedSince", { selector: ".card", prev: ["https://shop.example/item/1"] })).toBe(false);

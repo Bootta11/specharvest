@@ -49,3 +49,31 @@ describe("walkListing by page number", () => {
     expect(visited).toEqual([1, 2, 3]);
   });
 });
+
+describe("walkListing by next control", () => {
+  it("clicks a next control without a real href and waits for the cards to change", async () => {
+    // A JS pager (href="#"): clicking swaps the cards in place; the last page has no enabled next control.
+    let current = 1;
+    const cards = () => range((current - 1) * 16 + 1, Math.min(current * 16, 41)).map((i) => ({ url: `https://93.184.216.34/item/${i}`, cardText: `Item ${i}` }));
+    const page = {
+      runner: "server",
+      async goto() {
+        return { status: 200 };
+      },
+      async run(name: string, args?: { prev?: string[] }) {
+        if (name === "collectCards") return cards();
+        if (name === "nextControl") return current < 3 ? { found: true, href: null } : { found: false, href: null };
+        if (name === "cardsChangedSince") return cards().some((c) => !args!.prev!.includes(c.url));
+        if (name === "scrollStep") return true;
+        return name === "isBotChallenge" ? false : null;
+      },
+      async click() {
+        current++;
+      },
+      async waitForNetworkIdle() {},
+    } as PageDriver;
+    const result = await walkListing(page, BASE, { ...detection, paginationType: "pages", pageParam: null, nextSelector: "a[aria-label='Goto next page']" }, { maxPages: 10, maxItems: 500, onPage: () => {} });
+    expect(result.items.size).toBe(41);
+    expect(result.complete).toBe(true);
+  });
+});
