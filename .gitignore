@@ -3,6 +3,8 @@ node_modules
 
 # Build output
 dist
+# The Android app's live-update bundle (scripts/app-bundle.mjs)
+client/dist-app*
 *.tsbuildinfo
 .vite/
 coverage/
@@ -29,3 +31,7 @@ data/
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Signing keys belong outside the repo (docs/app-updates.md#one-time-setup)
+*.pem
+*.jks

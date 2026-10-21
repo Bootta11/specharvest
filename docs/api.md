@@ -92,6 +92,8 @@ See [LLM providers](llm-providers.md). Tiers: `fast`, `smart`, `web`.
 | Method & path | Body / query | Returns |
 | --- | --- | --- |
 | `GET /api/health` (also `HEAD`) | public | `{ok, status, checks: {database: {ok, latencyMs}}, uptimeSeconds, timestamp}`; 503 with `ok:false` if the DB is down |
+| `GET /api/app/bundle` | public | the Android app's live UI update `{version, url, checksum, minVersionCode, signature}` (see [app updates](app-updates.md#live-ui-updates)); 404 when the build has none |
+| `GET /api/app/bundle.zip` | public | that UI as a zip |
 | `GET /api/config` | | `version` (commit), proxy flag, `extensionStoreUrl`, crawl `defaults` and your `limits` (`{maxPages, maxItems}`), and for you: `llmConfigured`, `webSearchEnabled`, `llm: {effective, unavailable}` per tier |
 | `GET /api/collections` | | readable collections with item counts, `llmCost` (USD), `ownerEmail`, `isShared`, `grouping`, `canEdit` |
 | `PATCH /api/collections/:id` | `{name?, isShared?, grouping?: "strict" \| "loose"}` (owner/admin; switching to `loose` groups waiting single-candidate matches) | collection |

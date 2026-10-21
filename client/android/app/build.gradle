@@ -1,11 +1,20 @@
 apply plugin: 'com.android.application'
 
-// Release signing for Google Play (docs/google-play.md): keystore.properties is git-ignored, see keystore.properties.example.
-def keystorePropertiesFile = rootProject.file('keystore.properties')
-def keystoreProperties = new Properties()
-if (keystorePropertiesFile.exists()) {
-    keystorePropertiesFile.withInputStream { keystoreProperties.load(it) }
+// Release signing (both files git-ignored, see the *.example files):
+// - app-signing.properties: the app signing key, signs the direct APK (Zealot) — docs/app-updates.md;
+// - keystore.properties: the upload key, signs the Play bundle — docs/google-play.md.
+def loadProperties(String name) {
+    def file = rootProject.file(name)
+    def props = new Properties()
+    if (file.exists()) file.withInputStream { props.load(it) }
+    return file.exists() ? props : null
 }
+def appSigning = loadProperties('app-signing.properties')
+def uploadSigning = loadProperties('keystore.properties')
+
+// CI passes the version from the git tag (vX.Y.Z → -PversionName=X.Y.Z -PversionCode=X*10000+Y*100+Z).
+def appVersionCode = (project.findProperty('versionCode') ?: '1') as Integer
+def appVersionName = (project.findProperty('versionName') ?: '1.0') as String
 
 android {
     namespace = "dev.bootta.specharvest"
@@ -14,9 +23,9 @@ android {
         applicationId "dev.bootta.specharvest"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        // Raise versionCode by 1 for every upload to Google Play; versionName is what users see.
-        versionCode 1
-        versionName "1.0"
+        // From the git tag in CI (see above); every Play upload and Zealot release needs a higher versionCode.
+        versionCode appVersionCode
+        versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -24,21 +33,39 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    buildFeatures {
+        buildConfig = true
+    }
     signingConfigs {
-        if (keystorePropertiesFile.exists()) {
-            release {
-                storeFile rootProject.file(keystoreProperties['storeFile'])
-                storePassword keystoreProperties['storePassword']
-                keyAlias keystoreProperties['keyAlias']
-                keyPassword keystoreProperties['keyPassword']
+        [app: appSigning, upload: uploadSigning].each { name, props ->
+            if (props != null) {
+                create(name) {
+                    storeFile rootProject.file(props['storeFile'])
+                    storePassword props['storePassword']
+                    keyAlias props['keyAlias']
+                    keyPassword props['keyPassword']
+                }
             }
         }
     }
+    // direct: the APK on Zealot, which updates itself (src/direct). play: the Google Play bundle, which can't.
+    flavorDimensions = ["store"]
+    productFlavors {
+        direct {
+            dimension "store"
+            if (appSigning != null) signingConfig signingConfigs.app
+        }
+        play {
+            dimension "store"
+            if (uploadSigning != null) signingConfig signingConfigs.upload
+        }
+    }
     buildTypes {
+        debug {
+            // Debug builds use the debug key, whatever the flavor says.
+            signingConfig signingConfigs.debug
+        }
         release {
-            if (keystorePropertiesFile.exists()) {
-                signingConfig signingConfigs.release
-            }
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }

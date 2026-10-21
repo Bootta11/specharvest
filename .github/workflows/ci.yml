@@ -35,6 +35,8 @@ jobs:
       - run: npm audit --omit=dev --audit-level=high
       - run: npm run typecheck
       - run: npm test
+      # UI bundles must not reach APKs with older native code (docs/app-updates.md#the-native-baseline).
+      - run: node scripts/native-baseline.mjs --check
 
   image:
     runs-on: ubuntu-latest
@@ -48,6 +50,8 @@ jobs:
           load: true
           tags: specharvest:ci
           build-args: GIT_SHA=${{ github.sha }}
+          # Signs the Android app's live-update bundle (docs/app-updates.md#bundle-signing); empty on fork PRs.
+          secrets: bundle_key=${{ secrets.APP_BUNDLE_SIGNING_KEY }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Scan for fixable CRITICAL/HIGH vulnerabilities
@@ -104,5 +108,97 @@ jobs:
           provenance: mode=max
           sbom: true
           build-args: GIT_SHA=${{ github.sha }}
+          # Signs the Android app's live-update bundle (docs/app-updates.md#bundle-signing); empty on fork PRs.
+          secrets: bundle_key=${{ secrets.APP_BUNDLE_SIGNING_KEY }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # Android app on v* tags (docs/app-updates.md#releasing): the direct APK goes to Zealot, the Play bundle is kept
+  # as an artifact. The android-release environment holds the signing secrets and only allows tags.
+  android:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: android-release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+      - run: npm install -g npm@11 --no-audit --no-fund
+      - run: npm ci --no-audit --no-fund
+      - name: Version from the tag
+        id: version
+        run: |
+          name="${GITHUB_REF_NAME#v}"
+          if ! [[ "$name" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then echo "Tag must be vX.Y.Z, got $GITHUB_REF_NAME"; exit 1; fi
+          code=$(( BASH_REMATCH[1] * 10000 + BASH_REMATCH[2] * 100 + BASH_REMATCH[3] ))
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+      - name: Build the web UI into the Android project
+        run: npm run cap:sync --workspace client
+        env:
+          GIT_SHA: ${{ github.sha }}
+      - name: Signing keys
+        env:
+          APP_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          APP_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          APP_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          APP_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          UPLOAD_KEYSTORE: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_BASE64 }}
+          UPLOAD_STORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
+          UPLOAD_KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
+          UPLOAD_KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
+        run: |
+          # Java properties: backslashes would be read as escapes.
+          props() { printf 'storeFile=%s\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' "$1" "${2//\\/\\\\}" "$3" "${4//\\/\\\\}"; }
+          echo "$APP_KEYSTORE" | base64 -d > "$RUNNER_TEMP/app.jks"
+          props "$RUNNER_TEMP/app.jks" "$APP_STORE_PASSWORD" "$APP_KEY_ALIAS" "$APP_KEY_PASSWORD" > client/android/app-signing.properties
+          # The Play upload key is optional until the app is on Play.
+          if [ -n "$UPLOAD_KEYSTORE" ]; then
+            echo "$UPLOAD_KEYSTORE" | base64 -d > "$RUNNER_TEMP/upload.jks"
+            props "$RUNNER_TEMP/upload.jks" "$UPLOAD_STORE_PASSWORD" "$UPLOAD_KEY_ALIAS" "$UPLOAD_KEY_PASSWORD" > client/android/keystore.properties
+            echo "UPLOAD_KEY=1" >> "$GITHUB_ENV"
+          fi
+      - name: Build
+        working-directory: client/android
+        run: |
+          tasks="assembleDirectRelease"
+          [ -n "${UPLOAD_KEY:-}" ] && tasks="$tasks bundlePlayRelease"
+          ./gradlew $tasks -PversionCode=${{ steps.version.outputs.code }} -PversionName=${{ steps.version.outputs.name }}
+      - name: Check the APK's signature
+        run: |
+          apksigner=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)apksigner
+          "$apksigner" verify --print-certs client/android/app/build/outputs/apk/direct/release/app-direct-release.apk
+      - name: Upload to Zealot
+        env:
+          ZEALOT_TOKEN: ${{ secrets.ZEALOT_API_TOKEN }}
+          ZEALOT_CHANNEL_KEY: ${{ vars.ZEALOT_CHANNEL_KEY }}
+        run: |
+          # The changelog is the annotated tag's message (falls back to the commit subject). Checkout leaves the tag
+          # lightweight, so fetch the real one first.
+          git fetch --force --depth=1 origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          changelog=$(git for-each-ref --format='%(contents)' "refs/tags/$GITHUB_REF_NAME")
+          [ -n "$changelog" ] || changelog=$(git log -1 --format=%s)
+          curl -fsS --retry 3 \
+            -F "file=@client/android/app/build/outputs/apk/direct/release/app-direct-release.apk" \
+            -F "channel_key=$ZEALOT_CHANNEL_KEY" \
+            -F "token=$ZEALOT_TOKEN" \
+            -F "release_type=release" \
+            -F "changelog=$changelog" \
+            -F "branch=$GITHUB_REF_NAME" \
+            -F "git_commit=$GITHUB_SHA" \
+            -F "ci_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            https://apps.bootta.dev/api/apps/upload
+      - name: Keep the Play bundle
+        if: env.UPLOAD_KEY == '1'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: specharvest-play-${{ steps.version.outputs.name }}
+          path: client/android/app/build/outputs/bundle/playRelease/app-play-release.aab

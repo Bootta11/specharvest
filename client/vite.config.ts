@@ -3,9 +3,12 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
 const apiPort = process.env.PORT ?? "3100";
+/** The commit this UI is built from (CI and the Docker build pass GIT_SHA): the app's built-in bundle version. */
+const appSha = process.env.GIT_SHA || "dev";
 
 export default defineConfig(({ mode }) => ({
   plugins: [react(), tailwindcss()],
+  define: { __APP_SHA__: JSON.stringify(appSha) },
   server: {
     port: 5180,
     host: true,

@@ -19,11 +19,18 @@ COPY client/package.json client/
 COPY extension/package.json extension/
 RUN npm ci --no-audit --no-fund
 COPY tsconfig.base.json ./
+COPY scripts/app-bundle.mjs scripts/
 COPY shared shared
 COPY client client
 COPY server server
 ARG TARGETARCH
-RUN npm run build --workspace client \
+# The commit, for the UI's version and the Android app's live-update bundle (docs/app-updates.md).
+ARG GIT_SHA=""
+# The bundle is signed when the build gets the bundle_key secret (CI); without it, apps ignore the bundle.
+RUN --mount=type=secret,id=bundle_key,required=false \
+  npm run build --workspace client \
+  && (cd client && GIT_SHA="$GIT_SHA" npx vite build --mode app --outDir dist-app) \
+  && GIT_SHA="$GIT_SHA" node scripts/app-bundle.mjs client/dist-app client/dist-app --key /run/secrets/bundle_key \
   && npm prune --omit=dev --no-audit --no-fund \
   && mkdir -p /app/data \
   # onnxruntime-node ships binaries for every OS/arch (~300 MB); keep only this image's.
@@ -49,6 +56,7 @@ COPY --from=builder /app/server/package.json server/
 COPY --from=builder /app/server/healthcheck.mjs server/
 COPY --from=builder /app/server/src server/src
 COPY --from=builder /app/client/dist client/dist
+COPY --from=builder /app/client/dist-app.zip /app/client/dist-app.json client/
 # Distroless has no shell for mkdir/chown: copy an empty dir owned by the nonroot user (65532),
 # so a fresh named volume mounted here is writable.
 COPY --from=builder --chown=nonroot:nonroot /app/data data

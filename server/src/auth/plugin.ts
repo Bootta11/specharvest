@@ -42,6 +42,9 @@ const PUBLIC_ROUTES = new Set([
   // The extension: the socket authenticates with its first message, a claim with the pairing verifier.
   "/api/extension/ws",
   "/api/extension/pair/claim",
+  // The Android app's live UI update, also before signing in (routes/app-bundle.ts).
+  "/api/app/bundle",
+  "/api/app/bundle.zip",
 ]);
 
 /**

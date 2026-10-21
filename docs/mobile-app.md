@@ -16,26 +16,33 @@ Needs JDK 21 and the Android SDK (Android Studio installs both).
 2. **Build the debug APK** (JDK 21 may not be the default; point `JAVA_HOME` at it):
    ```bash
    cd client/android
-   JAVA_HOME=/opt/homebrew/opt/openjdk@21 ./gradlew assembleDebug
+   JAVA_HOME=/opt/homebrew/opt/openjdk@21 ./gradlew assembleDirectDebug
    ```
-   The APK is `client/android/app/build/outputs/apk/debug/app-debug.apk`.
+   The APK is `client/android/app/build/outputs/apk/direct/debug/app-direct-debug.apk`. (`direct` is the
+   build that updates itself from Zealot; `play` is the Google Play one, see
+   [app updates](app-updates.md).) A local build never takes live UI updates, so it keeps your UI.
 3. **Install it over wireless debugging.** On the phone: Developer options → Wireless debugging →
    *Pair device with pairing code*, then on the computer:
    ```bash
    adb pair <ip:pairing-port> <code>
    adb connect <ip:port>
    adb devices -l
-   adb -s <device> install -r client/android/app/build/outputs/apk/debug/app-debug.apk
+   adb -s <device> install -r client/android/app/build/outputs/apk/direct/debug/app-direct-debug.apk
    ```
 
 `npm run android --workspace client` opens the project in Android Studio instead.
 
-### Release build
+### Release builds
 
-Google Play needs a signed App Bundle: `npm run android:bundle --workspace client` builds
-`client/android/app/build/outputs/bundle/release/app-release.aab`, signed with the upload key from
-`client/android/keystore.properties` (git-ignored; see `keystore.properties.example`). Without that file the
-release build is unsigned. The whole process, from the developer account to the store listing, is in
+Releases are built by CI from a `vX.Y.Z` tag: the direct APK goes to Zealot, and the app updates itself (the
+UI silently, the APK with a banner). See [app releases and updates](app-updates.md).
+
+Locally, `npm run android:apk --workspace client` builds the direct APK
+(`apk/direct/release/app-direct-release.apk`, signed with the app signing key from
+`client/android/app-signing.properties`), and `npm run android:bundle --workspace client` the Play bundle
+(`bundle/playRelease/app-play-release.aab`, signed with the upload key from
+`client/android/keystore.properties`). Both files are git-ignored (see the `*.example` files); without them
+the release builds are unsigned. Publishing on Play, from the developer account to the store listing, is in
 [Google Play](google-play.md).
 
 The app id is `dev.bootta.specharvest`. Every icon (Android launcher, notification silhouette, splash

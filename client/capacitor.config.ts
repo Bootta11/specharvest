@@ -11,6 +11,9 @@ const config: CapacitorConfig = {
   },
   plugins: {
     LocalNotifications: { smallIcon: "ic_stat_specharvest", iconColor: "#0f766e" },
+    // Live UI updates from the server, driven by lib/updates.ts (docs/app-updates.md). Nothing goes to Capgo's
+    // cloud: no auto-update checks, no stats.
+    CapacitorUpdater: { autoUpdate: false, appReadyTimeout: 10000, statsUrl: "", resetWhenUpdate: true },
   },
 };
 

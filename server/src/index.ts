@@ -32,6 +32,7 @@ import { startConfiguredBrowsers } from "./crawler/browsers.ts";
 import { FatalDriverError } from "./crawler/driver.ts";
 import { connectionFor, extensionStatus, onExtensionConnected, registerExtensionGateway } from "./extension/gateway.ts";
 import { registerExtensionRoutes } from "./extension/routes.ts";
+import { registerAppBundleRoutes } from "./routes/app-bundle.ts";
 import { continueHeldCrawls, embeddingText, emitJob, interruptCrawls, jobChannel, JOBS_CHANNEL, markUndrainedCrawls, pickItems, repairItemUrlPatterns, ResumeError, resumeAfterRestart, resumeCrawl, startCrawl, stopCrawl } from "./crawler/job.ts";
 import { getNotificationSettings, maskSettings, saveNotificationSettings, sendTest } from "./notify/index.ts";
 import { vapidKeys } from "./notify/push.ts";
@@ -125,6 +126,7 @@ await registerAdminRoutes(app, () => burst);
 registerLlmRoutes(app);
 await registerExtensionGateway(app);
 registerExtensionRoutes(app);
+registerAppBundleRoutes(app);
 
 // ---------- Health / config ----------
 

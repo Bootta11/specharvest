@@ -9,6 +9,7 @@
 node_modules
 **/node_modules
 **/dist
+client/dist-app*
 extension/dist-test
 **/.wxt
 
@@ -28,6 +29,7 @@ tmp
 # Not needed to build or run
 docs
 scripts
+!scripts/app-bundle.mjs
 README.md
 compose.yaml
 docker-compose*.yml

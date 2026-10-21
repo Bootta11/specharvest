@@ -10,8 +10,9 @@
     "typecheck": "tsc -p tsconfig.json",
     "cap:sync": "vite build --mode app && cap sync android",
     "android": "npm run cap:sync && cap open android",
-    "android:debug": "npm run cap:sync && cd android && ./gradlew assembleDebug",
-    "android:bundle": "npm run cap:sync && cd android && ./gradlew bundleRelease"
+    "android:debug": "npm run cap:sync && cd android && ./gradlew assembleDirectDebug",
+    "android:bundle": "npm run cap:sync && cd android && ./gradlew bundlePlayRelease",
+    "android:apk": "npm run cap:sync && cd android && ./gradlew assembleDirectRelease"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.3",
@@ -22,6 +23,7 @@
     "@capacitor/local-notifications": "^8.3.1",
     "@capacitor/preferences": "^8.0.1",
     "@capacitor/share": "^8.0.3",
+    "@capgo/capacitor-updater": "^8.53.0",
     "@specharvest/shared": "*",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",

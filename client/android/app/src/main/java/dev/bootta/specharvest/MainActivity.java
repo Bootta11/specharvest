@@ -21,8 +21,10 @@ public class MainActivity extends BridgeActivity {
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
-        // Before super: the bridge reads the launch intent while it starts up.
+        // Before super: the bridge reads the launch intent and the plugin list while it starts up.
         setIntent(fromShare(getIntent()));
+        // The flavor's own plugins: AppInstaller in the direct build, none in the Play build (src/direct, src/play).
+        registerPlugins(FlavorPlugins.PLUGINS);
         super.onCreate(savedInstanceState);
     }
 

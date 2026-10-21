@@ -59,8 +59,11 @@ follow any prompt there.
 
 ## 3. Create the upload key
 
-Every file you upload to Play must be signed with your **upload key**. Google then re-signs the app with its
-own key for users ([step 8](#8-play-app-signing)). You make the upload key once and use it for every update.
+Every file you upload to Play must be signed with your **upload key**. Google then re-signs the app for users
+with your **app signing key**, the one the Zealot APK is already signed with ([step 8](#8-play-app-signing),
+[app updates](app-updates.md#the-signing-keys)). Keep the two separate: if the upload key leaks, Google can
+reset it; the app signing key never leaves your hands except once, to Play. You make the upload key once and
+use it for every update.
 
 1. Create the key (one command, run in `client/android`):
    ```bash
@@ -92,21 +95,21 @@ own key for users ([step 8](#8-play-app-signing)). You make the upload key once 
 
 Google Play wants an **Android App Bundle** (`.aab`), not an APK.
 
-1. **Set the version** in `client/android/app/build.gradle`:
-   ```groovy
-   versionCode 1        // a whole number; +1 for every upload, never reused
-   versionName "1.0"    // what users see, e.g. "1.0", "1.1"
-   ```
-   Leave them as they are for the first upload.
-2. **Build:**
+1. **The version comes from the git tag.** CI builds the bundle for every `vX.Y.Z` tag once the upload key
+   secrets are set ([app updates](app-updates.md#releasing)) and keeps it as the workflow artifact
+   `specharvest-play-X.Y.Z`: download it from the tag's CI run. That's the usual way.
+2. **Or build it locally** (the `play` flavor, without the self-update part):
    ```bash
-   JAVA_HOME=/opt/homebrew/opt/openjdk@21 npm run android:bundle --workspace client
+   cd client
+   npm run cap:sync
+   cd android
+   JAVA_HOME=/opt/homebrew/opt/openjdk@21 ./gradlew bundlePlayRelease -PversionCode=102 -PversionName=0.1.2
    ```
-   This builds the web UI, copies it into the Android project and builds a signed release bundle:
-   `client/android/app/build/outputs/bundle/release/app-release.aab`
+   Use the version of the tag you're releasing (`versionCode` = X*10000 + Y*100 + Z); without them it's
+   `1` / `1.0`. The bundle is `client/android/app/build/outputs/bundle/playRelease/app-play-release.aab`.
 3. **Check that it's signed with your upload key:**
    ```bash
-   /opt/homebrew/opt/openjdk@21/bin/keytool -printcert -jarfile client/android/app/build/outputs/bundle/release/app-release.aab
+   /opt/homebrew/opt/openjdk@21/bin/keytool -printcert -jarfile client/android/app/build/outputs/bundle/playRelease/app-play-release.aab
    ```
    It should print the name you entered in step 3. If it says the file isn't signed, `keystore.properties` is
    missing or in the wrong place (it belongs in `client/android/`).
@@ -270,17 +273,25 @@ email, **Website** → `https://specharvest.bootta.dev`.
 
 ## 8. Play App Signing
 
-On your first upload ([step 9](#9-test-it-testing-tracks)), Play asks about app signing. Keep the default,
-**Google-generated key** (Play App Signing).
+On your first upload ([step 9](#9-test-it-testing-tracks)), Play asks about app signing. **Don't** take the
+default Google-generated key: choose **Use your own app signing key** and give Play the app signing key the
+Zealot APK is signed with (`specharvest-release.jks`, see [app updates](app-updates.md#the-signing-keys)).
+Play shows the steps: download its encryption public key and the PEPK tool, then:
+
+```bash
+java -jar pepk.jar --keystore=specharvest-release.jks --alias=specharvest \
+  --output=specharvest-signing.zip --include-cert --rsa-aes-encryption --encryption-key-path=encryption_public_key.pem
+```
+
+Upload `specharvest-signing.zip` there. Because Play now signs with the same key, phones that installed the
+APK from Zealot take Play's updates without reinstalling.
 
 There are two keys:
 
-- **Upload key**: yours, from [step 3](#3-create-the-upload-key). It proves to Google that an upload comes
-  from you.
-- **App signing key**: Google's. It signs what users install, and Google keeps it safe.
-
-So if your upload key is ever lost or leaked, Google can reset it and users notice nothing. Without Play App
-Signing, a lost key would mean you could never update the app again.
+- **Upload key**: from [step 3](#3-create-the-upload-key). It proves to Google that an upload comes from you.
+  If it's ever lost or leaked, Google can reset it and users notice nothing.
+- **App signing key**: yours, now also held by Google. It signs what users install. Keep your backups: the
+  Zealot APK depends on it.
 
 ## 9. Test it (testing tracks)
 
@@ -288,7 +299,7 @@ Signing, a lost key would mean you could never update the app again.
 
 1. **Test and release → Testing → Internal testing → Create new release.**
 2. Accept Play App Signing ([step 8](#8-play-app-signing)) if asked.
-3. Upload `app-release.aab`. The release name fills itself in (e.g. `1 (1.0)`). Add a line of release notes.
+3. Upload `app-play-release.aab`. The release name fills itself in (e.g. `1 (1.0)`). Add a line of release notes.
 4. **Next → Save and publish.** There's no review for internal tests. It's ready in minutes.
 5. **Testers** tab → create an email list with your own Google account (up to 100 people) → save.
 6. Copy the **opt-in link**, open it on your phone (signed in to that Google account), accept, and install
@@ -345,21 +356,22 @@ Once production access is granted (or straight away, for organization accounts):
 ## 11. Ship an update
 
 1. Make your changes and test them (see [Android app](mobile-app.md)).
-2. Bump **`versionCode`** by 1 (required) and **`versionName`** (e.g. `1.0` → `1.1`) in
-   `client/android/app/build.gradle`.
-3. Build: `JAVA_HOME=/opt/homebrew/opt/openjdk@21 npm run android:bundle --workspace client`
+2. Push a new tag `vX.Y.Z` ([releasing](app-updates.md#releasing)). The version comes from the tag, so every
+   tag gives a new, higher `versionCode`.
+3. Download the `specharvest-play-X.Y.Z` artifact from the tag's CI run.
 4. Upload it on the internal track first, check it on your phone, then **Promote release** to production
    (or create a production release with the same bundle).
 
-Changes that only touch the server (`server/`) don't need an app update. The app talks to the live server,
-so they reach users once you deploy ([deployment](deployment.md)). The app needs an update when anything in
-`client/` changes, because the UI ships inside the app.
+Most changes don't need a Play release at all. Server changes reach users once you deploy
+([deployment](deployment.md)), and UI changes in `client/` reach the app as a
+[live UI update](app-updates.md#live-ui-updates) from the server. Only native changes (when
+`native-baseline.mjs --check` fails) need a new app version.
 
 ## 12. Troubleshooting
 
 | Problem | What to do |
 |---|---|
-| "Version code 1 has already been used" | Raise `versionCode` in `build.gradle` and build again. Every upload needs a new, higher number. |
+| "Version code 1 has already been used" | Upload the bundle from a newer tag (or build locally with a higher `-PversionCode`). Every upload needs a new, higher number. |
 | "The Android App Bundle was not signed" / "signed in debug mode" | `client/android/keystore.properties` is missing or wrong. Check it against [step 3](#3-create-the-upload-key) and rebuild. |
 | "Your Android App Bundle is signed with the wrong key" | You built with a different keystore than the first upload. Use the original `.jks` from your backup. |
 | Lost the upload key or its password | Play Console → **Test and release → App integrity → App signing** → **Request upload key reset**. Make a new key (step 3) and send Google its certificate as described there. It takes a few days. |

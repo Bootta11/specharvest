@@ -42,6 +42,7 @@
     }
   },
   "devDependencies": {
-    "@docmd/core": "^0.9.7"
+    "@docmd/core": "^0.9.7",
+    "fflate": "^0.8.3"
   }
 }

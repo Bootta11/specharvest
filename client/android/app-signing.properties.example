@@ -1,0 +1,7 @@
+# Copy to app-signing.properties (git-ignored) and fill in — see docs/app-updates.md#the-signing-keys.
+# The app signing key: signs the APK on Zealot, and later goes to Play App Signing. Keep the .jks outside the
+# repo; storeFile is absolute or relative to client/android/.
+storeFile=/Users/you/keys/specharvest-release.jks
+storePassword=change-me
+keyAlias=specharvest
+keyPassword=change-me

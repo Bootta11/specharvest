@@ -51,6 +51,10 @@ GitHub → your profile → **Packages** → `specharvest`:
 
 Verify a publish: `docker buildx imagetools inspect ghcr.io/bootta11/specharvest:latest`.
 
+Optional: the repository secret `APP_BUNDLE_SIGNING_KEY` signs the Android app's live UI update that the image
+carries; without it the app ignores that update. `v*` tags also build the Android app (environment
+`android-release`). Both are set up in [app updates](app-updates.md#one-time-setup).
+
 Dependabot ([`.github/dependabot.yml`](../.github/dependabot.yml)) opens weekly
 PRs for npm packages, the base image digests pinned in the `Dockerfile`, and
 the GitHub Actions versions.
