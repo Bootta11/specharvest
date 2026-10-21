@@ -191,8 +191,8 @@ on tags:
 gh secret set APP_BUNDLE_SIGNING_KEY < ~/keys/specharvest-bundle.pem
 ```
 
-Pass the file with `<`. Don't paste the key at `gh`'s prompt: the prompt keeps only the first line, and the
-image build then fails with "The bundle signing key isn't a valid PEM private key".
+Pass the file with `<`, so the key keeps its line breaks. A broken key fails the image build with "The bundle
+signing key isn't a valid PEM private key".
 
 On the web: *Settings → Secrets and variables → Actions → New repository secret*, and paste the whole file,
 `BEGIN` and `END` lines included.

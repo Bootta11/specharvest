@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { UserSummary } from "@specharvest/shared";
 import { accounts, activeAccount, apiUrl, isNative, serverUrl } from "../lib/platform.ts";
+import { nativeVersion, uiVersion, type NativeVersion } from "../lib/version.ts";
 import { AccountRow } from "./AccountRow.tsx";
 
 /** Header avatar with the account / sign-out menu (admins: a link to the admin dashboard); in the app also the saved accounts to switch to. */
@@ -20,7 +21,12 @@ export function UserMenu({
   onAddAccount: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [appVersion, setAppVersion] = useState<NativeVersion | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (open && isNative) void nativeVersion().then(setAppVersion);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -92,6 +98,11 @@ export function UserMenu({
           <button role="menuitem" className={`${item} text-red-700 dark:text-red-300`} onClick={pick(onLogout)}>
             {isNative && accounts().length > 1 ? "Sign out of this account" : "Sign out"}
           </button>
+          <div className="mt-1 select-text truncate border-t border-stone-200 px-4 pb-1 pt-2 text-xs tabular-nums text-stone-500 dark:border-stone-800">
+            {isNative
+              ? `${appVersion ? `App ${appVersion.name} (${appVersion.code}) · ` : ""}UI ${uiVersion}`
+              : `Version ${uiVersion}`}
+          </div>
         </div>
       )}
     </div>
