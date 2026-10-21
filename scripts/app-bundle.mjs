@@ -7,7 +7,7 @@
 //
 //   node scripts/app-bundle.mjs <dist dir> <out path without extension> [--key <private key PEM file>]
 //   (the version is $GIT_SHA)
-import { createHash, sign } from "node:crypto";
+import { createHash, createPrivateKey, sign } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,8 +39,22 @@ const version = process.env.GIT_SHA || "dev";
 const checksum = createHash("sha256").update(zip).digest("hex");
 const { minVersionCode } = JSON.parse(fs.readFileSync(path.join(ROOT, "client/native-baseline.json"), "utf8"));
 const keyPem = values.key && fs.existsSync(values.key) ? fs.readFileSync(values.key, "utf8").trim() : "";
+
+/** A key that is there but broken fails the build: shipping unsigned bundles by accident would stop all UI updates. */
+function privateKey(pem) {
+  try {
+    return createPrivateKey(pem);
+  } catch {
+    const lines = pem.split("\n").length;
+    throw new Error(
+      `The bundle signing key isn't a valid PEM private key (${pem.length} characters, ${lines} line${lines === 1 ? "" : "s"}; ` +
+        "a P-256 key has 5). Set the APP_BUNDLE_SIGNING_KEY secret from the file: gh secret set APP_BUNDLE_SIGNING_KEY < specharvest-bundle.pem",
+    );
+  }
+}
+
 const signature = keyPem
-  ? sign("sha256", Buffer.from(`${version}\n${checksum}\n${minVersionCode}`), { key: keyPem, dsaEncoding: "ieee-p1363" }).toString("base64")
+  ? sign("sha256", Buffer.from(`${version}\n${checksum}\n${minVersionCode}`), { key: privateKey(keyPem), dsaEncoding: "ieee-p1363" }).toString("base64")
   : null;
 
 fs.writeFileSync(`${out}.zip`, zip);
