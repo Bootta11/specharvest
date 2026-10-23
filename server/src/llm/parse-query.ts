@@ -23,7 +23,9 @@ Rules:
 - Booleans: "has X" / "with X" -> {"op":"eq","value":true}; "without X" -> {"op":"eq","value":false}.
 - Superlatives ("biggest boot", "lowest mileage", "cheapest", "most powerful") -> sort, not a filter.
 - Convert user units to the key's unit (e.g. "150 hp" on a _kw key -> 110; "under 50k" price -> 50000).
-- Vague, descriptive or subjective wishes ("comfortable family car", "good for city driving", "sporty") go into semanticText as a short English phrase. null if nothing descriptive remains.
+- A word naming a kind of product or object ("lijevak", "funnel", "cjedilo", "frying pan") is a hard constraint: add {"key":"title","op":"contains","value":<stem>} for it. Write the word in the language of the listings (translate it if the user wrote another language), lowercase, with its inflectional ending cut off so other grammatical forms still match ("lijevak" -> "lijev", "cjedila" -> "cjedil", "tave" -> "tav"); never shorter than 4 letters (keep a shorter word whole). One filter per product word. Also put its short English meaning into semanticText so results are ranked by it.
+  Example: "lijevak" -> filters [title contains "lijev"], semanticText "funnel".
+- Vague, descriptive or subjective wishes ("comfortable family car", "good for city driving", "sporty", "something for salad") go into semanticText as a short English phrase, with no title filter. null if nothing descriptive remains.
 - If the user asks about an attribute that has NO matching registry key (e.g. "0-100 acceleration", "boot space" when absent), still emit the filter/sort using a NEW English snake_case key with a unit suffix (e.g. "acceleration_0_100_s", "boot_capacity_liters", "power_kw"), AND add it to missingAttributes so it can be looked up on the web. Never put registry keys in missingAttributes.
   Example: "hybrid with the fastest 0-100" (no acceleration key) -> filters [fuel_type eq "hybrid"], sort {"key":"acceleration_0_100_s","dir":"asc"}, semanticText null, missingAttributes [{"key":"acceleration_0_100_s","type":"number","unit":"s","label":"0-100 km/h acceleration"}].
   Example: "car with the biggest boot space" (no boot key) -> filters [], sort {"key":"boot_capacity_liters","dir":"desc"}, semanticText null, missingAttributes [{"key":"boot_capacity_liters","type":"number","unit":"l","label":"boot space"}].
@@ -59,10 +61,13 @@ export function normalizeQuery(query: string): string {
   return query.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
-/** Changes whenever keys are added, merged or retyped — a cached plan may then target stale keys. */
+/** Bump whenever SYSTEM changes what a plan looks like: plans cached by an older prompt are then parsed again. */
+export const PLAN_VERSION = 2;
+
+/** Changes whenever keys are added, merged or retyped — a cached plan may then target stale keys — or PLAN_VERSION changes. */
 export function registrySignature(keys: SpecKey[]): string {
   const parts = keys.map((k) => `${k.key}:${k.type}:${k.unit ?? ""}`).sort();
-  return createHash("sha1").update(parts.join("\n")).digest("hex");
+  return createHash("sha1").update(`v${PLAN_VERSION}\n${parts.join("\n")}`).digest("hex");
 }
 
 function webKeysForPrompt(keys: SpecKey[]): string {

@@ -340,9 +340,15 @@ export function FilterPanel({ facets, keys, filters, collections, onChange }: Pr
           <Section title="Listing" count={sectionCount(listing)} open={sectionOpen("§listing", listing, true)} onToggle={() => toggle("§listing", true)}>
             <div className="space-y-3 px-1.5 pt-1">
               {listing.map((f) => (
-                <div key={f.key} className="space-y-1">
+                <div
+                  key={f.key}
+                  className={`space-y-1 rounded-lg ${filtered.has(f.key) ? "-mx-1.5 border border-brand-200 bg-brand-50/70 p-1.5 dark:border-brand-800 dark:bg-brand-900/30" : ""}`}
+                >
                   <div className="flex items-baseline justify-between gap-2 text-sm">
-                    <span className="font-medium">{specLabel(f.key)}</span>
+                    <span className={`inline-flex items-center gap-1.5 font-medium ${filtered.has(f.key) ? "text-brand-800 dark:text-brand-100" : ""}`}>
+                      {specLabel(f.key)}
+                      {filtered.has(f.key) && <span className="rounded-full bg-brand-700 px-1.5 text-[0.65rem] font-semibold uppercase leading-4 tracking-wide text-white">active</span>}
+                    </span>
                     {f.kind !== "text" && <span className="text-xs tabular-nums text-stone-500">{f.count}</span>}
                   </div>
                   {control(f)}

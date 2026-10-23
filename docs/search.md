@@ -23,10 +23,22 @@ request into:
 `missingAttributes` and looked up like any other missing key; known ones with
 poor coverage also trigger a lookup. Older plans without `show` still parse.
 
+**Product words filter the title.** A word naming a kind of product ("lijevak",
+"funnel") becomes `title contains <stem>`: the word in the listings' language,
+cut to its stem so other grammatical forms match ("lijevak" → `lijev` matches
+"LIJEVAKA" too), never shorter than 4 letters. Its English meaning also goes into
+`semanticText` for ranking. Vague wishes ("something for salad") only go into
+`semanticText`. Without this, a single product word only *ranked* the whole
+collection and every item counted as a match. The chip reads
+*Title contains “lijev”*, and the Title field in the filter panel is marked
+**active** (as is every filtered listing field).
+
 Plans are **cached** in `query_cache` by (collection, lowercased/trimmed
 request). A repeated search costs no LLM call. A miss falls back to the same
 request cached for another collection with an identical registry signature. A cached plan is used only
-while the collection's key registry is unchanged (sha1 of `key:type:unit`).
+while the collection's key registry is unchanged (sha1 of `key:type:unit`) and was made
+by the current prompt (`PLAN_VERSION` in `server/src/llm/parse-query.ts` is part of
+the hash; bump it whenever the prompt changes what a plan looks like).
 New, merged or web-added keys trigger a fresh parse. `GET /api/searches`
 lists recent cached requests (the UI shows them as *Recent* chips).
 
@@ -51,6 +63,25 @@ removing one re-runs the search with the edited `plan` (no LLM call).
    LanceDB (`item_id IN (…)` prefilter).
 4. An explicit sort wins; semantic score breaks ties; missing sort values go last.
    Without a sort: best match for a meaning search, otherwise newest first.
+5. A meaning search grades every match by its distance from the **best** one
+   and by a floor (`server/src/search/relevance.ts`): **High** within 0.08 cosine
+   similarity of the best and at least 0.35, **Medium** within 0.18 and at least
+   0.25, else **Low**. The floor keeps a search with no real match (e.g. "phone"
+   among laptops, best ≈ 0.2) from calling anything strong. The embedding model
+   (`all-MiniLM-L6-v2`) is English-only: non-English titles score low and almost
+   at random ("funnel" vs "LIJEVAK 17 CM" ≈ 0.11), so on such listings the title
+   filter above does the real work. Nothing is dropped: items carry
+   `relevance`, the response carries `strongCount` (high + medium), and the UI
+   shows ●●● High · ●●○ Medium · ●○○ Low on every row and tile (raw similarity
+   in the tooltip). Low matches are faded, and in best-match order a
+   *Weaker matches — N* divider comes before the first one. The results bar reads
+   "803 matches · 4 strong".
+
+**More than 60 matches.** A search returns one page (`limit`, default 60) of
+`items` and of `unknown`, plus `total` and `unknownTotal`. *Show 60 more (N left)*
+under the list (and under "can't be judged yet") re-runs the same plan with
+`offset` / `unknownOffset` and `enrich: false`: no LLM call, no web lookup. Any
+new search, filter, sort or scope change starts again from the first page.
 
 **Choosing the order yourself.** The results bar has a *Sort* menu with newest (or best match), price, name and the
 scope's numeric fields, most common first. In the list view, column headers sort too: one click ↑, the next ↓, the

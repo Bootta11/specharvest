@@ -42,6 +42,32 @@ export function GoneBadge({ item, className = "" }: { item: Pick<Item, "goneAt">
   );
 }
 
+const RELEVANCE = {
+  high: { dots: 3, label: "High", tone: "text-emerald-700 dark:text-emerald-400" },
+  medium: { dots: 2, label: "Medium", tone: "text-amber-700 dark:text-amber-400" },
+  low: { dots: 1, label: "Low", tone: "text-stone-500 dark:text-stone-400" },
+} as const;
+
+/** Faded while not hovered/focused: a weak match by meaning. */
+export const fadeWeak = (item: Pick<Item, "relevance">) =>
+  item.relevance === "low" ? "opacity-50 transition-opacity hover:opacity-100 focus-within:opacity-100" : "";
+
+/** How well an item matches a meaning search (●●● High · ●●○ Medium · ●○○ Low); nothing without one. */
+export function RelevanceBadge({ item, className = "" }: { item: Pick<Item, "relevance" | "score">; className?: string }) {
+  if (!item.relevance) return null;
+  const r = RELEVANCE[item.relevance];
+  const similarity = item.score != null ? ` (similarity ${Math.round(Math.max(0, item.score) * 100)}%)` : "";
+  return (
+    <span title={`${r.label} match by meaning, compared with the best match${similarity}`} className={`inline-flex shrink-0 items-center gap-1 text-xs font-medium ${r.tone} ${className}`}>
+      <span aria-hidden className="tracking-[-0.1em]">
+        {"●".repeat(r.dots)}
+        <span className="opacity-30">{"●".repeat(3 - r.dots)}</span>
+      </span>
+      {r.label}
+    </span>
+  );
+}
+
 /** Where a value came from: the listing page itself or a web lookup (with link). Nothing when the value is missing. */
 export function SourceBadge({ item, k, compact = false }: { item: Item; k: string; compact?: boolean }) {
   const value = k === "price" ? item.price : item.specs[k];
@@ -111,7 +137,7 @@ export function ItemCard({ item, keys, highlightKeys, onOpen }: Props) {
   const features = Object.entries(item.specs).filter(([, v]) => v === true).length;
 
   return (
-    <article className={`card flex flex-col overflow-hidden ${item.goneAt ? "opacity-60" : ""}`}>
+    <article className={`card flex flex-col overflow-hidden ${item.goneAt ? "opacity-60" : fadeWeak(item)}`}>
       <button onClick={onOpen} className="relative block aspect-[4/3] w-full overflow-hidden bg-stone-100 dark:bg-stone-800" aria-label={`Details for ${item.title}`}>
         {safeUrl(item.mainImage) ? (
           <img src={safeUrl(item.mainImage)} alt="" loading="lazy" referrerPolicy="no-referrer" className="size-full object-cover transition hover:scale-[1.02]" />
@@ -119,11 +145,7 @@ export function ItemCard({ item, keys, highlightKeys, onOpen }: Props) {
           <span className="flex size-full items-center justify-center text-sm text-stone-400">No image</span>
         )}
         <GoneBadge item={item} className="absolute left-2 top-2 shadow-sm" />
-        {item.score != null && (
-          <span className="absolute right-2 top-2 rounded-full bg-black/60 px-2 py-0.5 text-xs font-medium text-white" title="Semantic match">
-            {Math.round(Math.max(0, item.score) * 100)}% match
-          </span>
-        )}
+        {item.relevance && <RelevanceBadge item={item} className="absolute right-2 top-2 rounded-full bg-white/90 px-2 py-0.5 shadow-sm dark:bg-stone-900/90" />}
       </button>
       <div className="flex flex-1 flex-col p-3">
         <h3 className="line-clamp-2 font-medium leading-snug">

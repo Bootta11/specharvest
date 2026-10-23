@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { SpecKey } from "@specharvest/shared";
-import { sanitizePlan } from "./parse-query.ts";
+import { PLAN_VERSION, registrySignature, sanitizePlan } from "./parse-query.ts";
 
 const keys: SpecKey[] = [{ key: "power_kw", type: "number", unit: "kw", label: "Snaga", example: null, count: 3, origin: "page" }];
 
@@ -92,5 +93,13 @@ describe("sanitizePlan", () => {
       ["fuel_type", "string"],
       ["color", "string"],
     ]);
+  });
+});
+
+describe("registrySignature", () => {
+  it("includes the prompt version, so plans from an older prompt are parsed again", () => {
+    const unversioned = createHash("sha1").update("power_kw:number:kw").digest("hex");
+    expect(registrySignature(keys)).not.toBe(unversioned);
+    expect(registrySignature(keys)).toBe(createHash("sha1").update(`v${PLAN_VERSION}\npower_kw:number:kw`).digest("hex"));
   });
 });

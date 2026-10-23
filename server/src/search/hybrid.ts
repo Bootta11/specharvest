@@ -11,6 +11,7 @@ import { llmStatus } from "../llm/resolve.ts";
 import { buildCandidateQuery, hasValue, mergeFilters, valueOf } from "./filters.ts";
 import { computeFacets } from "./facets.ts";
 import { matchRegistrySynonyms } from "./registry-synonyms.ts";
+import { relevanceLevels } from "./relevance.ts";
 import { errorMessage } from "../lib/logger.ts";
 
 const DEFAULT_LIMIT = 60;
@@ -44,6 +45,8 @@ async function runSearch(req: SearchRequest, viewer: db.Viewer, scope: db.Collec
   const collectionId = req.collectionId ?? null;
   const keys: SpecKey[] = db.listSpecKeys(scope);
   const limit = req.limit ?? DEFAULT_LIMIT;
+  const offset = req.offset ?? 0;
+  const unknownOffset = req.unknownOffset ?? 0;
 
   let plan: QueryPlan;
   if (req.plan) plan = sanitizePlan(req.plan, keys, db.keyAliasesOf);
@@ -126,7 +129,10 @@ async function runSearch(req: SearchRequest, viewer: db.Viewer, scope: db.Collec
     const vec = await embed(plan.semanticText);
     const dist = await rankByVector(vec, matched.map((i) => i.id), matched.length);
     for (const item of matched) item.score = dist.has(item.id) ? 1 - dist.get(item.id)! : null;
+    const levels = relevanceLevels(matched.map((i) => i.score));
+    matched.forEach((item, i) => (item.relevance = levels[i]));
   }
+  const strongCount = plan.semanticText ? matched.filter((i) => i.relevance === "high" || i.relevance === "medium").length : null;
 
   matched.sort((a, b) => {
     if (sortKey) {
@@ -145,9 +151,11 @@ async function runSearch(req: SearchRequest, viewer: db.Viewer, scope: db.Collec
 
   return {
     plan,
-    items: matched.slice(0, limit),
-    unknown: unknown.slice(0, limit),
+    items: matched.slice(offset, offset + limit),
+    unknown: unknown.slice(unknownOffset, unknownOffset + limit),
     total: matched.length,
+    unknownTotal: unknown.length,
+    strongCount,
     keys,
     enrichJobId,
     enrichNote,

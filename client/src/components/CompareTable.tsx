@@ -1,6 +1,7 @@
+import { Fragment } from "react";
 import type { Item, QueryPlan, SpecKey } from "@specharvest/shared";
 import { formatSpecValue, specLabel } from "@specharvest/shared";
-import { formatPrice, GlobeIcon, GoneBadge, PageIcon, SourceBadge } from "./ItemCard.tsx";
+import { fadeWeak, formatPrice, GlobeIcon, GoneBadge, PageIcon, RelevanceBadge, SourceBadge } from "./ItemCard.tsx";
 import { Thumb } from "./ViewToggle.tsx";
 
 interface Props {
@@ -14,6 +15,8 @@ interface Props {
   /** Keys a running web lookup may still fill in. */
   pendingKeys: Set<string>;
   onOpen: (item: Item) => void;
+  /** In best-match order: how many matches are weak, announced by a divider before the first one. */
+  weakerCount?: number | null;
 }
 
 function Value({ item, k, keys, pending }: { item: Item; k: string; keys: Map<string, SpecKey>; pending: boolean }) {
@@ -24,9 +27,11 @@ function Value({ item, k, keys, pending }: { item: Item; k: string; keys: Map<st
 }
 
 /** Comparison list: one row per item, one column per requested field, every value with its source. */
-export function CompareTable({ items, keys, fieldKeys, sort, onSort, pendingKeys, onOpen }: Props) {
+export function CompareTable({ items, keys, fieldKeys, sort, onSort, pendingKeys, onOpen, weakerCount = null }: Props) {
   const fields = ["price", ...fieldKeys.filter((k) => k !== "price" && k !== "title")];
   const next = (k: string): QueryPlan["sort"] => (sort?.key !== k ? { key: k, dir: "asc" } : sort.dir === "asc" ? { key: k, dir: "desc" } : null);
+  const firstWeak = weakerCount ? items.findIndex((i) => i.relevance === "low") : -1;
+  const divider = `Weaker matches — ${weakerCount}`;
   const ariaSort = (k: string) => (sort?.key === k ? (sort.dir === "asc" ? "ascending" : "descending") : undefined);
   /** Phones: the label with the sort arrow (the sort menu above the list changes it). */
   const label = (k: string) => (
@@ -69,12 +74,23 @@ export function CompareTable({ items, keys, fieldKeys, sort, onSort, pendingKeys
           </thead>
           <tbody className="divide-y divide-stone-100 dark:divide-stone-800">
             {items.map((item, i) => (
-              <tr key={item.id} className="group hover:bg-stone-50 dark:hover:bg-stone-800/50">
+              <Fragment key={item.id}>
+              {i === firstWeak && (
+                <tr>
+                  <td colSpan={fields.length + 2} className="bg-stone-50 px-3 py-1.5 text-xs font-medium uppercase tracking-wide text-stone-500 dark:bg-stone-800/60">
+                    {divider}
+                  </td>
+                </tr>
+              )}
+              <tr className={`group hover:bg-stone-50 dark:hover:bg-stone-800/50 ${fadeWeak(item)}`}>
                 <td className="px-3 py-2 align-top text-stone-400">{i + 1}</td>
                 <td className="sticky left-0 z-10 max-w-80 bg-white px-3 py-2 align-top group-hover:bg-stone-50 dark:bg-stone-900 dark:group-hover:bg-stone-800">
                   <button onClick={() => onOpen(item)} className="flex w-full min-w-0 items-center gap-3 text-left">
                     <Thumb src={item.mainImage} className="size-10 shrink-0 rounded" />
-                    <span className="line-clamp-2 min-w-0 font-medium leading-snug hover:text-brand-700 dark:hover:text-brand-500">{item.title}</span>
+                    <span className="min-w-0">
+                      <span className="line-clamp-2 font-medium leading-snug hover:text-brand-700 dark:hover:text-brand-500">{item.title}</span>
+                      <RelevanceBadge item={item} className="mt-0.5" />
+                    </span>
                     <GoneBadge item={item} />
                   </button>
                 </td>
@@ -89,6 +105,7 @@ export function CompareTable({ items, keys, fieldKeys, sort, onSort, pendingKeys
                   </td>
                 ))}
               </tr>
+              </Fragment>
             ))}
           </tbody>
         </table>
@@ -97,11 +114,16 @@ export function CompareTable({ items, keys, fieldKeys, sort, onSort, pendingKeys
       {/* Phone: stacked rows */}
       <ul className="divide-y divide-stone-200 sm:hidden dark:divide-stone-800">
         {items.map((item, i) => (
-          <li key={item.id} className="p-3">
+          <Fragment key={item.id}>
+          {i === firstWeak && <li className="bg-stone-50 px-3 py-1.5 text-xs font-medium uppercase tracking-wide text-stone-500 dark:bg-stone-800/60">{divider}</li>}
+          <li className={`p-3 ${fadeWeak(item)}`}>
             <button onClick={() => onOpen(item)} className="flex w-full items-start gap-3 text-left">
-              <span className="w-5 shrink-0 pt-0.5 text-sm text-stone-400">{i + 1}</span>
+              <span className="min-w-5 shrink-0 pt-0.5 text-sm tabular-nums text-stone-400">{i + 1}</span>
               <Thumb src={item.mainImage} className="size-12 shrink-0 rounded" />
-              <span className="line-clamp-2 min-w-0 flex-1 font-medium leading-snug">{item.title}</span>
+              <span className="min-w-0 flex-1">
+                <span className="line-clamp-2 font-medium leading-snug">{item.title}</span>
+                <RelevanceBadge item={item} className="mt-0.5" />
+              </span>
               <GoneBadge item={item} />
             </button>
             <dl className="mt-2 space-y-1 pl-8 text-sm">
@@ -118,6 +140,7 @@ export function CompareTable({ items, keys, fieldKeys, sort, onSort, pendingKeys
               ))}
             </dl>
           </li>
+          </Fragment>
         ))}
       </ul>
 

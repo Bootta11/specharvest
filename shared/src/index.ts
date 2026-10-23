@@ -66,8 +66,13 @@ export interface Item {
   indexedAt: number;
   /** Set when the listing was missing from a complete re-crawl (sold/removed). */
   goneAt: number | null;
+  /** Cosine similarity to a meaning search (`semanticText`). */
   score?: number | null;
+  /** How well the item matches a meaning search, relative to the best match; low ones are shown faded. */
+  relevance?: Relevance | null;
 }
+
+export type Relevance = "high" | "medium" | "low";
 
 /** Other listings grouped as the same product (spelling variants share web lookups). */
 export interface SameProduct {
@@ -180,6 +185,10 @@ export const searchRequestSchema = z.object({
   query: z.string().max(1000).optional(),
   plan: queryPlanSchema.optional(),
   limit: z.number().int().min(1).max(200).optional(),
+  /** Skip this many matched items ("Show more" pages through `total`). */
+  offset: z.number().int().min(0).optional(),
+  /** Skip this many items of the `unknown` bucket. */
+  unknownOffset: z.number().int().min(0).optional(),
   /** Set false to skip triggering web enrichment for this search. */
   enrich: z.boolean().optional(),
   /** Include listings marked gone (sold/removed). */
@@ -217,6 +226,10 @@ export interface SearchResponse {
   /** Candidates that could not be judged because a filtered/sorted key is missing on them. */
   unknown: Item[];
   total: number;
+  /** Size of the whole `unknown` bucket (`unknown` holds one page of it). */
+  unknownTotal: number;
+  /** Matches graded high or medium by a meaning search; null without one. */
+  strongCount: number | null;
   /** Keys the registry knows for the searched scope (for chip labels). */
   keys: SpecKey[];
   enrichJobId: number | null;

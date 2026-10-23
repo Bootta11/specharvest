@@ -14,6 +14,8 @@ import { Thumb, useViewMode, ViewToggle } from "../components/ViewToggle.tsx";
 const FILTERS_STORAGE = "specharvest.filtersOpen";
 /** Panel changes are batched this long before searching (one request for quick clicks). */
 const FILTER_DEBOUNCE_MS = 350;
+/** Items per page: the server's default search limit. */
+const PAGE_SIZE = 60;
 /** Tailwind `lg`: the filter panel is a sidebar from here up, a bottom sheet below. */
 const DESKTOP_QUERY = "(min-width: 64rem)";
 
@@ -46,6 +48,8 @@ function filterLabel(f: Filter, keys: Map<string, SpecKey>, collectionName: (id:
   if (Array.isArray(f.value)) return `${name}: ${f.value.slice(0, 3).map(show).join(", ")}${f.value.length > 3 ? ` +${f.value.length - 3}` : ""}`;
   if (typeof f.value === "boolean") return f.value === (f.op === "eq") ? name : `no ${name.toLowerCase()}`;
   if (f.key === "collection" && typeof f.value === "number") return `${name} ${OP_LABEL[f.op]} ${show(f.value)}`;
+  // Quoted: the parser cuts product words to their stem ("lijev"), which shouldn't look like a typo.
+  if (f.op === "contains" && typeof f.value === "string") return `${name} contains “${f.value}”`;
   const unit = keys.get(f.key)?.unit;
   const value = f.key === "price" && typeof f.value === "number" ? f.value.toLocaleString("en-US") : formatSpecValue(f.value ?? null, unit);
   return `${name} ${OP_LABEL[f.op]} ${value}`;
@@ -62,11 +66,23 @@ function Chip({ children, onRemove, tone = "default", title }: { children: React
     <span title={title} className={`inline-flex max-w-full items-center gap-1.5 rounded-full border py-1 pl-3 text-sm ${onRemove ? "pr-1" : "pr-3"} ${tones[tone]}`}>
       <span className="truncate">{children}</span>
       {onRemove && (
-        <button onClick={onRemove} className="flex size-5 shrink-0 items-center justify-center rounded-full hover:bg-black/10 dark:hover:bg-white/10" aria-label="Remove">
+        <button type="button" onClick={onRemove} className="flex size-5 shrink-0 items-center justify-center rounded-full hover:bg-black/10 dark:hover:bg-white/10" aria-label="Remove">
           ×
         </button>
       )}
     </span>
+  );
+}
+
+/** Loads the next page of a cut list. */
+function MoreButton({ shown, total, loading, onClick }: { shown: number; total: number; loading: boolean; onClick: () => void }) {
+  const left = total - shown;
+  return (
+    <div className="flex justify-center">
+      <button type="button" className="btn-ghost" disabled={loading} onClick={onClick}>
+        {loading ? "Loading…" : `Show ${Math.min(PAGE_SIZE, left)} more (${left} left)`}
+      </button>
+    </div>
   );
 }
 
@@ -157,6 +173,35 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
     },
     [scope, includeGone, loadRecent],
   );
+
+  /** The next page of matches (or of "can't be judged yet"): the same plan again, no LLM call, no web lookup. */
+  const [loadingMore, setLoadingMore] = useState<"items" | "unknown" | null>(null);
+  const loadMore = async (part: "items" | "unknown") => {
+    if (!result) return;
+    const mySeq = seq.current;
+    setLoadingMore(part);
+    try {
+      const res = await api.search({
+        ...scopeParams(scope),
+        includeGone,
+        plan: result.plan,
+        enrich: false,
+        ...(part === "items" ? { offset: result.items.length } : { unknownOffset: result.unknown.length }),
+      });
+      // A new search started meanwhile: its first page replaces everything.
+      if (mySeq !== seq.current) return;
+      setResult((cur) =>
+        cur && {
+          ...cur,
+          ...(part === "items" ? { items: [...cur.items, ...res.items], total: res.total, strongCount: res.strongCount } : { unknown: [...cur.unknown, ...res.unknown], unknownTotal: res.unknownTotal }),
+        },
+      );
+    } catch (err) {
+      if (mySeq === seq.current) setError((err as Error).message);
+    } finally {
+      setLoadingMore(null);
+    }
+  };
 
   // Browse everything when the collection or group changes.
   useEffect(() => {
@@ -400,7 +445,13 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
               <Chip
                 key={`f${i}`}
                 tone={missingKeys.has(f.key) ? "pending" : "default"}
-                title={missingKeys.has(f.key) ? "Not stated in listings — being looked up on the web" : undefined}
+                title={
+                  missingKeys.has(f.key)
+                    ? "Not stated in listings — being looked up on the web"
+                    : f.op === "contains" && isListingField(f.key)
+                      ? `Only items with this in the ${specLabel(f.key).toLowerCase()}`
+                      : undefined
+                }
                 onRemove={() => editPlan({ ...plan, filters: plan.filters.filter((_, j) => j !== i) })}
               >
                 {missingKeys.has(f.key) && <GlobeIcon className="mr-1 inline size-3.5" />}
@@ -528,8 +579,15 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
           {result && (
             <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-stone-600 dark:text-stone-400">
               <span>
+                {result.items.length < result.total && <>Showing {result.items.length} of </>}
                 <strong className="text-stone-900 dark:text-stone-100">{result.total}</strong> match{result.total === 1 ? "" : "es"}
-                {result.unknown.length > 0 && <> · {result.unknown.length} can’t be judged yet</>}
+                {result.strongCount !== null && result.total > 0 && (
+                  <span title="High or medium match by meaning; weaker matches are faded">
+                    {" "}
+                    · <strong className="text-stone-900 dark:text-stone-100">{result.strongCount}</strong> strong
+                  </span>
+                )}
+                {result.unknownTotal > 0 && <> · {result.unknownTotal} can’t be judged yet</>}
                 {mixedCurrencySort && <span className="block text-xs text-amber-700 dark:text-amber-400">Prices in different currencies are sorted by amount only</span>}
               </span>
               <span className="flex flex-wrap items-center gap-3">
@@ -545,13 +603,26 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
           )}
 
           {result && result.items.length > 0 && view === "list" ? (
-            <CompareTable items={result.items} keys={keys} fieldKeys={highlightKeys} sort={plan?.sort ?? null} onSort={chooseSort} pendingKeys={pendingKeys} onOpen={setOpen} />
+            <CompareTable
+              items={result.items}
+              keys={keys}
+              fieldKeys={highlightKeys}
+              sort={plan?.sort ?? null}
+              onSort={chooseSort}
+              pendingKeys={pendingKeys}
+              onOpen={setOpen}
+              weakerCount={plan?.semanticText && !plan.sort && result.strongCount !== null ? result.total - result.strongCount : null}
+            />
           ) : (
             <div className={tileGrid}>
               {result?.items.map((item) => (
                 <ItemCard key={item.id} item={item} keys={keys} highlightKeys={highlightKeys} onOpen={() => setOpen(item)} />
               ))}
             </div>
+          )}
+
+          {result && result.items.length < result.total && (
+            <MoreButton shown={result.items.length} total={result.total} loading={loadingMore === "items"} onClick={() => loadMore("items")} />
           )}
 
           {result && result.items.length === 0 && !loading && (
@@ -562,7 +633,7 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
             <div className="card">
               <div className="flex flex-wrap items-center gap-2 px-4 py-3">
                 <button className="mr-auto text-left text-sm font-medium" onClick={() => setShowUnknown((v) => !v)} aria-expanded={showUnknown}>
-                  {showUnknown ? "▾" : "▸"} {result.unknown.length} items missing a filtered value
+                  {showUnknown ? "▾" : "▸"} {result.unknownTotal} items missing a filtered value
                 </button>
                 {config?.webSearchEnabled && !enriching && unknownAttrs.length > 0 && (
                   <button className="btn-ghost btn-sm" onClick={lookUpUnknown}>
@@ -592,6 +663,11 @@ export function SearchView({ config, collections, groups, scope, onSelectScope, 
                     </li>
                   ))}
                 </ul>
+              )}
+              {showUnknown && result.unknown.length < result.unknownTotal && (
+                <div className="border-t border-stone-200 p-3 dark:border-stone-800">
+                  <MoreButton shown={result.unknown.length} total={result.unknownTotal} loading={loadingMore === "unknown"} onClick={() => loadMore("unknown")} />
+                </div>
               )}
             </div>
           )}
