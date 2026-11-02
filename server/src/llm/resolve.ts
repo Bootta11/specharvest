@@ -23,6 +23,7 @@ export const TIER_OF: Record<LlmPurpose, LlmTier> = {
   consolidate: "smart",
   group: "smart",
   "web-lookup": "web",
+  focus: "fast",
 };
 
 export const SETTINGS_PATH = "Settings → LLM provider";

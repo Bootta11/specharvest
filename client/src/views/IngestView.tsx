@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
-import { isActiveJob, type Collection, type CollectionGroup, type CrawlMode, type CrawlRequest, type Job, type Runner } from "@specharvest/shared";
+import { FOCUS_MAX_LENGTH, isActiveJob, type Collection, type CollectionGroup, type CrawlMode, type CrawlRequest, type Job, type Runner } from "@specharvest/shared";
 import { api, downloadExport, formatUsd, storageGet, storageSet, useJobStream, type AppConfig, type JobsFeed, type SearchScope } from "../lib/api.ts";
-import { JobProgress, StatusBadge, jobPercent } from "../components/JobProgress.tsx";
+import { JobProgress, StatusBadge, jobKindLabel, jobPercent } from "../components/JobProgress.tsx";
 import { ProductsModal } from "../components/ProductsModal.tsx";
 import { GroupModal } from "../components/GroupModal.tsx";
 import { clearPendingShare, peekPendingShare, sameUrl } from "../lib/share.ts";
 import { ClearableInput } from "../components/ClearableInput.tsx";
 import { usePageCheck } from "../lib/page-check.ts";
 import { BrowserRunnerToggle } from "../components/BrowserRunnerToggle.tsx";
+import { FOCUS_PLACEHOLDER, FocusModal } from "../components/FocusModal.tsx";
 
 interface Props {
   config: AppConfig | null;
@@ -44,13 +45,16 @@ const timeAgo = (ts: number) => {
   return new Date(ts).toLocaleDateString();
 };
 
-const jobLabel = (j: Job) => `${j.kind === "crawl" ? "Crawl" : "Web lookup"} #${j.id}`;
+const jobLabel = (j: Job) => `${jobKindLabel(j.kind)} #${j.id}`;
 
 export function IngestView({ config, collections, groups, feed, onChanged, onSearch }: Props) {
   /** A link shared from another app (Android), prefilled below until a crawl starts or it's dismissed. */
   const [shared, setShared] = useState(peekPendingShare);
   const [url, setUrl] = useState(() => shared?.url ?? "");
   const [name, setName] = useState(() => shared?.title ?? "");
+  /** What to look for in particular (saved on the collection). */
+  const [focus, setFocus] = useState("");
+  const [focusOf, setFocusOf] = useState<Collection | null>(null);
   /** The user typed the title themselves — the checked page's title doesn't replace it. */
   const [nameEdited, setNameEdited] = useState(false);
   /** "Crawl anyway" on a page the check says isn't a shop page. */
@@ -165,6 +169,7 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
       selectJob(job.id);
       setShared(null);
       if (body.name) setName("");
+      if (body.focus) setFocus("");
       onChanged();
       loadJobs();
     } catch (err) {
@@ -190,6 +195,7 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
     start({
       url: url.trim(),
       name: name.trim() || undefined,
+      focus: focus.trim() || undefined,
       maxPages: maxPages || undefined,
       maxItems: maxItems || undefined,
       ...runnerFields,
@@ -429,6 +435,22 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
                   }}
                 />
               </label>
+              <label className="block">
+                <span className="mb-1 block text-sm font-medium">
+                  Focus <span className="font-normal text-stone-500">(optional — what to look for)</span>
+                </span>
+                <ClearableInput
+                  type="text"
+                  maxLength={FOCUS_MAX_LENGTH}
+                  placeholder={FOCUS_PLACEHOLDER}
+                  value={focus}
+                  onChange={(e) => setFocus(e.target.value)}
+                  onClear={() => setFocus("")}
+                />
+                <span className="mt-1 block text-xs text-stone-500">
+                  The AI reads each ad for this and marks it as matching or not, with a quote. All ads are still saved; it&apos;s kept for re-crawls.
+                </span>
+              </label>
               <div className="grid grid-cols-2 gap-3">
                 <label className="block">
                   <span className="mb-1 block text-sm font-medium">Max pages</span>
@@ -513,7 +535,7 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
         {jobId && (
           <JobProgress
             stream={stream}
-            title={[`${stream.job?.kind === "enrich" ? "Web lookup" : "Crawl"} #${jobId}`, collectionName(stream.job?.collectionId ?? null)].filter(Boolean).join(" · ")}
+            title={[`${jobKindLabel(stream.job?.kind ?? "crawl")} #${jobId}`, collectionName(stream.job?.collectionId ?? null)].filter(Boolean).join(" · ")}
             onStop={stopJob}
             onResume={resumeJob}
             browserOnline={browserOnline}
@@ -589,7 +611,7 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
                       className="btn-ghost btn-sm my-2.5 mr-3 shrink-0"
                       disabled={j.message === "Stopping…"}
                       onClick={() => stopJob(j)}
-                      title={j.kind === "crawl" ? "Stop — you can resume it later" : "Stop — values found so far are kept"}
+                      title={j.kind === "crawl" ? "Stop — you can resume it later" : j.kind === "focus" ? "Stop — answers so far are kept" : "Stop — values found so far are kept"}
                     >
                       {j.message === "Stopping…" ? "Stopping…" : "Stop"}
                     </button>
@@ -653,6 +675,20 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
                       · {c.host} · {timeAgo(c.createdAt)}
                       {c.llmCost > 0 && <span title="Spent on LLM calls for this collection"> · {formatUsd(c.llmCost)} LLM</span>}
                     </div>
+                    {c.focus && (
+                      <div className="truncate text-xs text-stone-500" title={c.focus}>
+                        Focus: <span className="text-stone-700 dark:text-stone-300">{c.focus}</span>
+                        {c.focusPendingCount > 0 && c.canEdit && (
+                          <>
+                            {" "}
+                            ·{" "}
+                            <button type="button" className="text-brand-700 hover:underline dark:text-brand-500" onClick={() => setFocusOf(c)}>
+                              {c.focusPendingCount} not checked yet
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    )}
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <button className="btn-primary btn-sm" onClick={() => onSearch(`c:${c.id}`)}>
@@ -682,6 +718,9 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
                         </button>
                         <button className="btn-ghost btn-sm" onClick={() => rename(c)}>
                           Rename
+                        </button>
+                        <button className="btn-ghost btn-sm" onClick={() => setFocusOf(c)} title="What this collection's crawls look for in particular">
+                          Focus
                         </button>
                         <button
                           className="btn-ghost btn-sm"
@@ -771,6 +810,18 @@ export function IngestView({ config, collections, groups, feed, onChanged, onSea
       </section>
       {editingGroup !== undefined && <GroupModal group={editingGroup} collections={collections} onSaved={onChanged} onClose={() => setEditingGroup(undefined)} />}
       {productsOf && <ProductsModal collection={productsOf} onClose={() => setProductsOf(null)} onGrouped={onChanged} />}
+      {focusOf && (
+        <FocusModal
+          collection={focusOf}
+          onClose={() => setFocusOf(null)}
+          onSaved={onChanged}
+          onStarted={(job) => {
+            selectJob(job.id);
+            onChanged();
+            loadJobs();
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -32,6 +32,10 @@ export interface Collection {
   manualCount: number;
   /** The viewer owns it or is an admin: may crawl, rename, share or delete. */
   canEdit: boolean;
+  /** What crawls of this collection look for in particular (e.g. "first owner cars"); every extraction answers it. */
+  focus: string | null;
+  /** Active items not yet checked against the current focus (POST /api/collections/:id/apply-focus checks them). */
+  focusPendingCount: number;
 }
 
 export interface SpecKey {
@@ -66,6 +70,8 @@ export interface Item {
   indexedAt: number;
   /** Set when the listing was missing from a complete re-crawl (sold/removed). */
   goneAt: number | null;
+  /** Why the item does (or doesn't) match its collection's focus: a short quote from the page. The yes/no is the `matches_focus` spec. */
+  focusNote: string | null;
   /** Cosine similarity to a meaning search (`semanticText`). */
   score?: number | null;
   /** How well the item matches a meaning search, relative to the best match; low ones are shown faded. */
@@ -245,7 +251,8 @@ export interface SearchResponse {
 
 // ---------- Jobs ----------
 
-export type JobKind = "crawl" | "enrich";
+/** focus = checking saved items against their collection's (new) focus, from their stored page text. */
+export type JobKind = "crawl" | "enrich" | "focus";
 /**
  * stopped — by the user; interrupted — by a server restart. Both can be resumed (crawls only).
  * picking — a crawl with `pickItems` walked the listing and waits for its user to choose the items to extract.
@@ -367,6 +374,11 @@ export const pageSnapshotSchema = z.object({
 });
 export type PageSnapshot = z.infer<typeof pageSnapshotSchema>;
 
+export const FOCUS_MAX_LENGTH = 500;
+export const focusSchema = z.string().trim().max(FOCUS_MAX_LENGTH);
+/** The boolean spec holding an item's answer to its collection's focus (absent = the page doesn't say). */
+export const FOCUS_SPEC_KEY = "matches_focus";
+
 export const crawlRequestSchema = z.object({
   url: httpUrlSchema,
   /** Re-crawl this existing collection (needs edit rights) instead of matching by URL. */
@@ -404,6 +416,11 @@ export const crawlRequestSchema = z.object({
    * choose which items to extract (POST /api/jobs/:id/pick).
    */
   pickItems: z.boolean().optional(),
+  /**
+   * What to look for in particular, e.g. "first owner cars": every extraction answers it (`matches_focus` + a quote) and
+   * states its facts as specs. Saved on the collection for later re-crawls; an empty string clears it.
+   */
+  focus: focusSchema.optional(),
 });
 export type CrawlRequest = z.infer<typeof crawlRequestSchema>;
 
@@ -500,6 +517,8 @@ export const collectionExportSchema = z.object({
     kind: z.enum(["listing", "items"]).default("listing"),
     // A detection that doesn't fit is dropped (the next crawl detects again) rather than failing the import.
     detection: listingDetectionSchema.nullable().default(null).catch(null),
+    // Absent in files from before crawl focus existed.
+    focus: focusSchema.nullable().default(null).catch(null),
   }),
   specKeys: z
     .array(
@@ -534,6 +553,9 @@ export const collectionExportSchema = z.object({
         checkedAt: nullableNumber,
         goneAt: nullableNumber,
         manual: z.boolean().default(false),
+        // The focus this item was checked against, and its quote (see Item.focusNote).
+        focusFor: focusSchema.nullable().default(null).catch(null),
+        focusNote: nullableString(1000).default(null).catch(null),
       }),
     )
     .max(20_000),
@@ -867,7 +889,7 @@ export const createUserSchema = z.object({ email: z.string().trim().toLowerCase(
 
 // ---------- LLM spend ----------
 
-export type LlmPurpose = "detect" | "extract" | "consolidate" | "search" | "web-lookup" | "group" | "predict";
+export type LlmPurpose = "detect" | "extract" | "consolidate" | "search" | "web-lookup" | "group" | "predict" | "focus";
 
 export interface UsageSummary {
   today: number;

@@ -20,6 +20,8 @@ const barStyle = (status: Job["status"]) =>
   status === "failed" ? "bg-red-500" : status === "stopped" || status === "interrupted" ? "bg-amber-500" : status === "picking" ? "bg-violet-500" : "bg-brand-600";
 
 /** Share of found items processed, 0–100. */
+export const jobKindLabel = (kind: Job["kind"]) => (kind === "crawl" ? "Crawl" : kind === "focus" ? "Focus check" : "Web lookup");
+
 export function jobPercent(job: Job): number {
   // Parked for a pick: the walk it was doing is finished.
   if (job.status === "picking") return 100;
@@ -147,6 +149,13 @@ export function JobProgress({ stream, title, onStop, onResume, browserOnline, on
             <Stat label="items found" value={job.itemsFound} />
             <Stat label="indexed" value={job.itemsIndexed} />
             <Stat label={queue && isActiveJob(job) ? `failed · ${queue.size + queue.pending} in queue` : "failed"} value={job.itemsFailed} />
+            <Stat label="LLM cost" value={formatUsd(job.llmCost)} />
+          </>
+        ) : job.kind === "focus" ? (
+          <>
+            <Stat label="items" value={job.itemsFound} />
+            <Stat label="checked" value={job.itemsIndexed} />
+            <Stat label="failed" value={job.itemsFailed} />
             <Stat label="LLM cost" value={formatUsd(job.llmCost)} />
           </>
         ) : (

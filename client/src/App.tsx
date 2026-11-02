@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { Collection, CollectionGroup, Job, UserSummary } from "@specharvest/shared";
 import { api, formatUsd, parseScope, showLocalNotification, storageGet, storageSet, useJobsFeed, type AppConfig, type SearchScope } from "./lib/api.ts";
 import { IngestView } from "./views/IngestView.tsx";
+import { jobKindLabel } from "./components/JobProgress.tsx";
 import { SearchView } from "./views/SearchView.tsx";
 import { ReconnectingBanner } from "./components/ReconnectingBanner.tsx";
 import { SpendMenu } from "./components/SpendMenu.tsx";
@@ -76,7 +77,7 @@ function Workspace({ user, auth }: { user: UserSummary; auth: Auth }) {
       refreshCollections();
       // Stopping was the user's own action — no alert needed.
       if (job.status === "stopped") return;
-      const what = job.kind === "crawl" ? "Crawl" : "Web lookup";
+      const what = jobKindLabel(job.kind);
       const name = collections.find((c) => c.id === job.collectionId)?.name;
       const detail = job.status === "failed" ? (job.error ?? job.message ?? "Failed") : (job.message ?? "Finished");
       const body = job.llmCost ? `${detail}\n${formatUsd(job.llmCost)} LLM` : detail;

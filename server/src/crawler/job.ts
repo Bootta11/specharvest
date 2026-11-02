@@ -1,11 +1,11 @@
 import PQueue from "p-queue";
-import type { CrawlMode, CrawlRequest, Job, JobEvent, PageSnapshot, Runner, SpecValue } from "@specharvest/shared";
+import { FOCUS_SPEC_KEY, type CrawlMode, type CrawlRequest, type Job, type JobEvent, type PageSnapshot, type Runner, type SpecValue } from "@specharvest/shared";
 import { env } from "../config.ts";
 import * as db from "../db/sqlite.ts";
 import { upsertVector } from "../db/lance.ts";
 import { embed } from "../embedding.ts";
 import { finishJobTiming, startJobTiming, timed } from "../lib/timing.ts";
-import { coerceToType, extractItem, type Extraction } from "../llm/extract.ts";
+import { coerceToType, extractItem, focusSpecKey, type Extraction } from "../llm/extract.ts";
 import { llmBlocked } from "../llm/client.ts";
 import { llmReady } from "../llm/resolve.ts";
 import { BROWSER_WAIT_MS, restartAction } from "./restart.ts";
@@ -220,6 +220,7 @@ export function startCrawl(req: CrawlRequest, userId: number | null, collectionI
   const name = req.name?.trim();
   const targetId = existing?.id ?? db.createCollection(name || host, url, host, userId, addItem ? "items" : "listing");
   if (existing && !addItem && name && name !== existing.name) db.renameCollection(existing.id, name);
+  if (req.focus !== undefined) db.setCollectionFocus(targetId, req.focus);
   const runner: Runner = req.runner ?? "server";
   // Saved as the job's params (resume reuses them) — without the page snapshot, which is used once.
   const params: CrawlRequest = {
@@ -506,9 +507,12 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
     const contentHash = fingerprint(snapshot.stableText);
     // The same unchanged ad was already read in another collection: copy it instead of paying the LLM again
     // (a full re-crawl always re-extracts). Nothing about where it came from is stored or shown.
-    const donor = mode === "full" ? null : db.findReusableExtraction(itemUrl, contentHash, collectionId, ownerId);
-    const extraction = donor ? adoptExtraction(donor, db.listSpecKeys(collectionId)) : await extractItem(snapshot, db.listSpecKeys(collectionId));
+    // With a focus, the page has to be read for it: another collection's copy didn't answer it.
+    const focus = db.collectionFocus(collectionId);
+    const donor = mode === "full" || focus ? null : db.findReusableExtraction(itemUrl, contentHash, collectionId, ownerId);
+    const extraction = donor ? adoptExtraction(donor, db.listSpecKeys(collectionId)) : await extractItem(snapshot, db.listSpecKeys(collectionId), focus);
     const specs: Record<string, SpecValue> = Object.fromEntries(extraction.specs.map((s) => [s.key, s.value]));
+    if (extraction.focusMatch !== null) specs[FOCUS_SPEC_KEY] = extraction.focusMatch;
     const itemId = db.upsertItem({
       collectionId,
       url: itemUrl,
@@ -525,10 +529,13 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
       contentText: snapshot.stableText,
       manual: addItem || undefined,
       fromBrowser: inBrowser,
+      focusFor: focus,
+      focusNote: extraction.focusNote,
     });
     for (const s of extraction.specs) {
       db.upsertSpecKey(collectionId, { key: s.key, type: s.type, unit: s.unit, label: s.label, example: String(s.value).slice(0, 60), origin: "page" });
     }
+    if (extraction.focusMatch !== null) db.upsertSpecKey(collectionId, focusSpecKey(extraction.focusMatch));
     await upsertVector(itemId, collectionId, await timed("embed", () => embed(embeddingText({ ...extraction, specs }))));
     if (donor) reused++;
     else extracted++;
@@ -868,10 +875,11 @@ function adoptExtraction(donor: db.ReusableExtraction, registry: ReturnType<type
     const key = byKey.has(s.key) ? s.key : (db.keyAliasesOf(s.key).find((k) => byKey.has(k)) ?? s.key);
     const known = byKey.get(key);
     const value = coerceToType(s.value, known?.type ?? s.type);
-    if (value === null || specs.some((x) => x.key === key)) continue;
+    // The donor's focus answer was to its own collection's question.
+    if (value === null || key === FOCUS_SPEC_KEY || specs.some((x) => x.key === key)) continue;
     specs.push({ key, value, type: known?.type ?? s.type, unit: known?.unit ?? s.unit, label: s.label });
   }
-  return { title: donor.title, price: donor.price, currency: donor.currency, mainImage: donor.mainImage, description: donor.description, identity: donor.identity, specs };
+  return { title: donor.title, price: donor.price, currency: donor.currency, mainImage: donor.mainImage, description: donor.description, identity: donor.identity, specs, focusMatch: null, focusNote: null };
 }
 
 /**

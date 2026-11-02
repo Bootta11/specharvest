@@ -203,6 +203,10 @@ export const api = {
   renameCollection: (id: number, name: string) => request<Collection>("PATCH", `/api/collections/${id}`, { name }),
   shareCollection: (id: number, isShared: boolean) => request<Collection>("PATCH", `/api/collections/${id}`, { isShared }),
   setCollectionGrouping: (id: number, grouping: GroupingMode) => request<Collection>("PATCH", `/api/collections/${id}`, { grouping }),
+  /** "" removes the focus. */
+  setCollectionFocus: (id: number, focus: string) => request<Collection>("PATCH", `/api/collections/${id}`, { focus }),
+  /** Paid: checks the saved items not yet checked against the collection's focus (job null when there are none). */
+  applyFocus: (id: number) => request<{ job: Job | null; note?: string }>("POST", `/api/collections/${id}/apply-focus`),
   deleteCollection: (id: number) => request<{ ok: true }>("DELETE", `/api/collections/${id}`),
   /** Export paths for downloadExport() (cookie on the web, bearer token in the app). */
   exportCollectionUrl: (id: number) => `/api/collections/${id}/export`,

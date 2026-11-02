@@ -1,11 +1,11 @@
 import { z } from "zod";
-import { isHttpUrl, type SpecKey, type SpecType, type SpecValue } from "@specharvest/shared";
+import { FOCUS_SPEC_KEY, isHttpUrl, type SpecKey, type SpecType, type SpecValue } from "@specharvest/shared";
 import { askForJson } from "./client.ts";
 import type { DetailSnapshot } from "../crawler/sanitize.ts";
 
 // Compact tuple [key, value, unit?, label?] — dealer pages can list 100+
 // equipment items and the verbose object form runs past the token limit.
-const specSchema = z
+export const specSchema = z
   .array(z.union([z.string(), z.number(), z.boolean(), z.null()]))
   .min(2)
   .transform((t) => ({
@@ -15,6 +15,15 @@ const specSchema = z
     label: typeof t[3] === "string" ? t[3] : null,
   }));
 
+/** The page's answer to the collection's focus (only asked for when one is set). */
+export const focusAnswerSchema = z
+  .object({
+    match: z.boolean().nullable().optional(),
+    evidence: z.string().nullable().optional(),
+  })
+  .nullable()
+  .optional();
+
 const extractionSchema = z.object({
   title: z.string().min(1),
   price: z.number().nullable().optional(),
@@ -23,6 +32,7 @@ const extractionSchema = z.object({
   description: z.string().nullable().optional(),
   identity: z.string().nullable().optional(),
   specs: z.array(specSchema).default([]),
+  focus: focusAnswerSchema,
 });
 
 export interface ExtractedSpec {
@@ -41,6 +51,10 @@ export interface Extraction {
   description: string | null;
   identity: string | null;
   specs: ExtractedSpec[];
+  /** Answer to the collection's focus: true/false when the page says, null when it doesn't (or no focus was asked). */
+  focusMatch: boolean | null;
+  /** Short quote backing focusMatch. */
+  focusNote: string | null;
 }
 
 const SYSTEM = `You normalize product listing pages into structured, comparable data. The page text may be in any language (e.g. Bosnian/Croatian/Serbian); your output keys and enumerated values must be in English.
@@ -69,7 +83,45 @@ Rules for specs:
 - Output compact JSON: write each tuple on ONE line, no indentation inside tuples.
 - Skip page chrome: ids, view counts, dates published/renewed, seller contact, share buttons, navigation.`;
 
-function registryText(keys: SpecKey[]): string {
+/** What the user is looking for in particular: added to the extraction and focus-check prompts. */
+export function focusInstructions(focus: string): string {
+  return `Crawl focus — the user is looking for this in particular: "${focus.replace(/\s+/g, " ")}"
+- Read the whole page (spec lists, equipment, and the seller's free text) for facts that answer it.
+- State each such fact as a spec (reuse registry keys; otherwise a clear English snake_case key, e.g. first_owner true, previous_owners_count 1, service_history "full"). A fact stated only in the description still counts.
+- "focus": { "match": true | false | null, "evidence": string | null } — match = whether this listing is what the user is looking for; null when the page doesn't say (never guess). evidence = the short original page wording that decides it (max ~200 chars, no phone numbers, emails, names or addresses), null when match is null.`;
+}
+
+/** Turns the model's spec tuples into typed specs, reusing the registry's type and unit for known keys. */
+export function normalizeSpecs(tuples: Array<z.infer<typeof specSchema>>, registry: SpecKey[]): ExtractedSpec[] {
+  const byKey = new Map(registry.map((k) => [k.key, k]));
+  const specs = new Map<string, ExtractedSpec>();
+  for (const s of tuples) {
+    if (s.value === null || s.value === "") continue;
+    const key = normalizeKey(s.key);
+    // The focus answer comes from "focus", not from a spec the model made up.
+    if (!key || key === FOCUS_SPEC_KEY) continue;
+    const known = byKey.get(key);
+    const type = known?.type ?? typeOf(s.value);
+    const value = coerceToType(s.value, type);
+    if (value === null) continue;
+    specs.set(key, { key, value, type, unit: known?.unit ?? s.unit ?? null, label: s.label?.trim() || key });
+  }
+  return [...specs.values()];
+}
+
+/** The registry entry of the focus answer spec. */
+export function focusSpecKey(example: boolean) {
+  return { key: FOCUS_SPEC_KEY, type: "boolean" as const, unit: null, label: "Matches focus", example: String(example), origin: "page" as const };
+}
+
+/** The focus answer as stored: a match needs a yes/no; the quote is kept short. */
+export function toFocusAnswer(focus: z.infer<typeof focusAnswerSchema>): { focusMatch: boolean | null; focusNote: string | null } {
+  const focusMatch = typeof focus?.match === "boolean" ? focus.match : null;
+  const note = focus?.evidence?.trim().replace(/\s+/g, " ") || null;
+  return { focusMatch, focusNote: focusMatch === null || !note ? null : note.slice(0, 300) };
+}
+
+export function registryText(keys: SpecKey[]): string {
   if (keys.length === 0) return "(empty — you are defining the first keys)";
   return keys
     .slice(0, 400)
@@ -117,27 +169,15 @@ export function coerceToType(value: SpecValue, type: SpecType): SpecValue | null
 
 const typeOf = (v: SpecValue): SpecType => (typeof v === "number" ? "number" : typeof v === "boolean" ? "boolean" : "string");
 
-export async function extractItem(snapshot: DetailSnapshot, registry: SpecKey[]): Promise<Extraction> {
+/** `focus`: the collection's crawl focus — the answer comes back as focusMatch/focusNote. */
+export async function extractItem(snapshot: DetailSnapshot, registry: SpecKey[], focus?: string | null): Promise<Extraction> {
   const prefill = Object.entries(snapshot.prefill)
     .filter(([, v]) => v != null && v !== "")
     .map(([k, v]) => `${k}: ${String(v).slice(0, 300)}`)
     .join("\n");
-  const user = `Spec key registry (reuse these keys):\n${registryText(registry)}\n\nPage URL: ${snapshot.url}\n\nStructured hints from page metadata:\n${prefill || "(none)"}\n\nCandidate image URLs:\n${snapshot.images.slice(0, 5).join("\n") || "(none)"}\n\nPage text:\n${snapshot.text}`;
+  const user = `Spec key registry (reuse these keys):\n${registryText(registry)}\n\nPage URL: ${snapshot.url}\n\nStructured hints from page metadata:\n${prefill || "(none)"}\n\nCandidate image URLs:\n${snapshot.images.slice(0, 5).join("\n") || "(none)"}${focus ? `\n\n${focusInstructions(focus)}` : ""}\n\nPage text:\n${snapshot.text}`;
 
   const { data } = await askForJson(extractionSchema, SYSTEM, user, { purpose: "extract", maxTokens: 12000 });
-
-  const byKey = new Map(registry.map((k) => [k.key, k]));
-  const specs = new Map<string, ExtractedSpec>();
-  for (const s of data.specs) {
-    if (s.value === null || s.value === "") continue;
-    const key = normalizeKey(s.key);
-    if (!key) continue;
-    const known = byKey.get(key);
-    const type = known?.type ?? typeOf(s.value);
-    const value = coerceToType(s.value, type);
-    if (value === null) continue;
-    specs.set(key, { key, value, type, unit: known?.unit ?? s.unit ?? null, label: s.label?.trim() || key });
-  }
 
   return {
     title: data.title.trim() || snapshot.prefill.title || "Untitled",
@@ -146,6 +186,7 @@ export async function extractItem(snapshot: DetailSnapshot, registry: SpecKey[])
     mainImage: [data.main_image, snapshot.prefill.image].find(isHttpUrl) ?? null,
     description: data.description ?? snapshot.prefill.description,
     identity: data.identity?.trim().toLowerCase().replace(/\s+/g, " ") || null,
-    specs: [...specs.values()],
+    specs: normalizeSpecs(data.specs, registry),
+    ...(focus ? toFocusAnswer(data.focus) : { focusMatch: null, focusNote: null }),
   };
 }

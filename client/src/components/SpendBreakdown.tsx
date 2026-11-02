@@ -9,6 +9,7 @@ const PURPOSE_LABEL: Record<LlmPurpose, string> = {
   "web-lookup": "Web lookups",
   group: "Product grouping",
   predict: "Spec prediction",
+  focus: "Focus check",
 };
 
 const calls = (n: number) => `${n} call${n === 1 ? "" : "s"}`;

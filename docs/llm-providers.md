@@ -25,7 +25,7 @@ official provider packages. See [Library](#library) for why.
 
 | Kind of task | Used for | Server key model |
 | --- | --- | --- |
-| Fast | listing detection, spec extraction, search parsing, spec prediction — most of the volume | `OPENROUTER_MODEL`; extraction: `OPENROUTER_EXTRACTION_MODEL` |
+| Fast | listing detection, spec extraction, search parsing, spec prediction, focus checks — most of the volume | `OPENROUTER_MODEL`; extraction: `OPENROUTER_EXTRACTION_MODEL` |
 | Smart | product grouping, key merging | `OPENROUTER_SMART_MODEL` |
 | Web lookups | finding specs a listing doesn't state | `OPENROUTER_WEB_MODEL`, with `WEB_SEARCH_ENGINE` / `WEB_SEARCH_MAX_USES` |
 
@@ -97,6 +97,8 @@ limit, and their own keys are never limited. 0 turns the limit off.
   fee from the catalog. Estimated rows have `llm_usage.cost_estimated = 1`, and
   the $ menu says "partly estimated".
 - Unknown models (e.g. a custom endpoint) are counted as unpriced calls.
+- Each call is recorded with its purpose (spec extraction, listing detection, … *Focus check* for
+  [applying a crawl focus](crawling.md#crawl-focus) to saved items), shown in the $ menu's breakdown.
 - Each `llm_usage` row records `provider` and `funding` (`own` = your key,
   `platform` = server key). The $ menu splits your spend that way.
 
@@ -108,6 +110,7 @@ stops the work instead of failing item by item:
 - **Crawl:** ends *Stopped: Your OpenAI key was rejected — fix it in Settings → LLM provider*.
   It is resumable: fix the key, then *Resume*.
 - **Web lookup:** fails with the same message and keeps the values found before.
+- **Focus check:** the same; answers found before are kept, *Apply focus* checks the rest.
 - **Search:** answers `400` with the message.
 
 The provider's error is saved on the key and shown in Settings until a call

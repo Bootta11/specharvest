@@ -5,6 +5,7 @@ import { stopCrawl } from "../crawler/job.ts";
 import { deleteVectors } from "../db/lance.ts";
 import * as db from "../db/sqlite.ts";
 import { stopEnrichment } from "../enrich/web.ts";
+import { stopFocusCheck } from "../enrich/focus.ts";
 import { disconnectKey } from "../extension/gateway.ts";
 import { httpError } from "../lib/http-error.ts";
 import { createApiKey, listApiKeys, listExtensionTokens, revokeApiKey } from "./api-keys.ts";
@@ -75,7 +76,7 @@ export function registerAuthRoutes(app: FastifyInstance) {
   app.delete("/api/auth/me", credentialLimit, async (req, reply) => {
     const { currentPassword } = deleteAccountSchema.parse(req.body);
     const user = await assertCanDeleteOwnAccount(currentUser(req).id, currentPassword);
-    for (const job of activeJobsOf(user.id)) (job.kind === "enrich" ? stopEnrichment : stopCrawl)(job.id);
+    for (const job of activeJobsOf(user.id)) (job.kind === "enrich" ? stopEnrichment : job.kind === "focus" ? stopFocusCheck : stopCrawl)(job.id);
     for (const device of listExtensionTokens(user.id)) disconnectKey(device.id);
     await deleteVectors(deleteUser(user.id));
     req.log.info(`user ${user.id} deleted their account`);

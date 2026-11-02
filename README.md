@@ -73,6 +73,9 @@ CI tests, scans and publishes the image on every push to `master`. See
    *Let me pick items first* reads only the listing's titles; you then tick the
    ads to extract, and only those use the LLM
    ([details](docs/crawling.md#pick-items-before-extracting)).
+   *Focus* (optional) says what you're after, e.g. "first owner cars": each ad is
+   marked as matching or not, with a quote from the ad, and you can filter on it
+   ([details](docs/crawling.md#crawl-focus)).
    With the [browser extension](docs/extension.md) connected, *Run in my browser*
    loads the pages in your own Chrome — free, and past most bot checks.
    *Export* downloads a collection (items, specs, web lookup results) as

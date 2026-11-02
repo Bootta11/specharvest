@@ -1,5 +1,5 @@
 import type { Item, SpecKey, SpecValue } from "@specharvest/shared";
-import { formatSpecValue, sourceHost, specLabel } from "@specharvest/shared";
+import { FOCUS_SPEC_KEY, formatSpecValue, sourceHost, specLabel } from "@specharvest/shared";
 import { safeUrl } from "../lib/api.ts";
 
 /** How a currency is written after an amount ("BAM" is shown as "KM"). */
@@ -38,6 +38,22 @@ export function GoneBadge({ item, className = "" }: { item: Pick<Item, "goneAt">
       className={`inline-flex shrink-0 items-center rounded-full bg-stone-200 px-2 py-0.5 text-xs font-medium text-stone-700 dark:bg-stone-700 dark:text-stone-200 ${className}`}
     >
       Gone
+    </span>
+  );
+}
+
+/** The item's answer to its collection's focus (with the ad's quote on hover); nothing when the ad doesn't say. */
+export function FocusBadge({ item, className = "" }: { item: Pick<Item, "specs" | "focusNote">; className?: string }) {
+  const match = item.specs[FOCUS_SPEC_KEY];
+  if (typeof match !== "boolean") return null;
+  return (
+    <span
+      title={item.focusNote ? `“${item.focusNote}”` : undefined}
+      className={`inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-xs font-medium ${
+        match ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-200" : "bg-stone-200 text-stone-700 dark:bg-stone-700 dark:text-stone-200"
+      } ${className}`}
+    >
+      {match ? "✓ Matches focus" : "No focus match"}
     </span>
   );
 }
@@ -153,7 +169,10 @@ export function ItemCard({ item, keys, highlightKeys, onOpen }: Props) {
             {item.title}
           </button>
         </h3>
-        <div className="mt-1 text-lg font-semibold text-brand-800 dark:text-brand-100">{formatPrice(item.price, item.currency)}</div>
+        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="text-lg font-semibold text-brand-800 dark:text-brand-100">{formatPrice(item.price, item.currency)}</span>
+          <FocusBadge item={item} />
+        </div>
         <div className="mt-2 space-y-0.5">
           {shown
             .filter((k) => k !== "price")

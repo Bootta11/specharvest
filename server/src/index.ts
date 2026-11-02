@@ -12,6 +12,7 @@ import {
   pickRequestSchema,
   resumeRequestSchema,
   enrichRequestSchema,
+  focusSchema,
   groupInputSchema,
   groupingModes,
   importRequestSchema,
@@ -37,6 +38,7 @@ import { continueHeldCrawls, embeddingText, emitJob, interruptCrawls, jobChannel
 import { getNotificationSettings, maskSettings, saveNotificationSettings, sendTest } from "./notify/index.ts";
 import { vapidKeys } from "./notify/push.ts";
 import { interruptLookups, markUndrainedLookups, startEnrichment, stopEnrichment } from "./enrich/web.ts";
+import { interruptFocusChecks, markUndrainedFocusChecks, startFocusCheck, stopFocusCheck } from "./enrich/focus.ts";
 import { autoConfirmMatches, groupForCollection, lookupIdentity, matchSuggestions, productGroups, sameProductOf, ungroupedCount } from "./enrich/group.ts";
 import { search } from "./search/hybrid.ts";
 import { proposeKeyMerges } from "./llm/consolidate.ts";
@@ -99,6 +101,7 @@ const REFUSED_WHILE_STOPPING = new Set([
   "POST /api/jobs/:id/pick",
   "POST /api/collections/import",
   "POST /api/collections/:id/consolidate",
+  "POST /api/collections/:id/apply-focus",
   "POST /api/admin/browsers/capacity",
   "POST /api/admin/burst/image",
 ]);
@@ -192,21 +195,37 @@ const collectionPatchSchema = z.object({
   name: z.string().trim().min(1).max(200).optional(),
   isShared: z.boolean().optional(),
   grouping: z.enum(groupingModes).optional(),
+  /** What crawls look for in particular; "" clears it. A change drops the items' old answers (see setCollectionFocus). */
+  focus: focusSchema.optional(),
 });
 
 app.patch("/api/collections/:id", async (req) => {
   const user = currentUser(req);
   const id = requireCollection(idParam(req.params), user, "write").id;
   const body = collectionPatchSchema.parse(req.body);
-  if (body.name === undefined && body.isShared === undefined && body.grouping === undefined) throw httpError(400, "Nothing to change");
+  if (body.name === undefined && body.isShared === undefined && body.grouping === undefined && body.focus === undefined) throw httpError(400, "Nothing to change");
+  if (body.focus !== undefined && db.activeJobForCollection(id, "focus")) throw httpError(409, "A focus check is running for this collection — stop it first");
   if (body.name !== undefined) db.renameCollection(id, body.name);
   if (body.isShared !== undefined) db.setCollectionShared(id, body.isShared);
+  if (body.focus !== undefined) db.setCollectionFocus(id, body.focus);
   if (body.grouping !== undefined) {
     db.setCollectionGrouping(id, body.grouping);
     // Switching to loose groups the waiting single-candidate matches right away (free, no LLM).
     if (body.grouping === "loose") autoConfirmMatches(db.listItems(id, 5000, 0, true));
   }
   return db.getCollection(id, user);
+});
+
+// Checks the saved items against the collection's current focus, from their stored page text (paid: one LLM call each).
+app.post("/api/collections/:id/apply-focus", userLimit(10), async (req, reply) => {
+  const user = currentUser(req);
+  const collection = requireCollection(idParam(req.params), user, "write");
+  if (!collection.focus) throw httpError(400, "This collection has no focus — set one first");
+  const crawl = db.activeJobForCollection(collection.id, "crawl");
+  if (crawl) throw httpError(409, `Crawl #${crawl.id} is running for "${collection.name}" — apply the focus when it finishes`);
+  if (db.itemsPendingFocus(collection.id).length === 0) return reply.status(200).send({ job: null, note: "Every item is already checked for this focus" });
+  requireLlm(user.id, "fast");
+  return reply.status(202).send({ job: startFocusCheck(collection.id, user.id) });
 });
 
 app.delete("/api/collections/:id", async (req) => {
@@ -439,7 +458,7 @@ app.get("/api/jobs/events", async (req, reply) => {
 
 app.post("/api/jobs/:id/stop", async (req, reply) => {
   const target = requireJob(idParam(req.params), currentUser(req));
-  const job = target.kind === "enrich" ? stopEnrichment(target.id) : stopCrawl(target.id);
+  const job = target.kind === "enrich" ? stopEnrichment(target.id) : target.kind === "focus" ? stopFocusCheck(target.id) : stopCrawl(target.id);
   if (!job) return reply.status(409).send({ error: "This job isn't running" });
   return reply.status(202).send(job);
 });
@@ -561,10 +580,11 @@ const shutdown = async () => {
   setTimeout(() => process.exit(0), 25_000).unref();
   log.info("Shutting down — pausing running crawls and lookups");
   let drained = false;
-  void Promise.allSettled([interruptCrawls(), interruptLookups()]).then(() => (drained = true));
+  void Promise.allSettled([interruptCrawls(), interruptLookups(), interruptFocusChecks()]).then(() => (drained = true));
   if (!(await waitUntil(() => drained, DRAIN_MS))) log.warn(`Shutdown: jobs still running after ${DRAIN_MS / 1000} s — recorded, they continue after the restart`);
   markUndrainedCrawls();
   markUndrainedLookups();
+  markUndrainedFocusChecks();
   await waitUntil(() => writesInFlight <= 0, WRITES_MS);
   // Then the rented servers (no pages left on them): they cost money while they run (leftovers are deleted on the next start).
   await burst?.close().catch(() => {});

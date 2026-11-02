@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import { COLLECTION_EXPORT_FORMAT, COLLECTIONS_EXPORT_FORMAT, type Collection, type CollectionExport, type GroupingMode, type CollectionGroup, type CollectionKind, type CollectionsExport, type Item, type Job, type JobKind, type LlmFunding, type LlmPurpose, type LookupStats, type PickCandidate, type Runner, type SpecKey, type SpecOrigin, type SpecSource, type SpecType, type SpecValue, type UsageSummary } from "@specharvest/shared";
+import { COLLECTION_EXPORT_FORMAT, COLLECTIONS_EXPORT_FORMAT, FOCUS_SPEC_KEY, type Collection, type CollectionExport, type GroupingMode, type CollectionGroup, type CollectionKind, type CollectionsExport, type Item, type Job, type JobKind, type LlmFunding, type LlmPurpose, type LookupStats, type PickCandidate, type Runner, type SpecKey, type SpecOrigin, type SpecSource, type SpecType, type SpecValue, type UsageSummary } from "@specharvest/shared";
 import { env } from "../config.ts";
 import { withSafeUrlPattern } from "../crawler/url-pattern.ts";
 
@@ -11,6 +11,8 @@ let db: DatabaseSync | null = null;
 export const RESTART_ERROR = "Interrupted by server restart";
 /** A lookup a restart cut off: what it found is kept, the search view offers the rest. */
 export const LOOKUP_RESTART_MESSAGE = "Stopped by a server restart — look up the rest again";
+/** A focus check a restart cut off: answers so far are kept, the collection offers the rest. */
+export const FOCUS_RESTART_MESSAGE = "Stopped by a server restart — apply the focus to the rest again";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS collections (
@@ -328,6 +330,10 @@ export function getDb(): DatabaseSync {
   addColumnIfMissing("jobs", "crash_restarts", "INTEGER NOT NULL DEFAULT 0");
   // Pick-first crawls: whether the walk that produced the job's candidates reached the end of the listing (gone-marking).
   addColumnIfMissing("jobs", "walk_complete", "INTEGER NOT NULL DEFAULT 0");
+  // Crawl focus: what a collection's crawls look for; per item, the focus it was checked against and the page's quote.
+  addColumnIfMissing("collections", "focus", "TEXT");
+  addColumnIfMissing("items", "focus_for", "TEXT");
+  addColumnIfMissing("items", "focus_note", "TEXT");
   // Jobs still running here were cut off without a clean pause (a crash, or a shutdown past its drain): crawls with
   // saved options can be resumed; lookups keep what they found ("Look up N more"); anything else can never finish.
   const now = Date.now();
@@ -335,6 +341,7 @@ export function getDb(): DatabaseSync {
     "UPDATE jobs SET status = 'interrupted', error = ?, finished_at = ?, crash_restarts = crash_restarts + 1 WHERE status IN ('queued','running') AND kind = 'crawl' AND params IS NOT NULL",
   ).run(RESTART_ERROR, now);
   db.prepare("UPDATE jobs SET status = 'stopped', message = ?, finished_at = ? WHERE status IN ('queued','running') AND kind = 'enrich'").run(LOOKUP_RESTART_MESSAGE, now);
+  db.prepare("UPDATE jobs SET status = 'stopped', message = ?, finished_at = ? WHERE status IN ('queued','running') AND kind = 'focus'").run(FOCUS_RESTART_MESSAGE, now);
   db.prepare("UPDATE jobs SET status = 'failed', error = ?, finished_at = ? WHERE status IN ('queued','running')").run(RESTART_ERROR, now);
   const admin = db.prepare("SELECT id FROM users WHERE role = 'admin' AND disabled_at IS NULL ORDER BY id LIMIT 1").get() as Row | undefined;
   if (admin) assignOrphansTo(Number(admin.id));
@@ -438,6 +445,8 @@ function toCollection(r: Row, viewer?: Viewer): Collection {
     kind: r.kind === "items" ? "items" : "listing",
     manualCount: Number(r.manual_count ?? 0),
     canEdit: !!viewer && (viewer.role === "admin" || ownerId === viewer.id),
+    focus: str(r.focus),
+    focusPendingCount: Number(r.focus_pending ?? 0),
   };
 }
 
@@ -445,7 +454,9 @@ const COLLECTION_SELECT = `SELECT c.*, u.email AS owner_email, (SELECT COUNT(*) 
   (SELECT COUNT(*) FROM items i WHERE i.collection_id = c.id AND i.manual = 1) AS manual_count,
   (SELECT COUNT(DISTINCT COALESCE(a.canonical, NULLIF(i.identity, ''), lower(trim(i.title)))) FROM items i
      LEFT JOIN identity_aliases a ON a.identity = i.identity WHERE i.collection_id = c.id AND i.gone_at IS NULL) AS product_count,
-  (SELECT COALESCE(SUM(l.cost), 0) FROM llm_usage l WHERE l.collection_id = c.id) AS llm_cost
+  (SELECT COALESCE(SUM(l.cost), 0) FROM llm_usage l WHERE l.collection_id = c.id) AS llm_cost,
+  (SELECT COUNT(*) FROM items i WHERE i.collection_id = c.id AND c.focus IS NOT NULL AND i.gone_at IS NULL
+     AND i.focus_for IS NOT c.focus AND COALESCE(i.raw_text, '') != '') AS focus_pending
   FROM collections c LEFT JOIN users u ON u.id = c.user_id`;
 
 
@@ -508,6 +519,65 @@ export function setCollectionShared(id: number, shared: boolean) {
 
 export function setCollectionGrouping(id: number, mode: GroupingMode) {
   getDb().prepare("UPDATE collections SET grouping = ? WHERE id = ?").run(mode, id);
+}
+
+/**
+ * Sets (or with null/"" clears) what the collection's crawls look for. A changed focus drops the items' answers to the
+ * old one (`matches_focus` and its quote): they answered a different question. Facts they found stay as specs.
+ * Returns false when it was already set to that.
+ */
+export function setCollectionFocus(id: number, focus: string | null): boolean {
+  const d = getDb();
+  const next = focus?.trim() || null;
+  const r = d.prepare("SELECT focus FROM collections WHERE id = ?").get(id) as Row | undefined;
+  if (!r || str(r.focus) === next) return false;
+  d.exec("BEGIN");
+  try {
+    d.prepare("UPDATE collections SET focus = ? WHERE id = ?").run(next, id);
+    d.prepare("UPDATE items SET specs = json_remove(specs, '$.' || json_quote(?)), focus_for = NULL, focus_note = NULL WHERE collection_id = ?").run(FOCUS_SPEC_KEY, id);
+    d.prepare("DELETE FROM spec_sources WHERE key = ? AND item_id IN (SELECT id FROM items WHERE collection_id = ?)").run(FOCUS_SPEC_KEY, id);
+    if (!next) d.prepare("DELETE FROM spec_keys WHERE collection_id = ? AND key = ?").run(id, FOCUS_SPEC_KEY);
+    recountSpecKeys(id);
+    d.exec("COMMIT");
+  } catch (err) {
+    d.exec("ROLLBACK");
+    throw err;
+  }
+  return true;
+}
+
+/** The collection's crawl focus (cheap — read per extracted item, so a change mid-crawl applies to the rest). */
+export function collectionFocus(id: number): string | null {
+  const r = getDb().prepare("SELECT focus FROM collections WHERE id = ?").get(id) as Row | undefined;
+  return str(r?.focus);
+}
+
+/** Active items of a collection not yet checked against its current focus, with the page text they were read from. */
+export function itemsPendingFocus(collectionId: number): Array<{ id: number; url: string; title: string; rawText: string }> {
+  const rows = getDb()
+    .prepare(
+      `SELECT i.id, i.url, i.title, i.raw_text FROM items i JOIN collections c ON c.id = i.collection_id
+       WHERE i.collection_id = ? AND c.focus IS NOT NULL AND i.gone_at IS NULL AND i.focus_for IS NOT c.focus AND COALESCE(i.raw_text, '') != ''
+       ORDER BY i.id`,
+    )
+    .all(collectionId) as Row[];
+  return rows.map((r) => ({ id: Number(r.id), url: String(r.url), title: String(r.title), rawText: String(r.raw_text) }));
+}
+
+/**
+ * Stores an item's answer to `focus` read from its own page text: `matches_focus` (removed when the page doesn't
+ * say), the quote, and the facts found as page specs (replacing any web-sourced value of the same key).
+ */
+export function setItemFocus(itemId: number, focus: string, answer: { match: boolean | null; note: string | null; specs: Record<string, SpecValue> }) {
+  const d = getDb();
+  const r = d.prepare("SELECT specs FROM items WHERE id = ?").get(itemId) as Row | undefined;
+  if (!r) return;
+  const specs = { ...parseJson<Record<string, SpecValue>>(r.specs, {}), ...answer.specs };
+  if (answer.match === null) delete specs[FOCUS_SPEC_KEY];
+  else specs[FOCUS_SPEC_KEY] = answer.match;
+  d.prepare("UPDATE items SET specs = ?, focus_for = ?, focus_note = ? WHERE id = ?").run(JSON.stringify(specs), focus, answer.note, itemId);
+  const keys = [...Object.keys(answer.specs), FOCUS_SPEC_KEY];
+  d.prepare(`DELETE FROM spec_sources WHERE item_id = ? AND key IN (${keys.map(() => "?").join(",")})`).run(itemId, ...keys);
 }
 
 export function saveDetection(id: number, detection: CollectionDetection | null, fromBrowser = false) {
@@ -641,7 +711,7 @@ export function exportCollection(id: number): CollectionExport {
     format: COLLECTION_EXPORT_FORMAT,
     version: 1,
     exportedAt: Date.now(),
-    collection: { name: c.name, startUrl: c.startUrl, host: c.host, createdAt: c.createdAt, grouping: c.grouping, kind: c.kind, detection: c.detection },
+    collection: { name: c.name, startUrl: c.startUrl, host: c.host, createdAt: c.createdAt, grouping: c.grouping, kind: c.kind, detection: c.detection, focus: c.focus },
     specKeys: (d.prepare("SELECT * FROM spec_keys WHERE collection_id = ? ORDER BY key").all(id) as Row[]).map((r) => {
       const { count: _, ...k } = toSpecKey(r);
       return k;
@@ -665,6 +735,8 @@ export function exportCollection(id: number): CollectionExport {
       checkedAt: num(r.checked_at),
       goneAt: num(r.gone_at),
       manual: Number(r.manual ?? 0) === 1,
+      focusFor: str(r.focus_for),
+      focusNote: str(r.focus_note),
     })),
     aliases: aliasRows.map((r) => ({ identity: String(r.identity), canonical: String(r.canonical) })),
     webFacts: factRows.map((r) => ({
@@ -729,9 +801,10 @@ function insertImportedCollection(data: CollectionExport, importer: Viewer): Imp
   const name = taken.has(data.collection.name) ? `${data.collection.name} (imported)` : data.collection.name;
   const collectionId = createCollection(name, data.collection.startUrl, data.collection.host, userId, data.collection.kind);
   const detection = withSafeUrlPattern(data.collection.detection);
-  d.prepare("UPDATE collections SET created_at = ?, grouping = ?, detection = ?, detection_imported = ? WHERE id = ?").run(
+  d.prepare("UPDATE collections SET created_at = ?, grouping = ?, focus = ?, detection = ?, detection_imported = ? WHERE id = ?").run(
     past(data.collection.createdAt),
     data.collection.grouping,
+    data.collection.focus || null,
     detection ? JSON.stringify(detection) : null,
     detection ? 1 : 0,
     collectionId,
@@ -740,7 +813,7 @@ function insertImportedCollection(data: CollectionExport, importer: Viewer): Imp
   for (const k of data.specKeys) keyStmt.run(collectionId, k.key, k.type, k.unit, k.label, k.example, k.origin);
   const itemStmt = d.prepare(
     `INSERT OR IGNORE INTO items (collection_id, url, title, price, currency, main_image, description, identity, specs, raw_text, indexed_at,
-       card_hash, content_hash, content_text, last_seen_at, checked_at, gone_at, manual, imported) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+       card_hash, content_hash, content_text, last_seen_at, checked_at, gone_at, manual, focus_for, focus_note, imported) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
   );
   const sourceStmt = d.prepare("INSERT OR REPLACE INTO spec_sources (item_id, key, origin, source_url, confidence, fetched_at) VALUES (?, ?, ?, ?, ?, ?)");
   const itemIds: number[] = [];
@@ -748,6 +821,7 @@ function insertImportedCollection(data: CollectionExport, importer: Viewer): Imp
     const res = itemStmt.run(
       collectionId, it.url, it.title, it.price, it.currency, it.mainImage, it.description, it.identity, JSON.stringify(it.specs), it.rawText,
       past(it.indexedAt), it.cardHash, it.contentHash, it.contentText, past(it.lastSeenAt), past(it.checkedAt), past(it.goneAt), it.manual ? 1 : 0,
+      it.focusFor, it.focusNote,
     );
     if (!res.changes) continue; // duplicate URL in the file
     const itemId = Number(res.lastInsertRowid);
@@ -786,6 +860,9 @@ export interface ItemInput {
   manual?: boolean;
   /** Read in the user's own browser (extension) rather than by the server. */
   fromBrowser?: boolean;
+  /** The collection focus this extraction answered (null: extracted without one), and its quote from the page. */
+  focusFor?: string | null;
+  focusNote?: string | null;
 }
 
 export function upsertItem(input: ItemInput): number {
@@ -805,16 +882,16 @@ export function upsertItem(input: ItemInput): number {
     d.prepare(
       `UPDATE items SET title=?, price=?, currency=?, main_image=?, description=?, identity=?, specs=?, raw_text=?, indexed_at=?,
          card_hash=COALESCE(?, card_hash), content_hash=COALESCE(?, content_hash), content_text=COALESCE(?, content_text), last_seen_at=?, checked_at=?, gone_at=NULL,
-         imported=0, from_browser=?, manual=MAX(manual, ?) WHERE id=?`,
-    ).run(input.title, input.price, input.currency, input.mainImage, input.description, input.identity, JSON.stringify(specs), input.rawText, now, input.cardHash ?? null, input.contentHash ?? null, input.contentText ?? null, now, now, input.fromBrowser ? 1 : 0, input.manual ? 1 : 0, id);
+         imported=0, from_browser=?, manual=MAX(manual, ?), focus_for=?, focus_note=? WHERE id=?`,
+    ).run(input.title, input.price, input.currency, input.mainImage, input.description, input.identity, JSON.stringify(specs), input.rawText, now, input.cardHash ?? null, input.contentHash ?? null, input.contentText ?? null, now, now, input.fromBrowser ? 1 : 0, input.manual ? 1 : 0, input.focusFor ?? null, input.focusNote ?? null, id);
     return id;
   }
   const res = d
     .prepare(
-      `INSERT INTO items (collection_id, url, title, price, currency, main_image, description, identity, specs, raw_text, indexed_at, card_hash, content_hash, content_text, last_seen_at, checked_at, manual, from_browser)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO items (collection_id, url, title, price, currency, main_image, description, identity, specs, raw_text, indexed_at, card_hash, content_hash, content_text, last_seen_at, checked_at, manual, from_browser, focus_for, focus_note)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(input.collectionId, input.url, input.title, input.price, input.currency, input.mainImage, input.description, input.identity, JSON.stringify(input.specs), input.rawText, now, input.cardHash ?? null, input.contentHash ?? null, input.contentText ?? null, now, now, input.manual ? 1 : 0, input.fromBrowser ? 1 : 0);
+    .run(input.collectionId, input.url, input.title, input.price, input.currency, input.mainImage, input.description, input.identity, JSON.stringify(input.specs), input.rawText, now, input.cardHash ?? null, input.contentHash ?? null, input.contentText ?? null, now, now, input.manual ? 1 : 0, input.fromBrowser ? 1 : 0, input.focusFor ?? null, input.focusNote ?? null);
   return Number(res.lastInsertRowid);
 }
 
@@ -972,10 +1049,11 @@ function toItem(r: Row, sources: Record<string, SpecSource> = {}): Item {
     sources,
     indexedAt: Number(r.indexed_at),
     goneAt: r.gone_at == null ? null : Number(r.gone_at),
+    focusNote: str(r.focus_note),
   };
 }
 
-const ITEM_COLUMNS = "id, collection_id, url, title, price, currency, main_image, description, identity, specs, indexed_at, gone_at";
+const ITEM_COLUMNS = "id, collection_id, url, title, price, currency, main_image, description, identity, specs, indexed_at, gone_at, focus_note";
 
 export function getItemsByIds(ids: number[]): Item[] {
   if (ids.length === 0) return [];

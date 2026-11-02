@@ -288,6 +288,30 @@ during the extract phase continue with the same picks. *Discard* (stop while `pi
 then walks the listing again and offers a new pick. While a crawl waits for a pick, a new crawl of the same
 collection returns that job instead.
 
+## Crawl focus
+
+*Focus* (optional, `focus` on `POST /api/crawl`, max 500 characters) says what you are looking for in particular,
+e.g. "first owner cars". It is saved on the collection (`collections.focus`), so every later re-crawl and added
+item uses it; the collection's *Focus* button changes or removes it (`PATCH /api/collections/:id` with `focus`,
+`""` clears it).
+
+- **Extraction**: the prompt gets a *Crawl focus* section. The model states the facts that answer it as ordinary
+  specs (`first_owner`, `previous_owners_count`, … through the key registry, so filters and search see them) and
+  answers `focus: { match, evidence }`. The answer is stored as the boolean spec **`matches_focus`** ("Matches
+  focus" in filters; absent when the page doesn't say) and the quote as `items.focus_note`, shown on the item card
+  and in its details. Nothing is dropped: every ad is still saved.
+- **Reuse**: with a focus, an ad is never copied from another collection's extraction (that one didn't answer the
+  focus); it is read by the LLM.
+- **Changing the focus** drops the items' answers to the old one (`matches_focus` and the quote; facts already
+  found stay). Each item remembers which focus it was answered for (`items.focus_for`); the collection shows
+  how many active items aren't checked against the current one.
+- **Apply focus to N saved items** (`POST /api/collections/:id/apply-focus`, paid, only on click): a `focus` job
+  sends each such item's stored page text with the focus to the fast model (purpose `focus`, one small call per
+  item) — no page is loaded again. Progress, cost and stop work like other jobs; a stop or restart keeps the
+  answers so far, and the button offers the rest. It refuses while a crawl of the collection runs.
+
+The focus travels with exports (`collection.focus`, per item `focusFor` / `focusNote`).
+
 ## Whose browser loads the pages
 
 A crawl's `runner` is `server` (the server's headless Chrome, default) or

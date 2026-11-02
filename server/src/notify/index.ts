@@ -107,13 +107,13 @@ function formatUsd(n: number): string {
 
 export function jobEvent(job: Job): NotifyEvent | null {
   if (job.status !== "done" && job.status !== "failed") return null;
-  if (job.kind === "crawl") return job.status === "done" ? "crawlDone" : "crawlFailed";
+  if (job.kind === "crawl" || job.kind === "focus") return job.status === "done" ? "crawlDone" : "crawlFailed";
   return job.status === "done" ? "enrichDone" : "enrichFailed";
 }
 
 export function buildMessage(job: Job, collection: string | null, publicUrl = env.PUBLIC_URL): NotifyMessage {
   const event = jobEvent(job)!;
-  const what = job.kind === "crawl" ? "Crawl" : "Web lookup";
+  const what = job.kind === "crawl" ? "Crawl" : job.kind === "focus" ? "Focus check" : "Web lookup";
   const outcome = job.status === "done" ? "done" : "failed";
   const title = `${what} ${outcome}${collection ? ` · ${collection}` : ""}`;
   const detail = job.status === "failed" ? (job.error ?? job.message ?? "Unknown error") : (job.message ?? "Finished");

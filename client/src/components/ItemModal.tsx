@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import type { Item, ItemDetail, SpecKey } from "@specharvest/shared";
 import { humanizeKey, specLabel } from "@specharvest/shared";
 import { api, safeUrl } from "../lib/api.ts";
-import { formatPrice, GlobeIcon, GoneBadge, SpecRow } from "./ItemCard.tsx";
+import { FocusBadge, formatPrice, GlobeIcon, GoneBadge, SpecRow } from "./ItemCard.tsx";
 
 interface Props {
   item: Item;
@@ -73,6 +73,8 @@ export function ItemModal({ item, keys, highlightKeys, onClose }: Props) {
           <div className="grid gap-4 sm:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
             {safeUrl(item.mainImage) && <img src={safeUrl(item.mainImage)} alt="" referrerPolicy="no-referrer" className="w-full rounded-lg object-cover" />}
             <div>
+              <FocusBadge item={item} className="mb-2" />
+              {item.focusNote && <p className="mb-2 text-sm italic text-stone-600 dark:text-stone-400">“{item.focusNote}”</p>}
               {item.description && <p className="text-sm text-stone-700 dark:text-stone-300">{item.description}</p>}
               <a href={safeUrl(item.url)} target="_blank" rel="noreferrer" className="btn-primary btn-sm mt-3">
                 Open original listing ↗
