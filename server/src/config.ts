@@ -44,6 +44,8 @@ const envSchema = z.object({
   OPENROUTER_WEB_MODEL: optionalNonEmpty(),
   // Stronger model for registry-wide judgement calls (merging duplicate keys).
   OPENROUTER_SMART_MODEL: z.string().default("google/gemini-2.5-flash"),
+  // Tried in order when the chosen OpenRouter model fails or is rate-limited upstream (comma list; "" = none).
+  OPENROUTER_FALLBACK_MODELS: z.string().default("openai/gpt-4.1-nano"),
   OPENROUTER_MAX_RETRIES: z.coerce.number().default(3),
   OPENROUTER_TIMEOUT_MS: z.coerce.number().default(90_000),
   // Optional management key: only used to read the account credit balance.
@@ -177,6 +179,7 @@ export const env = {
   OPENROUTER_EXTRACTION_MODEL: parsed.OPENROUTER_EXTRACTION_MODEL ?? parsed.OPENROUTER_MODEL,
   // Web lookups need reliable tool use + JSON — default to the smart model.
   OPENROUTER_WEB_MODEL: parsed.OPENROUTER_WEB_MODEL ?? parsed.OPENROUTER_SMART_MODEL,
+  OPENROUTER_FALLBACK_MODELS: parsed.OPENROUTER_FALLBACK_MODELS.split(",").map((m) => m.trim()).filter(Boolean),
   DATA_DIR: path.resolve(ROOT, parsed.DATA_DIR),
   PUBLIC_URL: parsed.PUBLIC_URL?.replace(/\/+$/, ""),
   SESSION_COOKIE_SECURE:

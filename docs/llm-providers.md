@@ -102,6 +102,16 @@ limit, and their own keys are never limited. 0 turns the limit off.
 - Each `llm_usage` row records `provider` and `funding` (`own` = your key,
   `platform` = server key). The $ menu splits your spend that way.
 
+## When a model is busy
+
+Shared models get rate-limited upstream now and then ("temporarily rate-limited upstream"). Each call is
+retried `OPENROUTER_MAX_RETRIES` times. On OpenRouter, the models in `OPENROUTER_FALLBACK_MODELS` (default
+`openai/gpt-4.1-nano`, blank = none) are tried next. This applies to the server key and to users' own OpenRouter
+keys. The call is billed and recorded as the model that answered.
+
+If every model is still busy, the request fails with a readable `503` ("The AI model … is busy … — try again in a
+minute") instead of an internal error. In a crawl only that item fails, and the crawl goes on.
+
 ## When a key stops working
 
 A rejected key (401/403) or an account without credit (402, `insufficient_quota`)

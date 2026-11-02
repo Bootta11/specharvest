@@ -160,7 +160,7 @@ export function classifyLlmError(err: unknown): { kind: LlmErrorKind; status?: n
   if (status === 404 || /model.{0,40}(not found|does not exist|not available|not supported|unknown)|no such model|invalid model|no endpoints found/.test(text)) {
     return { kind: "model", status, detail };
   }
-  if (status === 429) return { kind: "rate", status, detail };
+  if (status === 429 || /rate.?limit|too many requests|resource.?exhausted|overloaded/.test(text)) return { kind: "rate", status, detail };
   return { kind: "other", status, detail };
 }
 
@@ -177,6 +177,20 @@ export class LlmCredentialError extends Error {
     super(message);
     this.name = "LlmCredentialError";
     this.statusCode = funding === "own" ? 400 : 503;
+  }
+}
+
+/**
+ * The provider is rate-limited or overloaded even after the retries: a readable 503 instead of a 500. Transient, so
+ * jobs count it as that item's failure and go on. No Retry-After: the client would take it for a server restart.
+ */
+export class LlmBusyError extends Error {
+  readonly statusCode = 503;
+  constructor(r: Pick<ResolvedModel, "funding" | "modelId" | "provider">) {
+    super(
+      `The AI model (${r.modelId}) is busy at ${r.provider.label} — try again in a minute.${r.funding === "own" ? ` If it keeps happening, pick another model in ${SETTINGS_PATH}.` : ""}`,
+    );
+    this.name = "LlmBusyError";
   }
 }
 
@@ -272,6 +286,10 @@ async function complete(r: ResolvedModel, system: string, prompt: string, option
     }
     if (kind === "model" && r.keyOwner !== null) setKeyError(r.keyOwner, r.provider.id, `Model ${r.modelId}: ${detail}`);
     tokens = ", failed";
+    if (kind === "rate") {
+      log.warn(`${options.purpose} on ${r.provider.id}/${r.modelId}: rate-limited after retries — ${detail}`);
+      throw new LlmBusyError(r);
+    }
     throw err;
   } finally {
     const ms = performance.now() - t0;

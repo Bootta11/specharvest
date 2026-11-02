@@ -13,7 +13,7 @@ process.env.DATA_DIR = dataDir;
 // The resolver is swapped for a mock model; everything else (ledger, pricing) is real.
 vi.mock("./resolve.ts", async (importOriginal) => ({ ...(await importOriginal<typeof import("./resolve.ts")>()), resolveModel: vi.fn() }));
 const { resolveModel } = await import("./resolve.ts");
-const { askForJson, classifyLlmError, countWebSearches, extractJson, LlmCredentialError, llmBlocked, salvageJson } = await import("./client.ts");
+const { askForJson, classifyLlmError, countWebSearches, extractJson, LlmBusyError, LlmCredentialError, llmBlocked, salvageJson } = await import("./client.ts");
 const { withLlmContext } = await import("./usage.ts");
 const { parseModelsDev, setPriceTable } = await import("./pricing.ts");
 const { getProvider } = await import("./providers.ts");
@@ -139,6 +139,35 @@ describe("askForJson", () => {
     expect(llmBlocked(err)).toBe(true);
     expect((err as Error).message).toBe("Your OpenAI key was rejected — fix it in Settings → LLM provider.");
     expect((err as { statusCode: number }).statusCode).toBe(400);
+  });
+
+  it("turns an upstream rate limit into a readable 503 that doesn't stop jobs", async () => {
+    const model = new MockLanguageModelV4({
+      modelId: "google/gemini-2.5-flash-lite",
+      doGenerate: async () => {
+        throw new APICallError({
+          message: "[Google AI Studio] google/gemini-2.5-flash-lite is temporarily rate-limited upstream. Please retry shortly",
+          url: "https://openrouter.ai/api/v1/chat/completions",
+          requestBodyValues: {},
+          statusCode: 429,
+          isRetryable: false,
+        });
+      },
+    });
+    useModel(model, "openrouter");
+    const err = await askForJson(schema, "s", "u", { purpose: "search" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LlmBusyError);
+    expect(llmBlocked(err)).toBe(false);
+    expect((err as Error).message).toBe("The AI model (google/gemini-2.5-flash-lite) is busy at OpenRouter — try again in a minute.");
+    expect((err as { statusCode: number }).statusCode).toBe(503);
+  });
+});
+
+describe("OpenRouter fallback models", () => {
+  it("are sent after the chosen model, without repeating it", () => {
+    const options = getProvider("openrouter")!.options!;
+    expect(options("fast", "google/gemini-2.5-flash-lite")).toEqual({ openrouter: { models: ["google/gemini-2.5-flash-lite", "openai/gpt-4.1-nano"] } });
+    expect(options("fast", "openai/gpt-4.1-nano")).toBeUndefined();
   });
 });
 

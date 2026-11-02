@@ -91,6 +91,11 @@ export const PROVIDERS: ProviderDef[] = [
         }),
       };
     },
+    // A model rate-limited or down upstream: OpenRouter moves on to the fallbacks (billed and recorded as the model that answered).
+    options: (_tier, modelId) => {
+      const fallbacks = env.OPENROUTER_FALLBACK_MODELS.filter((m) => m !== modelId);
+      return fallbacks.length ? { openrouter: { models: [modelId, ...fallbacks] } } : undefined;
+    },
     exactCost: (meta) => num((meta?.openrouter as { usage?: { cost?: unknown } } | undefined)?.usage?.cost),
   },
   {
