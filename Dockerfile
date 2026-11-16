@@ -42,7 +42,7 @@ RUN --mount=type=secret,id=bundle_key,required=false \
   # LanceDB's Linux binary ships with debug symbols (~390 MB -> ~255 MB stripped).
   && strip --strip-unneeded node_modules/@lancedb/lancedb-linux-*/*.node
 
-FROM gcr.io/distroless/nodejs24-debian13:nonroot@sha256:cb606325b7ec4af55462cb0b424a53b452a5b4a894ffe841fcf1048d216fb9f8
+FROM gcr.io/distroless/nodejs24-debian13:nonroot@sha256:6abfcb367ebc291572c774c1592a986be2ab26a2486f73093401327495a5962a
 WORKDIR /app
 ARG GIT_SHA=""
 ENV NODE_ENV=production \
