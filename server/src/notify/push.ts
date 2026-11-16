@@ -1,4 +1,4 @@
-import webpush from "web-push";
+import * as webpush from "web-push";
 import { env } from "../config.ts";
 import * as db from "../db/sqlite.ts";
 import { createLogger, errorMessage } from "../lib/logger.ts";
