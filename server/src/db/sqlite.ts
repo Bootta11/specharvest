@@ -1557,6 +1557,27 @@ export function createJob(kind: JobKind, collectionId: number | null, params?: u
   return getJob(Number(res.lastInsertRowid))!;
 }
 
+/**
+ * What earlier crawls of a collection reached, so a re-crawl without its own limits can cover the whole listing
+ * again: the largest page/item limits a listing crawl of it asked for, the most listing pages one walked, and
+ * how many of its items are still listed.
+ */
+export function recrawlHints(collectionId: number): { maxPages: number; maxItems: number; pagesSeen: number; activeItems: number } {
+  const rows = getDb().prepare("SELECT params, pages_seen FROM jobs WHERE collection_id = ? AND kind = 'crawl'").all(collectionId) as Row[];
+  let maxPages = 0;
+  let maxItems = 0;
+  let pagesSeen = 0;
+  for (const r of rows) {
+    const p = parseJson<{ maxPages?: unknown; maxItems?: unknown; kind?: unknown } | null>(r.params, null);
+    if (p?.kind === "item") continue;
+    if (typeof p?.maxPages === "number") maxPages = Math.max(maxPages, p.maxPages);
+    if (typeof p?.maxItems === "number") maxItems = Math.max(maxItems, p.maxItems);
+    pagesSeen = Math.max(pagesSeen, Number(r.pages_seen) || 0);
+  }
+  const activeItems = Number((getDb().prepare("SELECT COUNT(*) AS n FROM items WHERE collection_id = ? AND gone_at IS NULL").get(collectionId) as Row).n);
+  return { maxPages, maxItems, pagesSeen, activeItems };
+}
+
 /** The options a job was started with (crawls only; null for jobs from before they were saved). */
 export function getJobParams<T>(id: number): T | null {
   const r = getDb().prepare("SELECT params FROM jobs WHERE id = ?").get(id) as Row | undefined;

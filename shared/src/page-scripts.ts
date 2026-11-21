@@ -170,18 +170,47 @@ function collectCards(args: { selector: string; pattern: string }): Array<{ url:
   return out;
 }
 
-/** The "next page" control: whether it exists (and isn't disabled), and its href when it is a real link. */
-function nextControl(args: { selector: string }): { found: boolean; href: string | null } {
-  let el: Element | null = null;
+/**
+ * The "next page" control: whether it exists (and isn't disabled), and its href when it is a real link.
+ * When the selector matches several elements (e.g. `.pagination a` matches "← Previous" as well as "Next →"),
+ * the one that looks most like "next" wins: rel="next", next-like text/labels/classes, and a link to a page not
+ * in `visited` (listing pages already walked) beat previous-like ones.
+ */
+function nextControl(args: { selector: string; visited?: string[] }): { found: boolean; href: string | null } {
+  let els: Element[] = [];
   try {
-    el = document.querySelector(args.selector);
+    els = Array.from(document.querySelectorAll(args.selector));
   } catch {
     return { found: false, href: null };
   }
-  if (!el || el.hasAttribute("disabled") || el.getAttribute("aria-disabled") === "true") return { found: false, href: null };
-  const a = (el.tagName === "A" ? el : el.closest("a")) as HTMLAnchorElement | null;
+  const here = location.href.split("#")[0];
+  const visited = new Set((args.visited ?? []).map((u) => u.split("#")[0]));
+  visited.add(here);
+  const NEXT = /\bnext\b|\bnewer\b|sljede[cć]|slede[cć]|naprijed|napred|dalje|weiter|n[aä]chste|suivant|siguiente|successiv|pr[oó]xim|volgende|następn|další|^\s*(›|»|→|>|>>)\s*$|(›|»|→)\s*$/i;
+  const PREV = /\bprev|previous|\bolder\b|\bback\b|prethodn|nazad|zurück|vorherig|précédent|anterior|precedent|vorige|poprzedn|předchozí|^\s*(‹|«|←|<|<<)|^\s*(‹|«|←)/i;
+  let best: { el: Element; a: HTMLAnchorElement | null; score: number } | null = null;
+  els.forEach((el, i) => {
+    const a = (el.tagName === "A" ? el : el.closest("a")) as HTMLAnchorElement | null;
+    const disabled = el.hasAttribute("disabled") || el.getAttribute("aria-disabled") === "true" || /\bdisabled\b/i.test(String(el.className));
+    const rel = `${el.getAttribute("rel") ?? ""} ${a?.getAttribute("rel") ?? ""}`;
+    const label = [el.textContent, el.getAttribute("aria-label"), el.getAttribute("title"), a?.getAttribute("aria-label"), a?.getAttribute("title")].filter(Boolean).join(" ");
+    const cls = `${String(el.className)} ${a ? String(a.className) : ""}`;
+    let score = -i * 0.01; // ties: first match, as before
+    if (/\bnext\b/i.test(rel)) score += 10;
+    if (/\bprev/i.test(rel)) score -= 10;
+    if (NEXT.test(label) || /next/i.test(cls)) score += 5;
+    if (PREV.test(label) || /prev/i.test(cls)) score -= 5;
+    const href = a?.href ? a.href.split("#")[0] : null;
+    if (href && /^https?:/.test(href) && visited.has(href) && href !== here) score -= 8;
+    if (disabled) score -= 50;
+    if (!best || score > best.score) best = { el, a, score };
+  });
+  const pick = best as { el: Element; a: HTMLAnchorElement | null; score: number } | null;
+  // The best match looks like "previous" or leads back to a walked page (the last page's pager): no next page.
+  if (!pick || pick.score < -1) return { found: false, href: null };
+  const a = pick.a;
   // href="#" (Bootstrap-Vue pagers and the like) points back at this page: a JS control to click, not a link to follow.
-  const samePage = !!a?.href && a.href.split("#")[0] === location.href.split("#")[0];
+  const samePage = !!a?.href && a.href.split("#")[0] === here;
   return { found: true, href: a?.href && /^https?:/.test(a.href) && !samePage ? a.href : null };
 }
 

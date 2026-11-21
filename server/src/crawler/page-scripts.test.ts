@@ -101,6 +101,27 @@ describe("page scripts", () => {
     expect(runSerialized("nextControl", { selector: ".self" })).toEqual({ found: true, href: null });
   });
 
+  it("nextControl: picks \"next\" over \"previous\" when the selector matches both", () => {
+    const pager = (p: number) =>
+      `<nav class="pagination">${p > 1 ? `<a href="/list?stranica=${p - 1}">← Prethodna</a>` : ""}<span>Stranica ${p} od 27</span>${p < 27 ? `<a href="/list?stranica=${p + 1}">Sljedeća →</a>` : ""}</nav>`;
+    setPage("https://shop.example/list?stranica=2", pager(2));
+    expect(runSerialized("nextControl", { selector: ".pagination a" })).toEqual({ found: true, href: "https://shop.example/list?stranica=3" });
+    setPage("https://shop.example/list?stranica=1", pager(1));
+    expect(runSerialized("nextControl", { selector: ".pagination a" })).toEqual({ found: true, href: "https://shop.example/list?stranica=2" });
+    // The last page only links back: no next page.
+    setPage("https://shop.example/list?stranica=27", pager(27));
+    expect(runSerialized("nextControl", { selector: ".pagination a", visited: ["https://shop.example/list?stranica=26"] })).toEqual({ found: false, href: null });
+  });
+
+  it("nextControl: rel=next and unvisited pages win; an unlabeled link still counts", () => {
+    setPage("https://shop.example/list?p=3", `<a class="pg" href="/list?p=2">2</a><a class="pg" rel="next" href="/list?p=4">4</a>`);
+    expect(runSerialized("nextControl", { selector: ".pg" })).toEqual({ found: true, href: "https://shop.example/list?p=4" });
+    setPage("https://shop.example/list?p=3", `<a class="pg" href="/list?p=2">2</a><a class="pg" href="/list?p=4">4</a>`);
+    expect(runSerialized("nextControl", { selector: ".pg", visited: ["https://shop.example/list?p=2"] })).toEqual({ found: true, href: "https://shop.example/list?p=4" });
+    setPage("https://shop.example/list", `<a class="go" href="/list?p=2">»</a>`);
+    expect(runSerialized("nextControl", { selector: ".go" })).toEqual({ found: true, href: "https://shop.example/list?p=2" });
+  });
+
   it("cardsChangedSince: true only when a new card link shows up", () => {
     setPage("https://shop.example/list", `<a class="card" href="/item/1">1</a>`);
     expect(runSerialized("cardsChangedSince", { selector: ".card", prev: ["https://shop.example/item/1"] })).toBe(false);

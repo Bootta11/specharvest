@@ -163,6 +163,8 @@ export async function walkListing(page: PageDriver, startUrl: string, d: Collect
 
   // "pages": follow the next link's href, or click a JS-only next button and wait for new items.
   let stale = 0;
+  // Listing pages already walked (by URL), so a pager's "← Previous" link isn't taken for "next".
+  const visited = new Set([startUrl.split("#")[0]]);
   for (let pageNum = 1; pageNum <= opts.maxPages; pageNum++) {
     const current = await collectItemCards(page, d);
     const fresh = take(current);
@@ -174,10 +176,18 @@ export async function walkListing(page: PageDriver, startUrl: string, d: Collect
     if (full() || pageNum === opts.maxPages) return done(false);
     if (!d.nextSelector) return done(true);
 
-    const nextHref = await page.run("nextControl", { selector: d.nextSelector }).catch(() => ({ found: false, href: null }));
+    const nextHref = await page.run("nextControl", { selector: d.nextSelector, visited: [...visited] }).catch(() => ({ found: false, href: null }));
     if (!nextHref.found) return done(true);
 
     if (nextHref.href) {
+      const target = nextHref.href.split("#")[0];
+      // Back to a page already walked (an older extension build picks the first pager link, which can be
+      // "← Previous"): stop instead of walking in circles, without claiming the whole listing was seen.
+      if (visited.has(target)) {
+        opts.onNotice?.(`The next-page link leads back to a page already walked (${target}) — stopping there`, true);
+        return done(false);
+      }
+      visited.add(target);
       await gotoAndSettle(page, nextHref.href);
     } else {
       await page.click(d.nextSelector).catch(() => {});

@@ -79,6 +79,14 @@ Walkers collect item URLs (deduped, tracking params stripped) until
 "next" link that only points back at the same page (`href="#"`, as in
 Bootstrap-Vue pagers) counts as such a button: it is clicked, not followed.
 
+When the saved next selector matches several pager links (e.g. `.pagination a` matches both
+"← Previous" and "Next →"), the walker takes the one that looks most like "next": `rel="next"`,
+next-like text, labels or classes (also in the local languages, e.g. *Sljedeća*), and a link to a
+page it hasn't walked yet. If the best match still looks like "previous" or leads back to a walked
+page, there is no next page. A link that does lead back to a walked page (older extension
+builds pick the first match) stops the walk without counting it as complete, so no items are
+marked gone.
+
 Items are **indexed while the walk goes on**: each listing page's new cards are
 sorted right away (new → extract, existing → change check) and queued for the
 detail workers, so the first results appear after page 1 instead of after the
@@ -145,7 +153,12 @@ that is why both the stronger model and the name check exist. Run manually with
 ## Re-crawls: change detection
 
 Everything scraped stays in SQLite, so a re-crawl only spends LLM calls on
-listings that are **new or changed**. The `mode` of a crawl decides how saved
+listings that are **new or changed**.
+
+A re-crawl that sets no `maxPages` / `maxItems` (the *Re-crawl* button) covers at least
+as much as earlier crawls of the collection: the largest limits one asked for, the most
+listing pages one walked (+ 2), and every item still listed (+ 20 % for new ones), never
+below the defaults and never above your [limits](api.md). The `mode` of a crawl decides how saved
 items are re-checked:
 
 | Mode | Saved item handling | Browser visits | LLM calls |

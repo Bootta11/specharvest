@@ -158,6 +158,18 @@ function crawlLimits(user: AuthUser) {
     : { maxPages: Math.min(env.MAX_PAGES_CAP, CRAWL_MAX_PAGES), maxItems: Math.min(env.MAX_ITEMS_CAP, CRAWL_MAX_ITEMS) };
 }
 
+/**
+ * Limits for re-crawling a collection when the request names none: at least the defaults, the largest limits an
+ * earlier crawl of it asked for, the most pages one walked and every item still listed (plus room for new ones),
+ * within the user's caps. Undefined = the defaults are enough.
+ */
+function recrawlLimits(collectionId: number, limits: { maxPages: number; maxItems: number }): { maxPages?: number; maxItems?: number } {
+  const h = db.recrawlHints(collectionId);
+  const items = Math.min(limits.maxItems, Math.max(env.MAX_ITEMS, h.maxItems, Math.ceil(h.activeItems * 1.2)));
+  const pages = Math.min(limits.maxPages, Math.max(env.MAX_PAGES, h.maxPages, h.pagesSeen + 2));
+  return { maxPages: pages > env.MAX_PAGES ? pages : undefined, maxItems: items > env.MAX_ITEMS ? items : undefined };
+}
+
 // Per user: which LLM provider/model each tier runs on for them (own key or server key), see llm/resolve.ts.
 app.get("/api/config", async (req) => {
   const user = currentUser(req);
@@ -388,11 +400,13 @@ app.post("/api/crawl", userLimit(10), async (req, reply) => {
   if (body.maxItems !== undefined && body.maxItems > limits.maxItems) throw httpError(400, `At most ${limits.maxItems} items per crawl`);
   // Shops are public sites: the crawler never opens loopback/LAN/metadata addresses (lib/net-guard.ts).
   await assertPublicUrl(body.url, strictPolicy());
+  // A re-crawl without its own limits covers as much as earlier crawls of the collection did.
+  const recrawl = body.collectionId && body.kind !== "item" ? recrawlLimits(body.collectionId, limits) : null;
   const params = {
     ...body,
     // The configured defaults may be above this user's cap.
-    maxPages: body.maxPages ?? (env.MAX_PAGES > limits.maxPages ? limits.maxPages : undefined),
-    maxItems: body.maxItems ?? (env.MAX_ITEMS > limits.maxItems ? limits.maxItems : undefined),
+    maxPages: body.maxPages ?? recrawl?.maxPages ?? (env.MAX_PAGES > limits.maxPages ? limits.maxPages : undefined),
+    maxItems: body.maxItems ?? recrawl?.maxItems ?? (env.MAX_ITEMS > limits.maxItems ? limits.maxItems : undefined),
   };
   return reply.status(202).send(startCrawl(params, user.id, body.collectionId));
 });

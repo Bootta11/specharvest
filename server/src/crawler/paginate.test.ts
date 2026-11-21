@@ -76,4 +76,37 @@ describe("walkListing by next control", () => {
     expect(result.items.size).toBe(41);
     expect(result.complete).toBe(true);
   });
+
+  it("doesn't walk back through a pager's \"previous\" link", async () => {
+    // An older extension build returns the first pager link — on page 2 that is "← Previous" (page 1).
+    let current = 1;
+    const gone: number[] = [];
+    const notices: string[] = [];
+    const page = {
+      runner: "server",
+      async goto(url: string) {
+        current = Number(new URL(url).searchParams.get("page")) || 1;
+        gone.push(current);
+        return { status: 200 };
+      },
+      async run(name: string) {
+        if (name === "collectCards") return range((current - 1) * 30 + 1, current * 30).map((i) => ({ url: `https://93.184.216.34/item/${i}`, cardText: `Item ${i}` }));
+        if (name === "nextControl") return { found: true, href: `${BASE}?page=${current === 1 ? 2 : 1}` };
+        if (name === "scrollStep") return true;
+        return name === "isBotChallenge" ? false : null;
+      },
+      async click() {},
+      async waitForNetworkIdle() {},
+    } as PageDriver;
+    const result = await walkListing(page, `${BASE}?page=1`, { ...detection, paginationType: "pages", pageParam: null, nextSelector: ".pagination a" }, {
+      maxPages: 10,
+      maxItems: 500,
+      onPage: () => {},
+      onNotice: (m) => notices.push(m),
+    });
+    expect(gone).toEqual([1, 2]);
+    expect(result.items.size).toBe(60);
+    expect(result.complete).toBe(false);
+    expect(notices).toHaveLength(1);
+  });
 });

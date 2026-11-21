@@ -197,3 +197,15 @@ describe("item-URL pattern repair", () => {
     expect(db.findDetectionForHost("ws.example", 0)).toBeNull();
   });
 });
+
+describe("re-crawl hints", () => {
+  it("takes the largest listing-crawl limits, the most pages walked and the items still listed", () => {
+    const c = db.createCollection("shop", "https://shop.example/r", "shop.example");
+    db.updateJob(db.createJob("crawl", c, { url: "https://shop.example/r", maxPages: 40, maxItems: 900 }).id, { pagesSeen: 27 });
+    db.updateJob(db.createJob("crawl", c, { url: "https://shop.example/r" }).id, { pagesSeen: 4 });
+    db.createJob("crawl", c, { url: "https://shop.example/r/item", kind: "item", maxItems: 5000 });
+    db.createJob("crawl", c);
+    for (const n of [1, 2, 3]) db.upsertItem(item(c, `https://shop.example/r/${n}`));
+    expect(db.recrawlHints(c)).toEqual({ maxPages: 40, maxItems: 900, pagesSeen: 27, activeItems: 3 });
+  });
+});
