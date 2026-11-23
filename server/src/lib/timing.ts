@@ -127,6 +127,7 @@ export function finishJobTiming(jobId: number): string | null {
     ["embed", "embedding"],
     ["consolidate", "key merging"],
     ["group", "product grouping"],
+    ["probe", "checking missing items"],
   ]) {
     const v = b(name);
     if (v.count) parts.push(`${label} ${v.count > 1 ? `${v.count}× ` : ""}${fmtMs(v.ms)}`);

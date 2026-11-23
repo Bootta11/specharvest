@@ -525,6 +525,12 @@ function logPage(driver: PuppeteerDriver | null, t: PageTiming) {
 export class BlockedPageError extends Error {}
 /** A bot-protection interstitial (Cloudflare, DataDome…) rather than an HTTP error. */
 export class BotWallError extends BlockedPageError {}
+/** The site answered with an HTTP error status. */
+export class HttpStatusError extends BlockedPageError {
+  constructor(readonly status: number, url: string) {
+    super(`HTTP ${status} from ${url}`);
+  }
+}
 
 const NAVIGATION_TIMEOUT_MS = 60_000;
 /**
@@ -573,7 +579,7 @@ export async function gotoAndSettle(page: PageDriver, url: string, opts: { scrol
       if (await page.run("isBotChallenge").catch(() => false)) {
         throw new BotWallError(`Bot protection challenge on ${new URL(url).host} — ${page.runner === "server" ? "try running it in your browser, or the proxy" : "open the site in Chrome once and solve the check"}`);
       }
-      if (status != null && status >= 400) throw new BlockedPageError(`HTTP ${status} from ${url}`);
+      if (status != null && status >= 400) throw new HttpStatusError(status, url);
       if (opts.scroll !== false) await scrollFullPage(page);
       await page.run("flattenShadowDom").catch(() => {});
       lap("scroll");

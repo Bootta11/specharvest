@@ -21,6 +21,7 @@ import { prepareBrowserRunner } from "../extension/driver.ts";
 import { BlockedPageError, BotWallError, gotoAndSettle, waitForStableText, withPage, type WithPageOptions } from "./browser.ts";
 import { FatalDriverError } from "./driver.ts";
 import { detectListingStructure, tighterItemUrlPattern } from "./detect.ts";
+import { confirmsGone, PROBE_SAMPLE, probeItem, sampleUrls, type ProbeResult } from "./gone.ts";
 import { changedTokens, fingerprint, removedShare } from "./fingerprint.ts";
 import { collectItemUrls, walkListing, type ItemCard } from "./paginate.ts";
 import { snapshotDetail, toDetailSnapshot, type DetailSnapshot, type OtherListingHints } from "./sanitize.ts";
@@ -415,7 +416,7 @@ export function continueHeldCrawls(userId: number) {
   }
 }
 
-/** A walk that would mark more than this share of a collection as gone is treated as a glitch. */
+/** A walk that would mark more than this share of a collection as gone is only trusted once some of the missing pages prove dead. */
 const MAX_GONE_SHARE = 0.5;
 /** A re-check missing more than this share of the item's known words is reloaded once before trusting it. */
 const PARTIAL_RENDER_SHARE = 0.1;
@@ -820,15 +821,46 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
   if (extracted + reused > 0) await timed("consolidate", () => consolidateKeys(jobId, collectionId));
   if (extracted + reused > 0) await timed("group", () => groupProducts(jobId, collectionId));
 
+  /** Opens a few of the missing items' pages: true when they're dead, so the items are gone rather than overlooked. */
+  const missingAreGone = async (missing: string[], active: number): Promise<boolean> => {
+    const sample = sampleUrls(missing, PROBE_SAMPLE);
+    jobLog(jobId, `${missing.length} of ${active} saved items were not on the listing — opening ${sample.length} of their pages to see whether they still exist`);
+    const results: ProbeResult[] = [];
+    for (const itemUrl of sample) {
+      throwIfStopped(signal);
+      patchJob(jobId, { message: `Checking whether ${missing.length} missing items are really gone (${results.length + 1}/${sample.length})` });
+      try {
+        results.push(await withPage((page) => probeItem(page, itemUrl, seen), pageOpts));
+      } catch (err) {
+        throwIfStopped(signal);
+        results.push("unknown");
+        // The browser itself is gone: the other pages would fail the same way.
+        if (err instanceof FatalDriverError) break;
+      }
+      // One page still there settles it.
+      if (results.at(-1) === "alive") break;
+    }
+    throwIfStopped(signal);
+    const n = (r: ProbeResult) => results.filter((x) => x === r).length;
+    const confirmed = confirmsGone(results, missing.length);
+    const found = `${n("dead")} no longer exist, ${n("alive")} still there, ${n("unknown")} unclear`;
+    jobLog(jobId, confirmed ? `Missing items checked: ${found}` : `Missing items checked: ${found} — not marking them gone`, confirmed ? "info" : "warn");
+    return confirmed;
+  };
+
   // ---- 4. Listings missing from a complete walk are gone (sold/removed) ----
   // A pick's unpicked cards were on the listing too: seen, never gone.
   const seen: ReadonlySet<string> | ReadonlyMap<string, string> = picks ? picks.seen : walk.items;
   let gone = 0;
+  let kept = 0;
   if (walk.complete) {
-    const active = [...known.values()].filter((f) => f.goneAt === null).length;
-    const missing = [...known.keys()].filter((u) => !seen.has(u) && known.get(u)!.goneAt === null).length;
-    if (missing > 0 && active >= 4 && missing / active > MAX_GONE_SHARE) {
-      jobLog(jobId, `${missing} of ${active} saved items were not on the listing — too many to trust, not marking them gone`, "warn");
+    // Hand-added items aren't on the listing and are never marked gone.
+    const active = [...known].filter(([, f]) => f.goneAt === null && !f.manual).map(([u]) => u);
+    const missing = active.filter((u) => !seen.has(u));
+    // A walk gone wrong, or a shop that really changed all its addresses? The missing pages themselves tell.
+    const suspicious = missing.length > 0 && active.length >= 4 && missing.length / active.length > MAX_GONE_SHARE;
+    if (suspicious && !(await timed("probe", () => missingAreGone(missing, active.length)))) {
+      kept = missing.length;
     } else {
       gone = db.markGone(collectionId, seen.keys());
       if (gone) jobLog(jobId, `${gone} items are no longer listed — marked as gone`);
@@ -837,7 +869,7 @@ async function runCrawl(jobId: number, collectionId: number, url: string, req: C
     jobLog(jobId, "Listing walk stopped at a limit — not checking for removed items");
   }
 
-  const summary = `${newCount} new, ${changed} changed, ${unchanged} unchanged, ${gone} gone, ${failed} failed${skipped ? `, ${skipped} handled before the stop` : ""}`;
+  const summary = `${newCount} new, ${changed} changed, ${unchanged} unchanged, ${gone} gone, ${failed} failed${kept ? `, ${kept} not on the listing (kept)` : ""}${skipped ? `, ${skipped} handled before the stop` : ""}`;
   const status = indexed === 0 && walk.items.size > 0 ? "failed" : "done";
   logJobTiming(jobId);
   patchJob(jobId, {

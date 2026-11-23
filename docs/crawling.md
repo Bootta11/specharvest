@@ -211,9 +211,21 @@ page, nothing new, no next control). It is not complete when it stops at
 `maxPages`/`maxItems` or a page fails to load. After a complete walk, saved items
 that were not seen get `gone_at` and are hidden from search, `/api/items`
 and web enrichment unless `includeGone` is set (UI: *Show sold/removed*).
-If more than half of a collection would be marked gone at once, the job
-assumes a glitch and marks nothing. An item that reappears is un-gone
-automatically.
+An item that reappears is un-gone automatically.
+
+If more than half of a collection would be marked gone at once, the walk may have gone
+wrong, or the shop may have moved to new addresses (every product then shows up as new).
+The job opens up to 8 random missing items' pages to tell (`crawler/gone.ts`, no LLM):
+
+- **dead**: 404/410, or a redirect to an item this walk found.
+- **still there**: a page at its own address. One of these is enough to keep everything.
+- **unclear**: blocked, server error, timeout, redirect anywhere else.
+
+With none still there and at least 5 dead (all of them when fewer are missing), the missing
+items are marked gone. Otherwise they are kept, and the job's summary says
+*N not on the listing (kept)*. A shop that answers removed items with a normal page (a
+"soft 404") or sends them to its home page is therefore kept. Hand-added items don't count
+towards the share.
 
 ## Where the time goes
 
